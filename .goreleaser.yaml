@@ -5,18 +5,16 @@ before:
     - go mod tidy
 
 builds:
-  # Linux only, matching Makefile's own `cross` target (and, more
-  # fundamentally, internal/checks/system: it reads /proc/loadavg,
-  # /proc/meminfo, /proc/uptime, and syscall.Statfs, none of which
-  # exist on Darwin or Windows). darwin/windows used to be listed here
-  # too but were never actually valid -- nothing ever build-tested
-  # them until a real release build did, which is exactly how this
-  # got caught: syscall.Statfs/Statfs_t don't exist in Windows's
-  # syscall package at all, so a windows_amd64 build fails outright,
-  # and even a hypothetical darwin build would compile but crash at
-  # runtime the moment a "system" job actually ran, since /proc
-  # doesn't exist there either. Nodes are Linux boxes; this matches
-  # that reality instead of a boilerplate default nobody had verified.
+  # internal/checks/system used to read /proc and call syscall.Statfs
+  # directly, which only exists on Linux -- that's what broke the
+  # v0.1 release build for windows_amd64 (syscall.Statfs_t undefined)
+  # and would have crashed at runtime on darwin (no /proc). It's since
+  # been rewritten on top of gopsutil, which abstracts each OS's real
+  # stats source (Linux /proc, macOS sysctl/host_statistics, Windows
+  # perf counters/WMI) behind one cgo-free API, so the same code now
+  # genuinely builds and runs correctly on all three. Makefile's
+  # `cross` target build-tests this exact matrix before a tag is ever
+  # pushed.
   - id: radar-node
     main: ./cmd/radar-node
     binary: radar-node
@@ -28,6 +26,8 @@ builds:
       - -s -w -X main.version={{.Version}}
     goos:
       - linux
+      - darwin
+      - windows
     goarch:
       - amd64
       - arm64
@@ -35,6 +35,9 @@ builds:
 archives:
   - id: radar-node
     formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
 
