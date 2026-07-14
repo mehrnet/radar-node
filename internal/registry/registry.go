@@ -5,7 +5,7 @@
 // icmp/http/system, is loaded the same way, as a module. What makes
 // the shipped six feel built-in is only that Default() loads them
 // from fixtures embedded in the binary itself (see defaults/*.yaml);
-// `radar-mehrnet init` materializes those same files to disk for
+// `radar-node init` materializes those same files to disk for
 // anyone who wants to inspect, fork, or override them.
 package registry
 
@@ -22,7 +22,7 @@ import (
 var defaultsFS embed.FS
 
 // DefaultFiles is the embedded default fixtures, exposed for
-// `radar-mehrnet init` to write out to a real directory.
+// `radar-node init` to write out to a real directory.
 var DefaultFiles = mustSub(defaultsFS, "defaults")
 
 func mustSub(fsys embed.FS, dir string) fs.FS {

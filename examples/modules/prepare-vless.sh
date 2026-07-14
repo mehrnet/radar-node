@@ -2,9 +2,9 @@
 set -e
 PARAMS_JSON="$1"
 SOCKS_PORT="$2"
-# Pinned engine binaries live at /opt/radar-mehrnet/engines/<engine>/<version>/
+# Pinned engine binaries live at /opt/radar-node/engines/<engine>/<version>/
 # per the installer layout; override for local testing.
-XRAY_BIN="${XRAY_BIN:-/opt/radar-mehrnet/engines/xray/26.3.27/xray}"
+XRAY_BIN="${XRAY_BIN:-/opt/radar-node/engines/xray/26.3.27/xray}"
 
 # server_host/server_port/uuid are required; everything else is
 # optional and maps 1:1 onto a standard vless:// link's query string

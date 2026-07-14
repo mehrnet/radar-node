@@ -54,7 +54,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		Body: &icmp.Echo{
 			ID:   os.Getpid() & 0xffff,
 			Seq:  seq,
-			Data: []byte("radar-mehrnet"),
+			Data: []byte("radar-node"),
 		},
 	}
 	wb, err := msg.Marshal(nil)

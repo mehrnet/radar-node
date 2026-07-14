@@ -1,4 +1,4 @@
-// Package agent implements the `radar-mehrnet agent` loop. Unlike
+// Package agent implements the `radar-node agent` loop. Unlike
 // the original design, the server never tells this agent what's due
 // -- it syncs job *definitions* incrementally (GET /v1/nodes/events)
 // into a local cache, decides for itself when something is due using

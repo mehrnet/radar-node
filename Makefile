@@ -1,12 +1,12 @@
 MODULE   := github.com/mehrnet/radar-node
-BIN      := radar-mehrnet
+BIN      := radar-node
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
 .PHONY: build test lint fmt cross clean install
 
 build:
-	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/radar-mehrnet
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/radar-node
 
 test:
 	go test ./...
@@ -23,11 +23,11 @@ fmt:
 # Quick local sanity check across the two target platforms before
 # pushing a tag -- the real release matrix lives in .goreleaser.yaml.
 cross:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/radar-mehrnet
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/radar-mehrnet
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/radar-node
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/radar-node
 
 install:
-	CGO_ENABLED=0 go install -trimpath -ldflags "$(LDFLAGS)" ./cmd/radar-mehrnet
+	CGO_ENABLED=0 go install -trimpath -ldflags "$(LDFLAGS)" ./cmd/radar-node
 
 clean:
 	rm -f $(BIN)

@@ -69,7 +69,7 @@ Verified end-to-end during development, twice:
    internet-facing VLESS+REALITY server (`security=reality`, a
    Google-camouflaged SNI, and a REALITY public key/fingerprint --
    the config shape actual VPN providers hand out today) via
-   `radar-mehrnet probe --type xray-vless`: `ok: true`,
+   `radar-node probe --type xray-vless`: `ok: true`,
    `http_code: 200`, ~780ms round trip through the real REALITY
    handshake, and a deliberately wrong UUID against the same server
    correctly came back `ok: false`. This is the case the original
@@ -79,11 +79,11 @@ Verified end-to-end during development, twice:
 
 ```sh
 # 1. Fetch pinned engine binaries (adjust versions/arch as needed)
-mkdir -p /opt/radar-mehrnet/engines/xray/26.3.27 /opt/radar-mehrnet/engines/singbox/1.13.14
+mkdir -p /opt/radar-node/engines/xray/26.3.27 /opt/radar-node/engines/singbox/1.13.14
 curl -L -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
-unzip -j /tmp/xray.zip xray -d /opt/radar-mehrnet/engines/xray/26.3.27/
+unzip -j /tmp/xray.zip xray -d /opt/radar-node/engines/xray/26.3.27/
 curl -L -o /tmp/singbox.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.13.14/sing-box-1.13.14-linux-amd64.tar.gz
-tar xzf /tmp/singbox.tar.gz -C /tmp && mv /tmp/sing-box-1.13.14-linux-amd64/sing-box /opt/radar-mehrnet/engines/singbox/1.13.14/
+tar xzf /tmp/singbox.tar.gz -C /tmp && mv /tmp/sing-box-1.13.14-linux-amd64/sing-box /opt/radar-node/engines/singbox/1.13.14/
 
 # 2. Start a relay to test against (this is the thing a real user's
 #    own VLESS/Trojan server would be -- here we run one locally)
@@ -93,15 +93,15 @@ cat > /tmp/vless-server.json <<EOF
   "settings":{"clients":[{"id":"$UUID"}],"decryption":"none"}}],
  "outbounds":[{"protocol":"freedom"}]}
 EOF
-/opt/radar-mehrnet/engines/xray/26.3.27/xray run -c /tmp/vless-server.json &
+/opt/radar-node/engines/xray/26.3.27/xray run -c /tmp/vless-server.json &
 
 # 3. Deploy the module + its prepare script where the YAML expects them
-mkdir -p /etc/radar-mehrnet/modules.d
-cp xray-vless.yaml prepare-vless.sh /etc/radar-mehrnet/modules.d/
+mkdir -p /etc/radar-node/modules.d
+cp xray-vless.yaml prepare-vless.sh /etc/radar-node/modules.d/
 
 # 4. Run a check through it
-radar-mehrnet probe http://example.com/ \
-  --type xray-vless --modules-dir /etc/radar-mehrnet/modules.d \
+radar-node probe http://example.com/ \
+  --type xray-vless --modules-dir /etc/radar-node/modules.d \
   --param server_host=127.0.0.1 --param server_port=28443 --param uuid="$UUID"
 ```
 

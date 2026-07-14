@@ -134,7 +134,7 @@ func writeConfig(config map[string]any) (string, func(), error) {
 	if err != nil {
 		return "", nil, err
 	}
-	f, err := os.CreateTemp("", "radar-mehrnet-engine-config-*.json")
+	f, err := os.CreateTemp("", "radar-node-engine-config-*.json")
 	if err != nil {
 		return "", nil, err
 	}

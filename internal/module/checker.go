@@ -155,7 +155,7 @@ func (c Checker) runStep(ctx context.Context, step Step, ec execContext) ([]byte
 }
 
 func writeParamsJSON(params map[string]any) (string, func(), error) {
-	f, err := os.CreateTemp("", "radar-mehrnet-params-*.json")
+	f, err := os.CreateTemp("", "radar-node-params-*.json")
 	if err != nil {
 		return "", nil, err
 	}

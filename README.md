@@ -1,6 +1,6 @@
 # radar-node
 
-`radar-mehrnet` is the agent binary for [radar](https://radar.mehrnet.com)
+`radar-node` is the agent binary for [radar](https://radar.mehrnet.com)
 (mehrnet's network-monitoring service): a single Go binary that either runs a
 one-shot probe from the CLI, or runs as a long-lived agent that syncs job
 definitions from `radar-api`, executes them on schedule, and reports results
@@ -11,8 +11,8 @@ Every prober -- including the six built-ins (`tcp`, `udp`, `dns`, `icmp`,
 "native vs. custom module" distinction: a module either calls a built-in Go
 implementation in-process (`action:`, zero subprocess overhead) or shells out
 to an external binary (`run:`, e.g. `xray`/`sing-box`). The six built-ins are
-embedded in the binary and load automatically; `radar-mehrnet init` writes
-them out as real, editable files. In this sense radar-mehrnet isn't
+embedded in the binary and load automatically; `radar-node init` writes
+them out as real, editable files. In this sense radar-node isn't
 fundamentally a network prober -- it's a generic scheduled data-transform
 runner (request in, structured response out, on a schedule, billed and
 stored) that ships with networking as its first set of fixtures.
@@ -20,7 +20,7 @@ stored) that ships with networking as its first set of fixtures.
 ## Build
 
 ```sh
-make build      # -> ./radar-mehrnet
+make build      # -> ./radar-node
 make test
 make lint
 make cross       # sanity build for linux/amd64 + linux/arm64
@@ -32,18 +32,18 @@ Requires Go 1.26+. Release builds (tagged) are handled by `.goreleaser.yaml`.
 ## CLI usage
 
 ```sh
-radar-mehrnet probe <target> [flags]
-radar-mehrnet agent [flags]
-radar-mehrnet init [-C path]
+radar-node probe <target> [flags]
+radar-node agent [flags]
+radar-node init [-C path]
 ```
 
 ### `probe` -- one-shot check runner
 
 ```sh
-radar-mehrnet probe 1.1.1.1:443 --type tcp --param tls=true
-radar-mehrnet probe https://example.com --type http --count 3 --format table
-radar-mehrnet probe 8.8.8.8 --type icmp --count 5
-radar-mehrnet probe self --type system
+radar-node probe 1.1.1.1:443 --type tcp --param tls=true
+radar-node probe https://example.com --type http --count 3 --format table
+radar-node probe 8.8.8.8 --type icmp --count 5
+radar-node probe self --type system
 ```
 
 | Flag | Meaning |
@@ -59,7 +59,7 @@ radar-mehrnet probe self --type system
 ### `agent` -- long-lived worker
 
 ```sh
-radar-mehrnet agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s3cr3t
+radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s3cr3t
 ```
 
 | Flag | Meaning |
@@ -80,7 +80,7 @@ mechanics.
 ### `init` -- scaffold editable module files
 
 ```sh
-radar-mehrnet init -C /etc/radar-mehrnet/modules.d
+radar-node init -C /etc/radar-node/modules.d
 ```
 
 Writes the six embedded default module files (`tcp.yaml`, `udp.yaml`,

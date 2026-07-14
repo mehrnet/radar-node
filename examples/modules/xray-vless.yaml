@@ -2,8 +2,8 @@ name: xray-vless
 engine: xray
 engine_version: "26.3.27"
 prepare:
-  # Deployed alongside this file, e.g. /etc/radar-mehrnet/modules.d/prepare-vless.sh
-  command: ["/bin/sh", "/etc/radar-mehrnet/modules.d/prepare-vless.sh", "{{params_json}}", "{{alloc_port}}"]
+  # Deployed alongside this file, e.g. /etc/radar-node/modules.d/prepare-vless.sh
+  command: ["/bin/sh", "/etc/radar-node/modules.d/prepare-vless.sh", "{{params_json}}", "{{alloc_port}}"]
 run:
   command: ["curl", "--silent", "--max-time", "5",
             "--socks5-hostname", "127.0.0.1:{{alloc_port}}",

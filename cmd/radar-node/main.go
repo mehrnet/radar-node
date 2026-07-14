@@ -1,4 +1,4 @@
-// Command radar-mehrnet is the radar-node CLI. `probe` is a
+// Command radar-node is the radar-node CLI. `probe` is a
 // standalone one-shot check runner; `agent` fetches jobs from
 // radar-api, runs them through the same Checkers, and reports
 // results back -- see README.md for the wire contract.
@@ -46,24 +46,24 @@ func main() {
 	case "init":
 		err = runInit(os.Args[2:])
 	case "version", "-v", "--version":
-		fmt.Println("radar-mehrnet", version)
+		fmt.Println("radar-node", version)
 		return
 	case "-h", "--help", "help":
 		usage()
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "radar-mehrnet: unknown command %q\n\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "radar-node: unknown command %q\n\n", os.Args[1])
 		usage()
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "radar-mehrnet:", err)
+		fmt.Fprintln(os.Stderr, "radar-node:", err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `radar-mehrnet - config-driven, multi-protocol probe agent
+	fmt.Fprint(os.Stderr, `radar-node - config-driven, multi-protocol probe agent
 
 Every prober -- tcp/udp/dns/icmp/http/system included -- is a YAML
 module; there is no separate "native" mechanism. The six built-ins
@@ -71,9 +71,9 @@ are embedded in this binary and load automatically; "init" writes
 them out as real, editable files.
 
 Usage:
-  radar-mehrnet probe <target> [flags]
-  radar-mehrnet agent [flags]
-  radar-mehrnet init [-C path]
+  radar-node probe <target> [flags]
+  radar-node agent [flags]
+  radar-node init [-C path]
 
 probe flags:
   --type string       tcp | udp | dns | icmp | http | system | <module name> (default "tcp")
@@ -104,12 +104,12 @@ init flags:
   --force                 overwrite files that already exist at path
 
 Examples:
-  radar-mehrnet probe 1.1.1.1:443 --type tcp --param tls=true
-  radar-mehrnet probe https://example.com --type http --count 3 --format table
-  radar-mehrnet probe 8.8.8.8 --type icmp --count 5
-  radar-mehrnet probe self --type system
-  radar-mehrnet init -C /etc/radar-mehrnet/modules.d
-  radar-mehrnet agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s3cr3t --modules-dir /etc/radar-mehrnet/modules.d
+  radar-node probe 1.1.1.1:443 --type tcp --param tls=true
+  radar-node probe https://example.com --type http --count 3 --format table
+  radar-node probe 8.8.8.8 --type icmp --count 5
+  radar-node probe self --type system
+  radar-node init -C /etc/radar-node/modules.d
+  radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s3cr3t --modules-dir /etc/radar-node/modules.d
 `)
 }
 
@@ -257,7 +257,7 @@ func runInit(args []string) error {
 		dest := filepath.Join(path, e.Name())
 		if !force {
 			if _, err := os.Stat(dest); err == nil {
-				fmt.Fprintf(os.Stderr, "radar-mehrnet init: skipping %s (already exists, use --force to overwrite)\n", dest)
+				fmt.Fprintf(os.Stderr, "radar-node init: skipping %s (already exists, use --force to overwrite)\n", dest)
 				continue
 			}
 		}

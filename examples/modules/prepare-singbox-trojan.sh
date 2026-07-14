@@ -2,9 +2,9 @@
 set -e
 PARAMS_JSON="$1"
 SOCKS_PORT="$2"
-# Pinned engine binaries live at /opt/radar-mehrnet/engines/<engine>/<version>/
+# Pinned engine binaries live at /opt/radar-node/engines/<engine>/<version>/
 # per the installer layout; override for local testing.
-SINGBOX_BIN="${SINGBOX_BIN:-/opt/radar-mehrnet/engines/singbox/1.13.14/sing-box}"
+SINGBOX_BIN="${SINGBOX_BIN:-/opt/radar-node/engines/singbox/1.13.14/sing-box}"
 
 SERVER_HOST=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['server_host'])" "$PARAMS_JSON")
 SERVER_PORT=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['server_port'])" "$PARAMS_JSON")
