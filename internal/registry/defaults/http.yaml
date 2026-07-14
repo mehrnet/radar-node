@@ -1,0 +1,19 @@
+name: http
+action: http_request
+request:
+  - name: method
+    type: string
+    required: false
+response:
+  - name: http_code
+    type: number
+  - name: dns_ms
+    type: number
+  - name: connect_ms
+    type: number
+  - name: tls_ms
+    type: number
+  - name: ttfb_ms
+    type: number
+  - name: bytes
+    type: number

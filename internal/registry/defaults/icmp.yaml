@@ -1,0 +1,2 @@
+name: icmp
+action: icmp_ping

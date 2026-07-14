@@ -1,0 +1,15 @@
+name: tcp
+action: tcp_connect
+request:
+  - name: tls
+    type: bool
+    required: false
+  - name: sni
+    type: string
+    required: false
+  - name: insecure
+    type: bool
+    required: false
+response:
+  - name: tls_version
+    type: string

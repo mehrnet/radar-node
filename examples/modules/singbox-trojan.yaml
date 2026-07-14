@@ -1,0 +1,14 @@
+name: singbox-trojan
+engine: sing-box
+engine_version: "1.13.14"
+prepare:
+  # Deployed alongside this file, e.g. /etc/radar-mehrnet/modules.d/prepare-singbox-trojan.sh
+  command: ["/bin/sh", "/etc/radar-mehrnet/modules.d/prepare-singbox-trojan.sh", "{{params_json}}", "{{alloc_port}}"]
+run:
+  command: ["curl", "--silent", "--max-time", "5",
+            "--socks5-hostname", "127.0.0.1:{{alloc_port}}",
+            "-o", "/dev/null",
+            "-w", "{\"latency_ms\": %{time_total}, \"http_code\": %{http_code}}",
+            "{{target}}"]
+collect:
+  format: writeout_json

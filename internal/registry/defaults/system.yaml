@@ -1,0 +1,23 @@
+name: system
+action: system_stats
+response:
+  - name: load1
+    type: number
+  - name: load5
+    type: number
+  - name: load15
+    type: number
+  - name: mem_total_bytes
+    type: number
+  - name: mem_available_bytes
+    type: number
+  - name: mem_used_percent
+    type: number
+  - name: disk_total_bytes
+    type: number
+  - name: disk_free_bytes
+    type: number
+  - name: disk_used_percent
+    type: number
+  - name: uptime_seconds
+    type: number

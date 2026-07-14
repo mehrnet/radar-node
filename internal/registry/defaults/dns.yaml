@@ -1,0 +1,16 @@
+name: dns
+action: dns_query
+request:
+  - name: record
+    type: string
+    required: false
+  - name: server
+    type: string
+    required: false
+response:
+  - name: record
+    type: string
+  # answers is a list of resolved addresses -- the bespoke string/
+  # number/bool schema has no array type, so it's left undeclared
+  # here rather than mis-typed; still present in a real result's
+  # Extra exactly as before.
