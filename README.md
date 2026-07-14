@@ -67,7 +67,6 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--api-url` | `radar-api` base URL (required) |
 | `--api-key` | `"node_id:secret"` bearer token (required) |
 | `--api-proxy` | proxy for the agent's own `radar-api` traffic (`http://`, `https://`, `socks5://`, `socks5h://`) |
-| `--events-interval` | how often to sync job definitions (default `30s`) |
 | `--scheduler-tick` | how often to check cached jobs for due-ness (default `2s`) |
 | `--concurrency` | max probes running at once (default `64`) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
@@ -335,8 +334,10 @@ directly to its local cache with no follow-up lookup of any kind.
 
 #### Event
 
-One entry from the job-definition change log a node syncs incrementally
-via `GET /v1/nodes/events`.
+One entry from the job-definition change log a node syncs incrementally,
+folded into `POST /v1/nodes/heartbeat`'s `since_seq` request field and
+`events` response field (there is no longer a separate polling
+endpoint for this -- see [Local scheduling](#local-scheduling)).
 
 ```jsonc
 {
@@ -427,9 +428,9 @@ attempt that failed -- no probe/action was ever attempted in this case:
 
 A node's local scheduling decisions must agree with the server's notion of
 time, not the node's own possibly-drifted wall clock. Every
-`GET /v1/nodes/events` response includes `server_time`; the node measures
-its own request/response round trip around that call and derives an
-offset using a standard NTP-style midpoint correction:
+`POST /v1/nodes/heartbeat` response includes `server_time`; the node
+measures its own request/response round trip around that call and derives
+an offset using a standard NTP-style midpoint correction:
 
 ```
 midpoint  = sent_at + (received_at - sent_at) / 2
@@ -442,18 +443,25 @@ All due-ness comparisons (`starts_at`, `ends_at`, last-run +
 server's clock reads an hour behind this node's, the node's schedule
 should behave exactly as if its own clock also read an hour behind --
 there is no negotiation, the server's clock always wins. The offset is
-refreshed on every events-sync call, so it self-corrects if server or
-node clock drifts over a long-running process.
+refreshed on every heartbeat, so it self-corrects if server or node clock
+drifts over a long-running process.
 
 ### Local scheduling
 
 There is no `window_seconds` fetch parameter and no server-side "due"
-computation. Instead, a node runs three independent loops:
+computation. Instead, a node runs two independent loops:
 
-1. **Events sync** -- periodically (and once eagerly at startup) calls
-   `GET /v1/nodes/events?since_seq=<cursor>`, applies every event to its
-   local job cache in order, advances its cursor, and updates its clock
-   offset from `server_time`.
+1. **Heartbeat** -- periodic (interval suggested by the server, see
+   below), and also where job-definition sync happens: each call sends
+   `since_seq=<cursor>` and the response's `events` array is applied to
+   the local job cache in order, advancing the cursor, same as a
+   separate polling endpoint used to do. This used to be two independent
+   loops on their own fixed timers (a heartbeat and an events poll),
+   each paying its own request/auth round trip for what's almost always
+   zero new information -- merged into one since there's no freshness
+   lost by piggybacking job-sync on a call that already happens this
+   often. Also updates the clock offset from `server_time` on every
+   call.
 2. **Scheduler tick** -- on a short, fixed local interval, scans the
    cached jobs and executes whichever are due per `node_now()`. A job is
    marked as run (its last-run timestamp updated) *before* the probes
@@ -463,8 +471,6 @@ computation. Instead, a node runs three independent loops:
    entirely ("a job with a short interval or a `once` schedule fires
    twice because two ticks raced to claim it while it was still
    running").
-3. **Heartbeat** -- unchanged in shape from the previous protocol
-   version, see below.
 
 A job that's never resulted because a node crashed or lost network
 mid-run is not explicitly retried or reconciled by the server -- for
@@ -495,31 +501,6 @@ Response:
   "node_secret": "9f2c...redacted...a41d"   // shown once, never retrievable again
 }
 ```
-
-#### `GET /v1/nodes/events?since_seq=0`
-
-Polled by the node on its own cadence (see
-[Local scheduling](#local-scheduling)). Returns every job-definition
-change for this node with `seq > since_seq`, oldest first, capped at 1000
-events per call -- a node with a large backlog simply calls again with
-the new cursor until it catches up. Node auth identifies which node is
-asking; no account context needed in the request.
-
-Response:
-```jsonc
-{
-  "spec_version": 1,
-  "server_time": "2026-07-12T10:00:03.123Z",
-  "events": [
-    { "seq": 41, "event_type": "created", "job": { /* JobSnapshot */ } },
-    { "seq": 42, "event_type": "updated", "job": { /* JobSnapshot */ } }
-  ]
-}
-```
-
-An empty `events` array is a normal, common response -- it just means
-nothing changed since `since_seq`. The node still uses `server_time` from
-every response (empty or not) to refresh its clock offset.
 
 #### `POST /v1/nodes/results`
 
@@ -568,14 +549,17 @@ already in flight when the status changed.
 
 #### `POST /v1/nodes/heartbeat`
 
-Periodic (interval suggested by the API, see response), also the
-content-addressed module sync handshake. `probers` is a compact
-inventory, one `"prober_id:file_hash"` entry per loaded module --
-mirrors the `"node_id:secret"` token convention elsewhere in this
-protocol. There is no `kind`/`engine`/`engine_version` here anymore;
-that metadata is attached to the hash itself server-side (see
-`POST /v1/nodes/modules`), populated once rather than repeated on
-every heartbeat.
+Periodic (interval suggested by the API, see response) -- the content-
+addressed module sync handshake, job-definition sync, and clock
+calibration are all folded into this single call rather than three
+separate polls. `probers` is a compact inventory, one
+`"prober_id:file_hash"` entry per loaded module -- mirrors the
+`"node_id:secret"` token convention elsewhere in this protocol. There is
+no `kind`/`engine`/`engine_version` here anymore; that metadata is
+attached to the hash itself server-side (see `POST /v1/nodes/modules`),
+populated once rather than repeated on every heartbeat. `since_seq` is
+this node's job-event cursor (0 for a full resync) -- see
+[Event](#event) and [Local scheduling](#local-scheduling).
 
 Request:
 ```jsonc
@@ -587,6 +571,7 @@ Request:
     "tcp:6985e90a888a115f28bbc83ae985f30a399e9ca9ab162a3af734bbd1ac2e64f",
     "xray-vless:a1b2c3d4e5f6..."
   ],
+  "since_seq": 42,
   "sent_at": "2026-07-12T10:00:00.000Z"
 }
 ```
@@ -596,9 +581,18 @@ Response (200 -- every reported hash is already known):
 {
   "spec_version": 1,
   "node_status": "active",           // "active" | "suspended" | "deactivated" | "inactive_billing"
-  "heartbeat_interval_seconds": 30
+  "heartbeat_interval_seconds": 30,
+  "server_time": "2026-07-12T10:00:00.123Z",
+  "events": [
+    { "seq": 43, "event_type": "created", "job": { /* JobSnapshot */ } }
+  ]
 }
 ```
+
+An empty (or omitted) `events` array is a normal, common response -- it
+just means nothing changed since `since_seq`. The node uses `server_time`
+from every response to refresh its clock offset regardless of whether
+`events` was empty.
 
 Response (409 -- one or more hashes aren't recognized yet):
 ```jsonc

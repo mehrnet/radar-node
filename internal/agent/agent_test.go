@@ -30,30 +30,6 @@ func newFakeAPI(target string) *fakeAPI {
 
 func (f *fakeAPI) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/nodes/events", func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		resp := wire.EventsResponse{SpecVersion: 1, ServerTime: time.Now().UTC().Format(time.RFC3339Nano)}
-		if !f.served {
-			f.served = true
-			resp.Events = []wire.Event{{
-				Seq:       1,
-				EventType: "created",
-				Job: wire.JobSnapshot{
-					ID:           "job_test",
-					Target:       f.target,
-					Prober:       "tcp",
-					Mode:         "warm",
-					ProbeCount:   2,
-					TimeoutMs:    1000,
-					ScheduleType: "once",
-					Status:       wire.JobStatusActive,
-					StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
-				},
-			}}
-		}
-		json.NewEncoder(w).Encode(resp)
-	})
 	mux.HandleFunc("/v1/nodes/results", func(w http.ResponseWriter, r *http.Request) {
 		var req wire.ResultsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -74,11 +50,33 @@ func (f *fakeAPI) handler() http.Handler {
 		})
 	})
 	mux.HandleFunc("/v1/nodes/heartbeat", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(wire.HeartbeatResponse{
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		resp := wire.HeartbeatResponse{
 			SpecVersion:           1,
 			NodeStatus:            wire.NodeStatusActive,
 			HeartbeatIntervalSecs: 3600, // long enough to not interfere with the test
-		})
+			ServerTime:            time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		if !f.served {
+			f.served = true
+			resp.Events = []wire.Event{{
+				Seq:       1,
+				EventType: "created",
+				Job: wire.JobSnapshot{
+					ID:           "job_test",
+					Target:       f.target,
+					Prober:       "tcp",
+					Mode:         "warm",
+					ProbeCount:   2,
+					TimeoutMs:    1000,
+					ScheduleType: "once",
+					Status:       wire.JobStatusActive,
+					StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
+				},
+			}}
+		}
+		json.NewEncoder(w).Encode(resp)
 	})
 	return mux
 }
@@ -109,11 +107,10 @@ func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- agent.Run(ctx, agent.Config{
-			APIURL:         srv.URL,
-			APIKey:         "node_test:secret",
-			EventsInterval: 50 * time.Millisecond,
-			SchedulerTick:  20 * time.Millisecond,
-			Concurrency:    4,
+			APIURL:        srv.URL,
+			APIKey:        "node_test:secret",
+			SchedulerTick: 20 * time.Millisecond,
+			Concurrency:   4,
 		})
 	}()
 
@@ -170,11 +167,10 @@ func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
 
 func TestRun_RejectsMalformedAPIKey(t *testing.T) {
 	err := agent.Run(context.Background(), agent.Config{
-		APIURL:         "http://127.0.0.1:0",
-		APIKey:         "not-a-valid-key",
-		EventsInterval: time.Second,
-		SchedulerTick:  time.Second,
-		Concurrency:    1,
+		APIURL:        "http://127.0.0.1:0",
+		APIKey:        "not-a-valid-key",
+		SchedulerTick: time.Second,
+		Concurrency:   1,
 	})
 	if err == nil {
 		t.Fatal("expected an error for an api-key without a colon")

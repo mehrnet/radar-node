@@ -6,8 +6,8 @@ import (
 )
 
 // clockSync tracks this node's offset from the server's clock,
-// measured against server_time on every events-sync response (see
-// eventsSyncLoop in agent.go). All due-ness decisions use corrected
+// measured against server_time on every heartbeat response (see
+// heartbeatLoop in agent.go). All due-ness decisions use corrected
 // ("server-equivalent") time, not the node's own possibly-drifted
 // local clock -- if the server's clock reads an hour behind this
 // node's, this node's scheduling should behave exactly as if its own

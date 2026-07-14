@@ -3,10 +3,11 @@
 // breaking change to that spec and must be reflected in SpecVersion.
 //
 // There is no more server-computed dispatch. A node syncs job
-// definitions incrementally (GET /v1/nodes/events) into its own
-// local cache and decides for itself when something is due -- see
-// internal/agent's scheduler. Results are keyed by a node-generated
-// RunID instead of a server-issued assignment id.
+// definitions incrementally (POST /v1/nodes/heartbeat's since_seq/
+// events) into its own local cache and decides for itself when
+// something is due -- see internal/agent's scheduler. Results are
+// keyed by a node-generated RunID instead of a server-issued
+// assignment id.
 package wire
 
 import (
@@ -35,20 +36,14 @@ type JobSnapshot struct {
 }
 
 // Event is one entry from the job-definition change log a node syncs
-// incrementally. Seq is a plain, not-necessarily-contiguous cursor:
-// a node's next sync always asks for seq > the highest one it has
+// incrementally via POST /v1/nodes/heartbeat's since_seq/events
+// fields. Seq is a plain, not-necessarily-contiguous cursor: a node's
+// next heartbeat always sends since_seq = the highest one it has
 // already applied.
 type Event struct {
 	Seq       int         `json:"seq"`
 	EventType string      `json:"event_type"` // "created" | "updated" | "removed"
 	Job       JobSnapshot `json:"job"`
-}
-
-// EventsResponse is the body of GET /v1/nodes/events.
-type EventsResponse struct {
-	SpecVersion int     `json:"spec_version"`
-	ServerTime  string  `json:"server_time"`
-	Events      []Event `json:"events"`
 }
 
 // Result is probe.Result plus the correlation fields needed to route
@@ -102,20 +97,30 @@ type ResultsResponse struct {
 // kind/engine/engine_version here anymore -- that metadata now lives
 // server-side, attached to the hash itself, populated once via
 // POST /v1/nodes/modules rather than repeated on every heartbeat.
+//
+// SinceSeq folds what used to be a separate GET /v1/nodes/events poll
+// into the heartbeat itself -- both fired on their own fixed timer
+// regardless of activity, each paying its own request/auth overhead
+// for (almost always) zero new information. 0 means a full resync,
+// same meaning the old standalone endpoint gave a fresh cache.
 type HeartbeatRequest struct {
 	SpecVersion  int      `json:"spec_version"`
 	NodeID       string   `json:"node_id"`
 	AgentVersion string   `json:"agent_version"`
 	Probers      []string `json:"probers"`
+	SinceSeq     int      `json:"since_seq"`
 	SentAt       string   `json:"sent_at"`
 }
 
 // HeartbeatResponse is the body returned by a successful
-// POST /v1/nodes/heartbeat.
+// POST /v1/nodes/heartbeat. ServerTime/Events are what used to be
+// GET /v1/nodes/events's whole response -- see SinceSeq above.
 type HeartbeatResponse struct {
-	SpecVersion           int    `json:"spec_version"`
-	NodeStatus            string `json:"node_status"`
-	HeartbeatIntervalSecs int    `json:"heartbeat_interval_seconds"`
+	SpecVersion           int     `json:"spec_version"`
+	NodeStatus            string  `json:"node_status"`
+	HeartbeatIntervalSecs int     `json:"heartbeat_interval_seconds"`
+	ServerTime            string  `json:"server_time"`
+	Events                []Event `json:"events,omitempty"`
 }
 
 // HeartbeatRejection is the body of a 409 response to

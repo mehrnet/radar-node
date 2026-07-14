@@ -16,9 +16,10 @@ type cachedJob struct {
 }
 
 // jobCache is the node's local understanding of which jobs it's
-// responsible for, built and kept current by applying events from
-// GET /v1/nodes/events (see eventsSyncLoop in agent.go). Safe for
-// concurrent use by the scheduler and events-sync loops.
+// responsible for, built and kept current by applying events synced
+// via POST /v1/nodes/heartbeat's since_seq/events (see heartbeatLoop
+// in agent.go). Safe for concurrent use by the scheduler and
+// heartbeat loops.
 type jobCache struct {
 	mu      sync.Mutex
 	jobs    map[string]*cachedJob

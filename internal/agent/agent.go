@@ -1,6 +1,7 @@
 // Package agent implements the `radar-node agent` loop. Unlike
 // the original design, the server never tells this agent what's due
-// -- it syncs job *definitions* incrementally (GET /v1/nodes/events)
+// -- it syncs job *definitions* incrementally (folded into
+// POST /v1/nodes/heartbeat's since_seq/events, see heartbeatLoop)
 // into a local cache, decides for itself when something is due using
 // its own clock-corrected notion of "now" (see clock.go), runs it
 // through the same Checkers the `probe` subcommand uses, and reports
@@ -32,10 +33,6 @@ type Config struct {
 	APIURL   string
 	APIKey   string // "node_id:secret" -- also the bearer token as-is
 	ProxyURL string
-	// EventsInterval is how often the local job cache is synced
-	// against the server. Cheap and mostly a no-op when nothing has
-	// changed, so this can be relatively infrequent.
-	EventsInterval time.Duration
 	// SchedulerTick is how often the local scheduler checks its
 	// cached jobs for due-ness. This governs real-world scheduling
 	// granularity (a 30s-interval job can fire up to one tick late),
@@ -49,12 +46,13 @@ type Config struct {
 	ModulesDir string
 }
 
-// agent bundles everything the three concurrent loops (heartbeat,
-// events sync, scheduler) share, so none of them need a long,
-// overlapping positional parameter list just to thread the same
-// handful of dependencies through -- client/nodeID/reg in particular
-// were previously repeated across nearly every function signature in
-// this package.
+// agent bundles everything the two concurrent loops (heartbeat --
+// which also carries job-definition sync, see heartbeatLoop --
+// and scheduler) share, so neither needs a long, overlapping
+// positional parameter list just to thread the same handful of
+// dependencies through -- client/nodeID/reg in particular were
+// previously repeated across nearly every function signature in this
+// package.
 type agent struct {
 	client      *apiclient.Client
 	nodeID      string
@@ -68,15 +66,12 @@ type agent struct {
 	status atomic.Value
 }
 
-// Run blocks until ctx is cancelled, running the heartbeat, events-
-// sync, and scheduler loops concurrently.
+// Run blocks until ctx is cancelled, running the heartbeat and
+// scheduler loops concurrently.
 func Run(ctx context.Context, cfg Config) error {
 	nodeID, _, ok := strings.Cut(cfg.APIKey, ":")
 	if !ok || nodeID == "" {
 		return fmt.Errorf("--api-key must be in node_id:secret form")
-	}
-	if cfg.EventsInterval <= 0 {
-		return fmt.Errorf("--events-interval must be positive")
 	}
 	if cfg.SchedulerTick <= 0 {
 		return fmt.Errorf("--scheduler-tick must be positive")
@@ -108,14 +103,10 @@ func Run(ctx context.Context, cfg Config) error {
 	a.status.Store(wire.NodeStatusActive)
 
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		a.heartbeatLoop(ctx)
-	}()
-	go func() {
-		defer wg.Done()
-		a.eventsSyncLoop(ctx, cfg.EventsInterval)
 	}()
 	go func() {
 		defer wg.Done()
@@ -125,19 +116,30 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+// heartbeatLoop also carries job-definition sync and clock
+// calibration -- folded in from what used to be a separate
+// eventsSyncLoop polling GET /v1/nodes/events on its own timer. Both
+// loops fired on a fixed interval regardless of activity and each
+// paid its own request/auth round trip; since a heartbeat already
+// happens this often, there's no freshness lost by piggybacking
+// since_seq/events on it instead, and it halves the number of always-
+// on polling requests this agent makes.
 func (a *agent) heartbeatLoop(ctx context.Context) {
 	interval := 30 * time.Second // sane default until the server tells us otherwise
 	proberHashes := a.reg.ProberHashes()
 
-	send := func() (*wire.HeartbeatResponse, error) {
+	send := func() (*wire.HeartbeatResponse, time.Time, time.Time, error) {
 		hbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return a.client.Heartbeat(hbCtx, wire.HeartbeatRequest{
+		sentAt := time.Now()
+		resp, err := a.client.Heartbeat(hbCtx, wire.HeartbeatRequest{
 			NodeID:       a.nodeID,
 			AgentVersion: AgentVersion,
 			Probers:      proberHashes,
-			SentAt:       time.Now().UTC().Format(time.RFC3339Nano),
+			SinceSeq:     a.cache.lastKnownSeq(),
+			SentAt:       sentAt.UTC().Format(time.RFC3339Nano),
 		})
+		return resp, sentAt, time.Now(), err
 	}
 
 	// beat sends the heartbeat and, if radar-api rejects it because it
@@ -146,14 +148,14 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 	// the common case (nothing changed since last time) never touches
 	// the upload path at all.
 	beat := func() {
-		resp, err := send()
+		resp, sentAt, receivedAt, err := send()
 		var rejected *apiclient.HeartbeatRejectedError
 		if errors.As(err, &rejected) {
 			if uploadErr := a.uploadMissingModules(ctx, rejected.Rejection.MissingProberIDs); uploadErr != nil {
 				log.Printf("agent: upload modules: %v", uploadErr)
 				return
 			}
-			resp, err = send()
+			resp, sentAt, receivedAt, err = send()
 		}
 		if err != nil {
 			log.Printf("agent: heartbeat failed: %v", err)
@@ -164,6 +166,13 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		}
 		if resp.HeartbeatIntervalSecs > 0 {
 			interval = time.Duration(resp.HeartbeatIntervalSecs) * time.Second
+		}
+		if serverTime, parseErr := time.Parse(time.RFC3339Nano, resp.ServerTime); parseErr == nil {
+			a.clock.update(serverTime, sentAt, receivedAt)
+		}
+		if len(resp.Events) > 0 {
+			a.cache.applyEvents(resp.Events)
+			log.Printf("agent: synced %d job event(s)", len(resp.Events))
 		}
 	}
 
@@ -208,44 +217,6 @@ func (a *agent) uploadMissingModules(ctx context.Context, proberIDs []string) er
 	defer cancel()
 	_, err := a.client.UploadModules(uploadCtx, wire.ModulesUploadRequest{NodeID: a.nodeID, Modules: modules})
 	return err
-}
-
-// eventsSyncLoop keeps the local job cache current and the clock
-// offset calibrated. A sync with nothing new returns an empty events
-// list and does no cache mutation at all -- this is deliberately
-// cheap to run often.
-func (a *agent) eventsSyncLoop(ctx context.Context, interval time.Duration) {
-	sync := func() {
-		sentAt := time.Now()
-		syncCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-		resp, err := a.client.FetchEvents(syncCtx, a.cache.lastKnownSeq())
-		receivedAt := time.Now()
-		if err != nil {
-			log.Printf("agent: fetch events: %v", err)
-			return
-		}
-
-		if serverTime, parseErr := time.Parse(time.RFC3339Nano, resp.ServerTime); parseErr == nil {
-			a.clock.update(serverTime, sentAt, receivedAt)
-		}
-		if len(resp.Events) > 0 {
-			a.cache.applyEvents(resp.Events)
-			log.Printf("agent: synced %d job event(s)", len(resp.Events))
-		}
-	}
-
-	sync() // full resync on startup: cache starts empty, lastKnownSeq() is 0
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			sync()
-		}
-	}
 }
 
 func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {

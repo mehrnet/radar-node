@@ -129,19 +129,6 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("radar-api returned %d: %s", e.Code, e.Body)
 }
 
-// FetchEvents pulls job-definition changes with seq > sinceSeq. A
-// sinceSeq of 0 is a full resync -- every event for this node, from
-// the beginning, which is how a freshly (re)started agent rebuilds
-// its local job cache from nothing.
-func (c *Client) FetchEvents(ctx context.Context, sinceSeq int) (*wire.EventsResponse, error) {
-	var out wire.EventsResponse
-	path := fmt.Sprintf("/v1/nodes/events?since_seq=%d", sinceSeq)
-	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 func (c *Client) PostResults(ctx context.Context, req wire.ResultsRequest) (*wire.ResultsResponse, error) {
 	req.SpecVersion = wire.SpecVersion
 	var out wire.ResultsResponse

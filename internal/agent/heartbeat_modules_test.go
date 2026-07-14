@@ -26,9 +26,6 @@ func TestRun_UploadsModulesOnHeartbeatRejectionThenSucceeds(t *testing.T) {
 	)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/nodes/events", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(wire.EventsResponse{SpecVersion: 1, ServerTime: time.Now().UTC().Format(time.RFC3339Nano)})
-	})
 	mux.HandleFunc("/v1/nodes/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		var req wire.HeartbeatRequest
 		json.NewDecoder(r.Body).Decode(&req)
@@ -50,6 +47,7 @@ func TestRun_UploadsModulesOnHeartbeatRejectionThenSucceeds(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(wire.HeartbeatResponse{
 			SpecVersion: 1, NodeStatus: wire.NodeStatusActive, HeartbeatIntervalSecs: 3600,
+			ServerTime: time.Now().UTC().Format(time.RFC3339Nano),
 		})
 	})
 	mux.HandleFunc("/v1/nodes/modules", func(w http.ResponseWriter, r *http.Request) {
@@ -76,11 +74,10 @@ func TestRun_UploadsModulesOnHeartbeatRejectionThenSucceeds(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- agent.Run(ctx, agent.Config{
-			APIURL:         srv.URL,
-			APIKey:         "node_test:secret",
-			EventsInterval: time.Hour, // irrelevant to this test
-			SchedulerTick:  time.Hour,
-			Concurrency:    1,
+			APIURL:        srv.URL,
+			APIKey:        "node_test:secret",
+			SchedulerTick: time.Hour,
+			Concurrency:   1,
 		})
 	}()
 

@@ -91,7 +91,6 @@ agent flags:
   --api-key string       "node_id:secret" bearer token (required)
   --api-proxy string      proxy for the agent's own radar-api traffic
                           (http://, https://, socks5://, socks5h://)
-  --events-interval duration  how often to sync job definitions (default "30s")
   --scheduler-tick duration    how often to check cached jobs for due-ness (default "2s")
   --concurrency int       max probes running at once (default 64)
   --modules-dir path      load/override modules from *.yaml/*.yml here,
@@ -184,20 +183,18 @@ func runProbe(args []string) error {
 
 func runAgent(args []string) error {
 	var (
-		apiURL         string
-		apiKey         string
-		apiProxy       string
-		eventsInterval time.Duration
-		schedulerTick  time.Duration
-		concurrency    int
-		modulesDir     string
+		apiURL        string
+		apiKey        string
+		apiProxy      string
+		schedulerTick time.Duration
+		concurrency   int
+		modulesDir    string
 	)
 
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
 	fs.StringVar(&apiURL, "api-url", "", "")
 	fs.StringVar(&apiKey, "api-key", "", "")
 	fs.StringVar(&apiProxy, "api-proxy", "", "")
-	fs.DurationVar(&eventsInterval, "events-interval", 30*time.Second, "")
 	fs.DurationVar(&schedulerTick, "scheduler-tick", 2*time.Second, "")
 	fs.IntVar(&concurrency, "concurrency", 64, "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
@@ -215,13 +212,12 @@ func runAgent(args []string) error {
 	defer stop()
 
 	return agent.Run(ctx, agent.Config{
-		APIURL:         apiURL,
-		APIKey:         apiKey,
-		ProxyURL:       apiProxy,
-		EventsInterval: eventsInterval,
-		SchedulerTick:  schedulerTick,
-		Concurrency:    concurrency,
-		ModulesDir:     modulesDir,
+		APIURL:        apiURL,
+		APIKey:        apiKey,
+		ProxyURL:      apiProxy,
+		SchedulerTick: schedulerTick,
+		Concurrency:   concurrency,
+		ModulesDir:    modulesDir,
 	})
 }
 
