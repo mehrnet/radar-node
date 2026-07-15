@@ -175,6 +175,19 @@ log "installed ${INSTALL_BIN_DIR}/${BIN_NAME}"
 
 "${INSTALL_BIN_DIR}/${BIN_NAME}" init -C "$MODULES_DIR" >/dev/null 2>&1 || true
 
+# The icmp default prober uses an unprivileged "ping socket", which
+# needs net.ipv4.ping_group_range to include this process's group --
+# being root does NOT bypass this, it's a separate kernel mechanism
+# from raw sockets/CAP_NET_RAW. Without it every icmp check fails with
+# "permission denied" even on a root install. Only settable as root;
+# best-effort (harmless if already configured or the sysctl is absent).
+if [ "$OS" = "linux" ] && [ "$IS_ROOT" = "1" ] && command -v sysctl >/dev/null 2>&1; then
+  log "enabling unprivileged ICMP (net.ipv4.ping_group_range)..."
+  sysctl -w net.ipv4.ping_group_range="0 2147483647" >/dev/null 2>&1 || true
+  mkdir -p /etc/sysctl.d 2>/dev/null
+  echo "net.ipv4.ping_group_range = 0 2147483647" > /etc/sysctl.d/99-radar-node-icmp.conf 2>/dev/null || true
+fi
+
 API_KEY_COMBINED="${NODE_ID}:${API_KEY}"
 EXTRA_ARGS=""
 [ -n "$PROXY" ] && EXTRA_ARGS="--api-proxy \"$PROXY\""
