@@ -19,6 +19,7 @@ API_KEY=""
 API_URL="$API_URL_DEFAULT"
 PROXY=""
 VERSION="latest"
+UNINSTALL=0
 
 usage() {
   cat <<'EOF'
@@ -33,6 +34,8 @@ Options:
   --proxy=URL        proxy for both this installer's downloads and the running
                      agent's radar-api traffic (http://, https://, socks5://, socks5h://)
   --version=VERSION  install a specific release instead of the latest, e.g. 0.2
+  --uninstall        stop and fully remove radar-node from this machine (no
+                      other flag is needed -- this ignores --node_id/--api_key)
   -h, --help         show this help
 EOF
 }
@@ -47,10 +50,64 @@ for arg in "$@"; do
     --api_url=*) API_URL="${arg#*=}" ;;
     --proxy=*) PROXY="${arg#*=}" ;;
     --version=*) VERSION="${arg#*=}" ;;
+    --uninstall) UNINSTALL=1 ;;
     -h|--help) usage; exit 0 ;;
     *) err "unknown argument: $arg (see --help)" ;;
   esac
 done
+
+# ---------------------------------------------------------------------
+# Platform detection -> goreleaser's os/arch naming (see .goreleaser.yaml).
+# Needed by both --uninstall (to find the right service manager) and a
+# real install (which also needs ARCH, resolved further down).
+# ---------------------------------------------------------------------
+os_raw="$(uname -s)"
+case "$os_raw" in
+  Linux) OS=linux ;;
+  Darwin) OS=darwin ;;
+  *) err "unsupported OS: $os_raw -- radar-node ships linux/darwin/windows releases; for windows grab a release asset manually from https://github.com/$REPO/releases" ;;
+esac
+
+if [ "$UNINSTALL" = "1" ]; then
+  label="com.mehrnet.radar-node"
+  if [ "$(id -u)" = "0" ]; then
+    INSTALL_BIN_DIR="/usr/local/bin"
+    MODULES_DIR="/etc/radar-node/modules.d"
+    IS_ROOT=1
+  else
+    INSTALL_BIN_DIR="${HOME}/.local/bin"
+    MODULES_DIR="${HOME}/.config/radar-node/modules.d"
+    IS_ROOT=0
+  fi
+
+  if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+    if [ "$IS_ROOT" = "1" ]; then
+      systemctl stop radar-node >/dev/null 2>&1 || true
+      systemctl disable radar-node >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/radar-node.service
+      systemctl daemon-reload >/dev/null 2>&1 || true
+    else
+      systemctl --user stop radar-node >/dev/null 2>&1 || true
+      systemctl --user disable radar-node >/dev/null 2>&1 || true
+      rm -f "${HOME}/.config/systemd/user/radar-node.service"
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+    fi
+  elif [ "$OS" = "darwin" ]; then
+    if [ "$IS_ROOT" = "1" ]; then
+      plist="/Library/LaunchDaemons/${label}.plist"
+    else
+      plist="${HOME}/Library/LaunchAgents/${label}.plist"
+    fi
+    [ -f "$plist" ] && launchctl unload "$plist" >/dev/null 2>&1
+    rm -f "$plist"
+  fi
+
+  rm -f "${INSTALL_BIN_DIR}/${BIN_NAME}"
+  rm -rf "$MODULES_DIR"
+  log "removed ${INSTALL_BIN_DIR}/${BIN_NAME} and ${MODULES_DIR}"
+  log "radar-node has been fully uninstalled from this machine."
+  exit 0
+fi
 
 [ -n "$NODE_ID" ] || { usage; err "--node_id is required"; }
 [ -n "$API_KEY" ] || { usage; err "--api_key is required"; }
@@ -68,15 +125,9 @@ curl_get() {
 }
 
 # ---------------------------------------------------------------------
-# Platform detection -> goreleaser's os/arch naming (see .goreleaser.yaml)
+# ARCH resolution -> goreleaser's naming (OS was already resolved above,
+# before the --uninstall branch, since that needs it too).
 # ---------------------------------------------------------------------
-os_raw="$(uname -s)"
-case "$os_raw" in
-  Linux) OS=linux ;;
-  Darwin) OS=darwin ;;
-  *) err "unsupported OS: $os_raw -- radar-node ships linux/darwin/windows releases; for windows grab a release asset manually from https://github.com/$REPO/releases" ;;
-esac
-
 arch_raw="$(uname -m)"
 case "$arch_raw" in
   x86_64|amd64) ARCH=amd64 ;;

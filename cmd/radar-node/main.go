@@ -215,6 +215,7 @@ func runAgent(args []string) error {
 		APIURL:        apiURL,
 		APIKey:        apiKey,
 		ProxyURL:      apiProxy,
+		Version:       version,
 		SchedulerTick: schedulerTick,
 		Concurrency:   concurrency,
 		ModulesDir:    modulesDir,

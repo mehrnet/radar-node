@@ -17,15 +17,17 @@ import (
 // fakeAPI implements just enough of radar-api's node-facing surface
 // to drive a real agent.Run loop end-to-end.
 type fakeAPI struct {
-	mu           sync.Mutex
-	target       string
-	served       bool // hand out the one job-created event exactly once
-	gotResults   []wire.Result
-	resultsAdded chan struct{}
+	mu               sync.Mutex
+	target           string
+	served           bool // hand out the one job-created event exactly once
+	gotResults       []wire.Result
+	resultsAdded     chan struct{}
+	lastAgentVersion string
+	versionSeen      chan struct{}
 }
 
 func newFakeAPI(target string) *fakeAPI {
-	return &fakeAPI{target: target, resultsAdded: make(chan struct{}, 8)}
+	return &fakeAPI{target: target, resultsAdded: make(chan struct{}, 8), versionSeen: make(chan struct{}, 8)}
 }
 
 func (f *fakeAPI) handler() http.Handler {
@@ -50,8 +52,15 @@ func (f *fakeAPI) handler() http.Handler {
 		})
 	})
 	mux.HandleFunc("/v1/nodes/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		var req wire.HeartbeatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.lastAgentVersion = req.AgentVersion
+		select {
+		case f.versionSeen <- struct{}{}:
+		default:
+		}
 		resp := wire.HeartbeatResponse{
 			SpecVersion:           1,
 			NodeStatus:            wire.NodeStatusActive,
@@ -163,6 +172,73 @@ func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
 	// A "once" job must only ever run once even though the scheduler
 	// ticks many times over a 5s wait -- if markRun-before-execute
 	// wasn't working, we'd see far more than 2 results.
+}
+
+func TestRun_ReportsConfiguredVersionInHeartbeat(t *testing.T) {
+	fake := newFakeAPI("127.0.0.1:0")
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL:        srv.URL,
+			APIKey:        "node_test:secret",
+			Version:       "0.5",
+			SchedulerTick: 20 * time.Millisecond,
+			Concurrency:   4,
+		})
+	}()
+
+	select {
+	case <-fake.versionSeen:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for a heartbeat")
+	}
+	cancel()
+	<-done
+
+	fake.mu.Lock()
+	got := fake.lastAgentVersion
+	fake.mu.Unlock()
+	if got != "0.5" {
+		t.Fatalf("expected the configured version %q to be reported verbatim, got %q", "0.5", got)
+	}
+}
+
+func TestRun_DefaultsVersionToDevWhenUnset(t *testing.T) {
+	fake := newFakeAPI("127.0.0.1:0")
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL:        srv.URL,
+			APIKey:        "node_test:secret",
+			SchedulerTick: 20 * time.Millisecond,
+			Concurrency:   4,
+		})
+	}()
+
+	select {
+	case <-fake.versionSeen:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for a heartbeat")
+	}
+	cancel()
+	<-done
+
+	fake.mu.Lock()
+	got := fake.lastAgentVersion
+	fake.mu.Unlock()
+	if got != "dev" {
+		t.Fatalf("expected an unset Version to default to %q, got %q", "dev", got)
+	}
 }
 
 func TestRun_RejectsMalformedAPIKey(t *testing.T) {

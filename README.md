@@ -50,11 +50,27 @@ Options:
   --proxy=URL        proxy for both this installer's downloads and the running
                      agent's radar-api traffic (http://, https://, socks5://, socks5h://)
   --version=VERSION  install a specific release instead of the latest, e.g. 0.2
+  --uninstall        stop and fully remove radar-node from this machine (no
+                      other flag is needed -- this ignores --node_id/--api_key)
   -h, --help         show this help
 ```
 
 For Windows, grab a release asset manually from the
 [Releases page](https://github.com/mehrnet/radar-node/releases).
+
+### Remote update / delete
+
+Deleting a node from the radar UI stops it (via its next heartbeat) but does
+*not* remove it from the machine -- to fully clean up, run:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mehrnet/radar-node/main/install.sh \
+  | sh -s -- --uninstall
+```
+
+An "Update" button in the UI (shown when a newer release exists) re-runs the
+install script on the node's own machine automatically -- no action needed
+there.
 
 ## Build
 

@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,12 +29,27 @@ import (
 	"github.com/mehrnet/radar-node/internal/wire"
 )
 
-const AgentVersion = "0.2.0-dev"
+// installScriptURL is the same one-liner README.md documents for a
+// fresh install -- self-update re-runs it verbatim (same node_id/
+// api_key/api_url/proxy this process itself was started with), which
+// is what lets it reuse install.sh's own stop-download-replace-
+// restart sequence instead of this process trying to replace its own
+// running binary directly.
+const installScriptURL = "https://raw.githubusercontent.com/mehrnet/radar-node/main/install.sh"
 
 type Config struct {
 	APIURL   string
 	APIKey   string // "node_id:secret" -- also the bearer token as-is
 	ProxyURL string
+	// Version is the real build version (main.version, injected by
+	// goreleaser's ldflags for a tagged release -- see cmd/radar-node/
+	// main.go), reported in every heartbeat (see heartbeatLoop) and
+	// compared server-side against the latest GitHub release to decide
+	// whether to offer an update. Previously this was a hardcoded
+	// constant here, permanently out of sync with what a build
+	// actually was -- "dev" for an untagged local build, same as
+	// main.version's own fallback.
+	Version string
 	// SchedulerTick is how often the local scheduler checks its
 	// cached jobs for due-ness. This governs real-world scheduling
 	// granularity (a 30s-interval job can fire up to one tick late),
@@ -56,6 +73,10 @@ type Config struct {
 type agent struct {
 	client      *apiclient.Client
 	nodeID      string
+	apiKey      string
+	apiURL      string
+	proxyURL    string
+	version     string
 	reg         registry.Registry
 	cache       *jobCache
 	clock       *clockSync
@@ -92,9 +113,17 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
+	version := cfg.Version
+	if version == "" {
+		version = "dev"
+	}
 	a := &agent{
 		client:      client,
 		nodeID:      nodeID,
+		apiKey:      cfg.APIKey,
+		apiURL:      cfg.APIURL,
+		proxyURL:    cfg.ProxyURL,
+		version:     version,
 		reg:         reg,
 		cache:       newJobCache(),
 		clock:       &clockSync{},
@@ -134,7 +163,7 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		sentAt := time.Now()
 		resp, err := a.client.Heartbeat(hbCtx, wire.HeartbeatRequest{
 			NodeID:       a.nodeID,
-			AgentVersion: AgentVersion,
+			AgentVersion: a.version,
 			Probers:      proberHashes,
 			SinceSeq:     a.cache.lastKnownSeq(),
 			SentAt:       sentAt.UTC().Format(time.RFC3339Nano),
@@ -174,6 +203,12 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			a.cache.applyEvents(resp.Events)
 			log.Printf("agent: synced %d job event(s)", len(resp.Events))
 		}
+		switch resp.Command {
+		case "update":
+			a.selfUpdate()
+		case "delete":
+			a.handleDeleteCommand()
+		}
 	}
 
 	beat() // report in immediately on startup rather than waiting a full interval
@@ -188,6 +223,46 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			ticker.Reset(interval)
 		}
 	}
+}
+
+// selfUpdate re-execs the public install script as a detached child
+// process, then exits -- install.sh already stops the running
+// service, downloads the latest release, replaces the binary, and
+// restarts it (see its own "stop existing service before cp" step,
+// added specifically so this exact re-run-to-upgrade path doesn't hit
+// ETXTBSY). This process exiting is what lets that cp succeed; there
+// is deliberately no attempt to replace this binary in-process.
+func (a *agent) selfUpdate() {
+	args := []string{"--node_id=" + a.nodeID, "--api_key=" + strings.TrimPrefix(a.apiKey, a.nodeID+":"), "--api_url=" + a.apiURL}
+	if a.proxyURL != "" {
+		args = append(args, "--proxy="+a.proxyURL)
+	}
+	installCmd := fmt.Sprintf("curl -fsSL %s | sh -s -- %s", installScriptURL, strings.Join(args, " "))
+	log.Printf("agent: update requested -- re-running install script to upgrade: %s", installCmd)
+
+	cmd := exec.Command("sh", "-c", installCmd)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		log.Printf("agent: self-update failed to start: %v", err)
+		return
+	}
+	log.Printf("agent: install script launched (pid %d) -- exiting so it can replace this process", cmd.Process.Pid)
+	os.Exit(0)
+}
+
+// handleDeleteCommand runs when this node has been deleted from radar
+// (see routes/nodes.ts's "deactivated" status transition). It does
+// NOT attempt to self-uninstall a systemd/launchd service -- that
+// needs privileges and unit-file knowledge this process shouldn't
+// assume it has. Instead it stops running (a systemd Restart=always
+// unit will just relaunch it, heartbeat once, see "delete" again, and
+// exit again -- a harmless low-frequency loop, not a resource concern)
+// and tells the operator exactly how to finish the job for real.
+func (a *agent) handleDeleteCommand() {
+	log.Printf("agent: this node was deleted from radar -- stopping. To fully remove it from this machine, run:")
+	log.Printf("  curl -fsSL %s | sh -s -- --uninstall", installScriptURL)
+	os.Exit(0)
 }
 
 // uploadMissingModules pushes exactly the modules radar-api named as

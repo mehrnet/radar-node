@@ -121,6 +121,18 @@ type HeartbeatResponse struct {
 	HeartbeatIntervalSecs int     `json:"heartbeat_interval_seconds"`
 	ServerTime            string  `json:"server_time"`
 	Events                []Event `json:"events,omitempty"`
+	// Owner-triggered from the radar UI (see radar-api's
+	// nodes.pending_command), delivered here rather than a separate
+	// channel because heartbeat is this node's only poll. Empty/absent
+	// means no command. "update": re-run the install script to fetch
+	// the latest release and replace this process. "delete": this
+	// node was removed from radar -- stop running and tell the
+	// operator how to fully uninstall. Sent at most once per command
+	// (the server clears it after handing it back), so a request that
+	// never reaches a running agent (offline, crashed) is simply
+	// retried the next time it does heartbeat, no worse than any other
+	// heartbeat-carried state.
+	Command string `json:"command,omitempty"`
 }
 
 // HeartbeatRejection is the body of a 409 response to
