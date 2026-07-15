@@ -17,6 +17,45 @@ fundamentally a network prober -- it's a generic scheduled data-transform
 runner (request in, structured response out, on a schedule, billed and
 stored) that ships with networking as its first set of fixtures.
 
+## Install (Linux/macOS)
+
+Register a node in the [radar UI](https://radar.mehrnet.com) first -- it
+gives you a one-time `node_id` and `api_key`. Then, on the machine that
+should run the node:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mehrnet/radar-node/main/install.sh \
+  | sh -s -- --node_id=<node_id> --api_key=<api_key>
+```
+
+This downloads the right release asset for your OS/arch, verifies its
+checksum, and installs `radar-node` as a persistent service -- systemd on
+Linux, launchd on macOS -- so it survives reboots with no further steps. Run
+as root for a system-wide service, or as a regular user for a user-scoped
+one (see `--help` below).
+
+Behind a proxy? Add `--proxy=<url>` (`http://`, `https://`, `socks5://`, or
+`socks5h://`) -- it's used both for the installer's own downloads and for
+the running agent's ongoing `radar-api` traffic.
+
+```
+Usage: install.sh --node_id=<id> --api_key=<secret> [options]
+
+Required (shown once when you register a node in the radar UI):
+  --node_id=ID       the node id from registration
+  --api_key=SECRET   the node secret from registration
+
+Options:
+  --api_url=URL      radar-api base URL (default: https://radar-api.mehrnet.com)
+  --proxy=URL        proxy for both this installer's downloads and the running
+                     agent's radar-api traffic (http://, https://, socks5://, socks5h://)
+  --version=VERSION  install a specific release instead of the latest, e.g. 0.2
+  -h, --help         show this help
+```
+
+For Windows, grab a release asset manually from the
+[Releases page](https://github.com/mehrnet/radar-node/releases).
+
 ## Build
 
 ```sh
