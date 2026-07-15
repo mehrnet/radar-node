@@ -148,6 +148,26 @@ else
   IS_ROOT=0
 fi
 
+# Re-running this script to upgrade an already-installed, already-
+# running node hits ETXTBSY on the cp below unless the service
+# holding the old binary open is stopped first -- best-effort, since
+# on a first install there's nothing to stop yet.
+label="com.mehrnet.radar-node"
+if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+  if [ "$IS_ROOT" = "1" ]; then
+    systemctl stop radar-node >/dev/null 2>&1 || true
+  else
+    systemctl --user stop radar-node >/dev/null 2>&1 || true
+  fi
+elif [ "$OS" = "darwin" ]; then
+  if [ "$IS_ROOT" = "1" ]; then
+    existing_plist="/Library/LaunchDaemons/${label}.plist"
+  else
+    existing_plist="${HOME}/Library/LaunchAgents/${label}.plist"
+  fi
+  [ -f "$existing_plist" ] && launchctl unload "$existing_plist" >/dev/null 2>&1
+fi
+
 mkdir -p "$INSTALL_BIN_DIR" "$MODULES_DIR"
 cp "${WORKDIR}/${BIN_NAME}" "${INSTALL_BIN_DIR}/${BIN_NAME}"
 chmod +x "${INSTALL_BIN_DIR}/${BIN_NAME}"
