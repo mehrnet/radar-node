@@ -264,15 +264,28 @@ func (a *agent) selfUpdate() {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 	}
-	if err := cmd.Start(); err != nil {
-		log.Printf("agent: self-update failed to start: %v", err)
+	// Run, not Start -- deliberately blocks here, but only on the
+	// *wrapper* (systemd-run confirming the transient unit actually
+	// started, a sub-second round trip through PID1's D-Bus API, or a
+	// plain child's own near-instant fork+exec on the non-systemd
+	// fallback), never on install.sh's own full download/replace/
+	// restart. Exiting via Start()+immediate os.Exit(0) raced this
+	// confirmation: `systemd-run --scope` needs a moment to register
+	// the new scope and migrate into it, and this process's own exit
+	// (tearing down its cgroup, per selfUpdateCommand's own doc
+	// comment) could kill systemd-run before that finished -- observed
+	// in practice as install.sh never producing a single line of
+	// output, on every attempt. Waiting for confirmation first removes
+	// that race instead of shrinking it.
+	if err := cmd.Run(); err != nil {
+		log.Printf("agent: self-update: launching the installer failed: %v (see %s)", err, selfUpdateLogPath)
 		return
 	}
-	log.Printf("agent: install script launched (pid %d), logging to %s -- exiting so it can replace this process", cmd.Process.Pid, selfUpdateLogPath)
+	log.Printf("agent: installer handed off successfully, logging to %s -- exiting so it can replace this process", selfUpdateLogPath)
 	os.Exit(0)
 }
 
-// selfUpdateCommand wraps installCmd in `systemd-run --scope` when
+// selfUpdateCommand wraps installCmd in `systemd-run --unit=...` when
 // available, instead of just running it as a plain child process.
 // This matters specifically because this process is (usually) itself
 // a systemd service: os/exec never moves a child into a new cgroup, so
@@ -284,26 +297,39 @@ func (a *agent) selfUpdate() {
 // the installer gets killed mid-download/replace before it ever
 // upgrades the binary, and the service just restarts on the same old
 // version it started with -- silently, since nothing here observes
-// the installer's fate after Start(). `--scope` creates a new,
-// independent transient unit outside this service's cgroup, so the
-// installer survives the restart that immediately follows. `--user`
-// is added when this process isn't running as root, mirroring
+// the installer's fate after Start().
+//
+// A real transient *unit* (`--unit=name`), not a `--scope`: a scope
+// becomes a direct child of the invoking process and needs a moment to
+// register itself and migrate into it over D-Bus, which raced this
+// process's own exit in practice -- if this process's cgroup got torn
+// down before that handshake finished, systemd-run itself was killed
+// before it ever got to exec install.sh, with zero output anywhere to
+// explain why. `--unit=` instead asks PID1 to create and start an
+// independent unit directly; by default systemd-run blocks only until
+// that start is *confirmed* (a fast round trip, not install.sh's full
+// runtime -- see selfUpdate's use of Run() instead of Start()), and
+// once confirmed the unit has no remaining relationship to this
+// process or its cgroup at all, so there's no window left to race.
+//
+// `--user` is added when this process isn't running as root, mirroring
 // install.sh's own root-vs-per-user service split. Falls back to a
 // plain child on non-Linux (macOS/launchd doesn't tear down orphaned
 // children this way) or if systemd-run isn't on PATH.
 func selfUpdateCommand(installCmd string) *exec.Cmd {
-	return selfUpdateCommandFor(runtime.GOOS, os.Geteuid(), exec.LookPath, installCmd)
+	return selfUpdateCommandFor(runtime.GOOS, os.Geteuid(), os.Getpid(), exec.LookPath, installCmd)
 }
 
 // selfUpdateCommandFor is selfUpdateCommand's decision logic, factored
-// out for testability -- goos/euid/lookPath are the only real-world
-// inputs it needs, so a test can exercise every branch (root vs user,
-// systemd-run present vs absent, Linux vs not) without depending on
-// the actual host it runs on.
-func selfUpdateCommandFor(goos string, euid int, lookPath func(string) (string, error), installCmd string) *exec.Cmd {
+// out for testability -- goos/euid/pid/lookPath are the only real-
+// world inputs it needs, so a test can exercise every branch (root vs
+// user, systemd-run present vs absent, Linux vs not) without depending
+// on the actual host it runs on.
+func selfUpdateCommandFor(goos string, euid int, pid int, lookPath func(string) (string, error), installCmd string) *exec.Cmd {
 	if goos == "linux" {
 		if path, err := lookPath("systemd-run"); err == nil {
-			runArgs := []string{"--scope", "--quiet", "--collect"}
+			unitName := fmt.Sprintf("radar-node-selfupdate-%d", pid)
+			runArgs := []string{"--unit=" + unitName, "--quiet", "--collect"}
 			if euid != 0 {
 				runArgs = append(runArgs, "--user")
 			}
