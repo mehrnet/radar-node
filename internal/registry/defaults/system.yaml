@@ -32,3 +32,9 @@ response:
   - name: uptime_seconds
     type: number
     unit: s
+  - name: net_in_mbps
+    type: number
+    unit: mbps
+  - name: net_out_mbps
+    type: number
+    unit: mbps

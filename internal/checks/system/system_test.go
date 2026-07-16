@@ -32,3 +32,30 @@ func TestCheck_IgnoresTargetAndReturnsStats(t *testing.T) {
 		t.Errorf("expected a positive mem_total_bytes, got %v", res.Extra["mem_total_bytes"])
 	}
 }
+
+func TestCheck_NetThroughputAppearsOnlyOnceAPreviousSampleExists(t *testing.T) {
+	c := system.New()
+	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second, Mode: probe.ModeWarm}
+
+	first := c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 1; return o }())
+	if !first.Ok {
+		t.Fatalf("expected ok, got error %q", first.Error)
+	}
+	if _, ok := first.Extra["net_in_mbps"]; ok {
+		t.Errorf("expected no net_in_mbps on the very first sample (nothing to diff against), got %+v", first.Extra)
+	}
+	if _, ok := first.Extra["net_out_mbps"]; ok {
+		t.Errorf("expected no net_out_mbps on the very first sample, got %+v", first.Extra)
+	}
+
+	second := c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 2; return o }())
+	if !second.Ok {
+		t.Fatalf("expected ok, got error %q", second.Error)
+	}
+	if _, ok := second.Extra["net_in_mbps"]; !ok {
+		t.Errorf("expected net_in_mbps once a previous sample exists, got %+v", second.Extra)
+	}
+	if _, ok := second.Extra["net_out_mbps"]; !ok {
+		t.Errorf("expected net_out_mbps once a previous sample exists, got %+v", second.Extra)
+	}
+}
