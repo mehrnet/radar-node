@@ -7,18 +7,6 @@ response:
     summary: true
     group: cpu
     display: gauge
-  - name: load1
-    type: number
-    unit: load
-    group: cpu
-  - name: load5
-    type: number
-    unit: load
-    group: cpu
-  - name: load15
-    type: number
-    unit: load
-    group: cpu
   - name: mem_used_percent
     type: number
     unit: "%"
