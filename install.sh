@@ -37,6 +37,12 @@ Options:
   --uninstall        stop and fully remove radar-node from this machine (no
                       other flag is needed -- this ignores --node_id/--api_key)
   -h, --help         show this help
+
+--node_id/--api_key/--api_url/--proxy are only required the first time --
+re-running this same command on a machine that already has radar-node
+installed (e.g. to pick up a new release) reuses whatever's already
+configured there for any of these you don't pass again, so a bare
+`| sh -s` upgrades an existing install with no arguments at all.
 EOF
 }
 
@@ -68,18 +74,23 @@ case "$os_raw" in
   *) err "unsupported OS: $os_raw -- radar-node ships linux/darwin/windows releases; for windows grab a release asset manually from https://github.com/$REPO/releases" ;;
 esac
 
-if [ "$UNINSTALL" = "1" ]; then
-  label="com.mehrnet.radar-node"
-  if [ "$(id -u)" = "0" ]; then
-    INSTALL_BIN_DIR="/usr/local/bin"
-    MODULES_DIR="/etc/radar-node/modules.d"
-    IS_ROOT=1
-  else
-    INSTALL_BIN_DIR="${HOME}/.local/bin"
-    MODULES_DIR="${HOME}/.config/radar-node/modules.d"
-    IS_ROOT=0
-  fi
+# Root gets a real system service (systemd/launchd) so the node
+# survives reboots with zero further action; a non-root install still
+# works, just user-scoped. Needed by --uninstall, the "reuse an
+# existing install's credentials" check below, and the real install
+# further down -- computed once, here, rather than three times.
+if [ "$(id -u)" = "0" ]; then
+  INSTALL_BIN_DIR="/usr/local/bin"
+  MODULES_DIR="/etc/radar-node/modules.d"
+  IS_ROOT=1
+else
+  INSTALL_BIN_DIR="${HOME}/.local/bin"
+  MODULES_DIR="${HOME}/.config/radar-node/modules.d"
+  IS_ROOT=0
+fi
+label="com.mehrnet.radar-node"
 
+if [ "$UNINSTALL" = "1" ]; then
   if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
     if [ "$IS_ROOT" = "1" ]; then
       systemctl stop radar-node >/dev/null 2>&1 || true
@@ -109,8 +120,49 @@ if [ "$UNINSTALL" = "1" ]; then
   exit 0
 fi
 
-[ -n "$NODE_ID" ] || { usage; err "--node_id is required"; }
-[ -n "$API_KEY" ] || { usage; err "--api_key is required"; }
+# ---------------------------------------------------------------------
+# Re-running this exact command with no (or partial) arguments -- e.g.
+# a bare `| sh -s` to pick up a new release -- reuses whatever's
+# already configured in the existing service definition instead of
+# forcing every value to be re-supplied just to upgrade. Only kicks in
+# when *both* --node_id and --api_key are omitted (a value given for
+# one but not the other is ambiguous -- safer to require both explicit
+# than guess whether the other belongs to the same node), and only
+# when an existing install is actually found; a first-time install has
+# nothing to reuse, so both stay required in that case.
+# ---------------------------------------------------------------------
+if [ "$OS" = "linux" ]; then
+  existing_unit="/etc/systemd/system/radar-node.service"
+  [ "$IS_ROOT" = "1" ] || existing_unit="${HOME}/.config/systemd/user/radar-node.service"
+elif [ "$OS" = "darwin" ]; then
+  existing_unit="/Library/LaunchDaemons/${label}.plist"
+  [ "$IS_ROOT" = "1" ] || existing_unit="${HOME}/Library/LaunchAgents/${label}.plist"
+else
+  existing_unit=""
+fi
+
+if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
+  if [ "$OS" = "linux" ]; then
+    existing_api_key="$(sed -n 's/.*--api-key "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_api_url="$(sed -n 's/.*--api-url "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_proxy="$(sed -n 's/.*--api-proxy "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+  else
+    existing_api_key="$(awk '/<string>--api-key<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_api_url="$(awk '/<string>--api-url<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_proxy="$(awk '/<string>--api-proxy<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+  fi
+
+  if [ -z "$NODE_ID" ] && [ -z "$API_KEY" ] && [ -n "$existing_api_key" ]; then
+    NODE_ID="${existing_api_key%%:*}"
+    API_KEY="${existing_api_key#*:}"
+    log "reusing node_id/api_key already configured in ${existing_unit}"
+  fi
+  [ "$API_URL" = "$API_URL_DEFAULT" ] && [ -n "$existing_api_url" ] && API_URL="$existing_api_url"
+  [ -z "$PROXY" ] && [ -n "$existing_proxy" ] && PROXY="$existing_proxy"
+fi
+
+[ -n "$NODE_ID" ] || { usage; err "--node_id is required (no existing installation found at ${existing_unit:-<none>} to reuse it from)"; }
+[ -n "$API_KEY" ] || { usage; err "--api_key is required (no existing installation found at ${existing_unit:-<none>} to reuse it from)"; }
 
 command -v curl >/dev/null 2>&1 || err "curl is required"
 command -v tar >/dev/null 2>&1 || err "tar is required"
@@ -185,25 +237,14 @@ tar -xzf "${WORKDIR}/${ASSET}" -C "$WORKDIR"
 chmod +x "${WORKDIR}/${BIN_NAME}"
 
 # ---------------------------------------------------------------------
-# Install location + service setup. Root gets a real system service
-# (systemd/launchd) so the node survives reboots with zero further
-# action; a non-root install still works, just user-scoped.
-# ---------------------------------------------------------------------
-if [ "$(id -u)" = "0" ]; then
-  INSTALL_BIN_DIR="/usr/local/bin"
-  MODULES_DIR="/etc/radar-node/modules.d"
-  IS_ROOT=1
-else
-  INSTALL_BIN_DIR="${HOME}/.local/bin"
-  MODULES_DIR="${HOME}/.config/radar-node/modules.d"
-  IS_ROOT=0
-fi
-
+# Install location + service setup -- IS_ROOT/INSTALL_BIN_DIR/
+# MODULES_DIR were already resolved near the top of the script.
+#
 # Re-running this script to upgrade an already-installed, already-
 # running node hits ETXTBSY on the cp below unless the service
 # holding the old binary open is stopped first -- best-effort, since
 # on a first install there's nothing to stop yet.
-label="com.mehrnet.radar-node"
+# ---------------------------------------------------------------------
 if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
   if [ "$IS_ROOT" = "1" ]; then
     systemctl stop radar-node >/dev/null 2>&1 || true
