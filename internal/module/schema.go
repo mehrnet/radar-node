@@ -8,15 +8,31 @@ import (
 // FieldSchema declares one param a module's request or response data
 // form carries. This is the "standard" data shape the request/
 // response validation is checked against -- deliberately a small,
-// bespoke shape (name/type/required) rather than full JSON Schema,
-// matching the rest of this project's no-dependency philosophy. Also
-// what gets marshaled into the JSON manifest uploaded to radar-api
-// (see ToManifest in module.go) -- json tags matter here, not just
-// yaml ones.
+// bespoke shape (name/type/required/unit/primary) rather than full
+// JSON Schema, matching the rest of this project's no-dependency
+// philosophy. Also what gets marshaled into the JSON manifest uploaded
+// to radar-api (see ToManifest in module.go) -- json tags matter here,
+// not just yaml ones.
+//
+// Unit and Primary are display-only metadata for a *response* field
+// (meaningless on a request field, and never validated against it) --
+// this is what lets radar's dashboard chart the right number with the
+// right label for any module, including ones it's never heard of,
+// instead of hardcoding logic per prober name. Unit is deliberately a
+// free-form string ("ms", "%", "bytes", "usd", ...) rather than a
+// fixed enum: a module author (a financial data feed, a custom
+// business metric, anything) should be able to label their own data
+// without radar needing to know every unit in advance. Primary marks
+// the one response field that should stand in for this prober's
+// "healthiest at a glance" number in compact/dashboard views; a module
+// with no primary field falls back to the universal latency_ms every
+// check already records regardless of prober.
 type FieldSchema struct {
 	Name     string `yaml:"name" json:"name"`
 	Type     string `yaml:"type" json:"type"` // "string" | "number" | "bool" | "object" | "array"
 	Required bool   `yaml:"required,omitempty" json:"required,omitempty"`
+	Unit     string `yaml:"unit,omitempty" json:"unit,omitempty"`
+	Primary  bool   `yaml:"primary,omitempty" json:"primary,omitempty"`
 }
 
 // The full set of JSON's structural types except null (a field's
@@ -30,6 +46,7 @@ var validFieldTypes = map[string]bool{"string": true, "number": true, "bool": tr
 
 func validateFieldSchema(fields []FieldSchema, moduleName, which string) error {
 	seen := map[string]bool{}
+	primaryCount := 0
 	for _, f := range fields {
 		if f.Name == "" {
 			return fmt.Errorf("module %q: %s field missing a name", moduleName, which)
@@ -41,6 +58,18 @@ func validateFieldSchema(fields []FieldSchema, moduleName, which string) error {
 		if !validFieldTypes[f.Type] {
 			return fmt.Errorf("module %q: %s field %q: type must be \"string\", \"number\", \"bool\", \"object\", or \"array\", got %q", moduleName, which, f.Name, f.Type)
 		}
+		if f.Primary {
+			if which == "request" {
+				return fmt.Errorf("module %q: request field %q: primary is only meaningful on a response field", moduleName, f.Name)
+			}
+			primaryCount++
+			if f.Type != "number" {
+				return fmt.Errorf("module %q: %s field %q: primary must be a \"number\" field, got %q", moduleName, which, f.Name, f.Type)
+			}
+		}
+	}
+	if primaryCount > 1 {
+		return fmt.Errorf("module %q: only one %s field may be marked primary, found %d", moduleName, which, primaryCount)
 	}
 	return nil
 }

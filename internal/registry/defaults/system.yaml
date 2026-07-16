@@ -3,21 +3,32 @@ action: system_stats
 response:
   - name: load1
     type: number
+    unit: load
   - name: load5
     type: number
+    unit: load
   - name: load15
     type: number
+    unit: load
   - name: mem_total_bytes
     type: number
+    unit: bytes
   - name: mem_available_bytes
     type: number
+    unit: bytes
   - name: mem_used_percent
     type: number
+    unit: "%"
+    primary: true
   - name: disk_total_bytes
     type: number
+    unit: bytes
   - name: disk_free_bytes
     type: number
+    unit: bytes
   - name: disk_used_percent
     type: number
+    unit: "%"
   - name: uptime_seconds
     type: number
+    unit: s

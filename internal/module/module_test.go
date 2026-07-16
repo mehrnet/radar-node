@@ -182,6 +182,80 @@ request:
 	}
 }
 
+func TestLoadDir_AcceptsUnitAndPrimaryOnResponseField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", `
+name: metric-mod
+action: tcp_connect
+response:
+  - name: mem_used_percent
+    type: number
+    unit: "%"
+    primary: true
+  - name: mem_total_bytes
+    type: number
+    unit: bytes
+`)
+	modules, err := module.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !modules[0].Response[0].Primary || modules[0].Response[0].Unit != "%" {
+		t.Fatalf("expected the first response field to be primary with unit %%, got %+v", modules[0].Response[0])
+	}
+	if modules[0].Response[1].Primary {
+		t.Fatalf("expected the second response field not to be primary: %+v", modules[0].Response[1])
+	}
+}
+
+func TestLoadDir_RejectsMoreThanOnePrimaryResponseField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: two-primaries
+action: tcp_connect
+response:
+  - name: a
+    type: number
+    primary: true
+  - name: b
+    type: number
+    primary: true
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for more than one primary response field")
+	}
+}
+
+func TestLoadDir_RejectsNonNumberPrimaryField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: string-primary
+action: tcp_connect
+response:
+  - name: a
+    type: string
+    primary: true
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a primary field that isn't a number")
+	}
+}
+
+func TestLoadDir_RejectsPrimaryOnRequestField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: request-primary
+action: tcp_connect
+request:
+  - name: a
+    type: number
+    primary: true
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for primary set on a request field")
+	}
+}
+
 func TestLoadDir_RejectsDuplicateName(t *testing.T) {
 	dir := t.TempDir()
 	body := `

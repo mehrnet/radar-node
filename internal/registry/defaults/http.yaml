@@ -9,11 +9,16 @@ response:
     type: number
   - name: dns_ms
     type: number
+    unit: ms
   - name: connect_ms
     type: number
+    unit: ms
   - name: tls_ms
     type: number
+    unit: ms
   - name: ttfb_ms
     type: number
+    unit: ms
   - name: bytes
     type: number
+    unit: bytes
