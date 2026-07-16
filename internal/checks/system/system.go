@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/probe"
+	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/load"
@@ -88,6 +89,17 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	if mbpsIn, mbpsOut, ok := c.netThroughputMbps(ctx); ok {
 		result["net_in_mbps"] = mbpsIn
 		result["net_out_mbps"] = mbpsOut
+	}
+
+	// gopsutil's own non-blocking mode (interval<=0) keeps its own
+	// package-level "last sample" state and diffs against it for us --
+	// unlike net.IOCounters, there's no cumulative-counter API to do
+	// this ourselves from, and no reason to duplicate gopsutil's
+	// bookkeeping when it already does this exact job. Same shape as
+	// net throughput either way: nothing to diff against on the very
+	// first call, so it's omitted rather than reported as 0.
+	if pct, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pct) > 0 {
+		result["cpu_percent"] = pct[0]
 	}
 
 	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, time.Since(start), result)

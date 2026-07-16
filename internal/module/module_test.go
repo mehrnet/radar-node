@@ -256,6 +256,79 @@ request:
 	}
 }
 
+func TestLoadDir_AcceptsMultipleSummaryFieldsPlusGroupAndDisplay(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", `
+name: multi-metric-mod
+action: tcp_connect
+response:
+  - name: cpu_percent
+    type: number
+    unit: "%"
+    summary: true
+    group: cpu
+    display: gauge
+  - name: mem_used_percent
+    type: number
+    unit: "%"
+    summary: true
+    group: memory
+    display: gauge
+  - name: uptime_seconds
+    type: number
+    unit: s
+    group: system
+    display: stat
+`)
+	modules, err := module.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := modules[0].Response
+	if !fields[0].Summary || fields[0].Group != "cpu" || fields[0].Display != "gauge" {
+		t.Fatalf("expected cpu_percent to be summary/cpu/gauge, got %+v", fields[0])
+	}
+	if !fields[1].Summary || fields[1].Group != "memory" {
+		t.Fatalf("expected mem_used_percent to be summary/memory, got %+v", fields[1])
+	}
+	if fields[2].Summary {
+		t.Fatalf("expected uptime_seconds not to be summary, got %+v", fields[2])
+	}
+	if fields[2].Display != "stat" {
+		t.Fatalf("expected uptime_seconds display to be stat, got %+v", fields[2])
+	}
+}
+
+func TestLoadDir_RejectsNonNumberSummaryField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: string-summary
+action: tcp_connect
+response:
+  - name: a
+    type: string
+    summary: true
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a summary field that isn't a number")
+	}
+}
+
+func TestLoadDir_RejectsSummaryOnRequestField(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: request-summary
+action: tcp_connect
+request:
+  - name: a
+    type: number
+    summary: true
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for summary set on a request field")
+	}
+}
+
 func TestLoadDir_RejectsDuplicateName(t *testing.T) {
 	dir := t.TempDir()
 	body := `

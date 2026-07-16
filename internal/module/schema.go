@@ -14,25 +14,48 @@ import (
 // to radar-api (see ToManifest in module.go) -- json tags matter here,
 // not just yaml ones.
 //
-// Unit and Primary are display-only metadata for a *response* field
-// (meaningless on a request field, and never validated against it) --
-// this is what lets radar's dashboard chart the right number with the
-// right label for any module, including ones it's never heard of,
-// instead of hardcoding logic per prober name. Unit is deliberately a
-// free-form string ("ms", "%", "bytes", "usd", ...) rather than a
-// fixed enum: a module author (a financial data feed, a custom
-// business metric, anything) should be able to label their own data
-// without radar needing to know every unit in advance. Primary marks
-// the one response field that should stand in for this prober's
-// "healthiest at a glance" number in compact/dashboard views; a module
-// with no primary field falls back to the universal latency_ms every
-// check already records regardless of prober.
+// Unit/Primary/Summary/Group/Display are display-only metadata for a
+// *response* field (meaningless on a request field, and never
+// validated against it) -- this is what lets radar's UI draw the
+// right view for any module, including ones it's never heard of,
+// instead of hardcoding logic per prober name. A module fully in
+// control of its own display is the point: a financial data feed, a
+// custom business metric, anything, can describe itself this way
+// without radar-api or radar's frontend needing a single line of
+// prober-specific code.
+//
+// Unit is a free-form string ("ms", "%", "bytes", "usd", ...) rather
+// than a fixed enum, for the same reason.
+//
+// Primary marks the *one* response field that stands in for this
+// prober's single headline number in the most compact (text-only)
+// views; a module with none falls back to the universal latency_ms
+// every check already records regardless of prober.
+//
+// Summary marks a field (any number of them, unlike Primary) for
+// inclusion in the richer dashboard views' at-a-glance row -- e.g.
+// system's cpu/mem/network fields all being visible together, not
+// just one.
+//
+// Group names an arbitrary tab/section a field belongs to in the
+// job detail view (e.g. "cpu", "memory", "network") -- fields sharing
+// a Group are shown together. Fields with no Group fall into a
+// catch-all.
+//
+// Display hints how a field should be drawn: "chart" (default),
+// "gauge", or "stat" (a plain number, no graph -- e.g. uptime). An
+// unrecognized value is never rejected here, only ever falls back to
+// "chart" client-side, so a module can invent its own hint ahead of
+// radar's UI knowing what to do with it without breaking anything.
 type FieldSchema struct {
 	Name     string `yaml:"name" json:"name"`
 	Type     string `yaml:"type" json:"type"` // "string" | "number" | "bool" | "object" | "array"
 	Required bool   `yaml:"required,omitempty" json:"required,omitempty"`
 	Unit     string `yaml:"unit,omitempty" json:"unit,omitempty"`
 	Primary  bool   `yaml:"primary,omitempty" json:"primary,omitempty"`
+	Summary  bool   `yaml:"summary,omitempty" json:"summary,omitempty"`
+	Group    string `yaml:"group,omitempty" json:"group,omitempty"`
+	Display  string `yaml:"display,omitempty" json:"display,omitempty"`
 }
 
 // The full set of JSON's structural types except null (a field's
@@ -65,6 +88,14 @@ func validateFieldSchema(fields []FieldSchema, moduleName, which string) error {
 			primaryCount++
 			if f.Type != "number" {
 				return fmt.Errorf("module %q: %s field %q: primary must be a \"number\" field, got %q", moduleName, which, f.Name, f.Type)
+			}
+		}
+		if f.Summary {
+			if which == "request" {
+				return fmt.Errorf("module %q: request field %q: summary is only meaningful on a response field", moduleName, f.Name)
+			}
+			if f.Type != "number" {
+				return fmt.Errorf("module %q: %s field %q: summary must be a \"number\" field, got %q", moduleName, which, f.Name, f.Type)
 			}
 		}
 	}

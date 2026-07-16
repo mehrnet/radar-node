@@ -59,3 +59,23 @@ func TestCheck_NetThroughputAppearsOnlyOnceAPreviousSampleExists(t *testing.T) {
 		t.Errorf("expected net_out_mbps once a previous sample exists, got %+v", second.Extra)
 	}
 }
+
+func TestCheck_CPUPercentEventuallyAppears(t *testing.T) {
+	// gopsutil's cpu.Percent keeps its own package-level "last sample"
+	// state (not per-Checker, unlike net throughput above), so whether
+	// it's present on any *particular* call depends on whatever else
+	// in this test binary called it first -- not asserted here. What's
+	// always true regardless of ordering is that it shows up once
+	// there's been a real previous sample to diff against.
+	c := system.New()
+	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second, Mode: probe.ModeWarm}
+	c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 1; return o }())
+	time.Sleep(10 * time.Millisecond)
+	res := c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 2; return o }())
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	if _, ok := res.Extra["cpu_percent"]; !ok {
+		t.Errorf("expected cpu_percent once gopsutil has a previous sample to diff against, got %+v", res.Extra)
+	}
+}

@@ -1,40 +1,64 @@
 name: system
 action: system_stats
 response:
+  - name: cpu_percent
+    type: number
+    unit: "%"
+    summary: true
+    group: cpu
+    display: gauge
   - name: load1
     type: number
     unit: load
+    group: cpu
   - name: load5
     type: number
     unit: load
+    group: cpu
   - name: load15
     type: number
     unit: load
-  - name: mem_total_bytes
-    type: number
-    unit: bytes
-  - name: mem_available_bytes
-    type: number
-    unit: bytes
+    group: cpu
   - name: mem_used_percent
     type: number
     unit: "%"
     primary: true
-  - name: disk_total_bytes
+    summary: true
+    group: memory
+    display: gauge
+  - name: mem_total_bytes
     type: number
     unit: bytes
-  - name: disk_free_bytes
+    group: memory
+  - name: mem_available_bytes
     type: number
     unit: bytes
+    group: memory
   - name: disk_used_percent
     type: number
     unit: "%"
-  - name: uptime_seconds
+    group: disk
+    display: gauge
+  - name: disk_total_bytes
     type: number
-    unit: s
+    unit: bytes
+    group: disk
+  - name: disk_free_bytes
+    type: number
+    unit: bytes
+    group: disk
   - name: net_in_mbps
     type: number
     unit: mbps
+    summary: true
+    group: network
   - name: net_out_mbps
     type: number
     unit: mbps
+    summary: true
+    group: network
+  - name: uptime_seconds
+    type: number
+    unit: s
+    group: system
+    display: stat
