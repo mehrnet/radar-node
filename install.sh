@@ -259,7 +259,6 @@ Wants=network-online.target
 ExecStart=${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url "${API_URL}" --api-key "${API_KEY_COMBINED}" --modules-dir "${MODULES_DIR}" ${EXTRA_ARGS}
 Restart=always
 RestartSec=2
-$( [ "$IS_ROOT" = "1" ] && echo "DynamicUser=yes" )
 
 [Install]
 WantedBy=$( [ "$systemctl_flags" = "--user" ] && echo "default.target" || echo "multi-user.target" )
