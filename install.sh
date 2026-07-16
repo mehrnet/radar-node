@@ -294,7 +294,24 @@ cp "${WORKDIR}/${BIN_NAME}" "${INSTALL_BIN_DIR}/${BIN_NAME}"
 chmod +x "${INSTALL_BIN_DIR}/${BIN_NAME}"
 log "installed ${INSTALL_BIN_DIR}/${BIN_NAME}"
 
-"${INSTALL_BIN_DIR}/${BIN_NAME}" init -C "$MODULES_DIR" >/dev/null 2>&1 || true
+# Deliberately NOT running `radar-node init -C "$MODULES_DIR"` here
+# anymore -- every built-in module (tcp/udp/dns/icmp/http/system) is
+# already embedded in the binary itself and loads with zero on-disk
+# files needed (see registry.Default()); --modules-dir only exists so
+# a *custom* module (or a deliberate override of a built-in) can be
+# dropped in. `init` without --force only writes a file if it doesn't
+# already exist, which sounds harmless but is exactly what broke
+# built-in module upgrades: the first install (or the first self-
+# update that ever ran this) materialized whatever that version's
+# embedded system.yaml/tcp.yaml/etc. looked like onto disk, and
+# because LoadModules() always prefers an on-disk file of the same
+# name over the embedded default, every later binary update's improved
+# built-in module was silently shadowed by that permanently-frozen
+# on-disk copy forever after -- e.g. a node still reporting a "system"
+# schema from months ago despite running today's binary. Leaving
+# $MODULES_DIR empty (still created, still passed to --modules-dir) is
+# the actually-correct default; a user who wants to inspect or
+# override a built-in module can still run `radar-node init` by hand.
 
 # The icmp default prober uses an unprivileged "ping socket", which
 # needs net.ipv4.ping_group_range to include this process's group --
