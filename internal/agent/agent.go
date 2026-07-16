@@ -18,6 +18,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -240,7 +241,7 @@ func (a *agent) selfUpdate() {
 	installCmd := fmt.Sprintf("curl -fsSL %s | sh -s -- %s", installScriptURL, strings.Join(args, " "))
 	log.Printf("agent: update requested -- re-running install script to upgrade: %s", installCmd)
 
-	cmd := exec.Command("sh", "-c", installCmd)
+	cmd := selfUpdateCommand(installCmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -249,6 +250,48 @@ func (a *agent) selfUpdate() {
 	}
 	log.Printf("agent: install script launched (pid %d) -- exiting so it can replace this process", cmd.Process.Pid)
 	os.Exit(0)
+}
+
+// selfUpdateCommand wraps installCmd in `systemd-run --scope` when
+// available, instead of just running it as a plain child process.
+// This matters specifically because this process is (usually) itself
+// a systemd service: os/exec never moves a child into a new cgroup, so
+// a plain child stays in *this* unit's cgroup, and systemd's default
+// KillMode=control-group kills every process in that cgroup -- not
+// just the main one -- the moment the unit is stopped/restarted, which
+// is exactly what this function's own exit (via Restart=always)
+// triggers immediately afterward. The result without this wrapper:
+// the installer gets killed mid-download/replace before it ever
+// upgrades the binary, and the service just restarts on the same old
+// version it started with -- silently, since nothing here observes
+// the installer's fate after Start(). `--scope` creates a new,
+// independent transient unit outside this service's cgroup, so the
+// installer survives the restart that immediately follows. `--user`
+// is added when this process isn't running as root, mirroring
+// install.sh's own root-vs-per-user service split. Falls back to a
+// plain child on non-Linux (macOS/launchd doesn't tear down orphaned
+// children this way) or if systemd-run isn't on PATH.
+func selfUpdateCommand(installCmd string) *exec.Cmd {
+	return selfUpdateCommandFor(runtime.GOOS, os.Geteuid(), exec.LookPath, installCmd)
+}
+
+// selfUpdateCommandFor is selfUpdateCommand's decision logic, factored
+// out for testability -- goos/euid/lookPath are the only real-world
+// inputs it needs, so a test can exercise every branch (root vs user,
+// systemd-run present vs absent, Linux vs not) without depending on
+// the actual host it runs on.
+func selfUpdateCommandFor(goos string, euid int, lookPath func(string) (string, error), installCmd string) *exec.Cmd {
+	if goos == "linux" {
+		if path, err := lookPath("systemd-run"); err == nil {
+			runArgs := []string{"--scope", "--quiet", "--collect"}
+			if euid != 0 {
+				runArgs = append(runArgs, "--user")
+			}
+			runArgs = append(runArgs, "sh", "-c", installCmd)
+			return exec.Command(path, runArgs...)
+		}
+	}
+	return exec.Command("sh", "-c", installCmd)
 }
 
 // handleDeleteCommand runs when this node has been deleted from radar
