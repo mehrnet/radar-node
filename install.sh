@@ -205,6 +205,35 @@ VERSION_NUM="${TAG#v}"
 ASSET="${BIN_NAME}_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
 
+# ---------------------------------------------------------------------
+# Verify these credentials are actually valid before downloading or
+# installing anything -- a wrong node_id/api_key would otherwise still
+# "successfully" install and start a service that just fails to
+# authenticate forever in the background, with no feedback here at
+# all. Piggybacks on the real heartbeat endpoint (the same call the
+# running agent itself makes) rather than a dedicated check, since
+# there's no lighter node-authed endpoint and an empty-probers
+# heartbeat is already about as cheap as this gets. A definite 401 is
+# treated as a real credential problem; anything else (including not
+# being able to reach radar-api at all) is inconclusive -- a network
+# hiccup here isn't proof the credentials are wrong, so it doesn't
+# block the install; the running agent's own retries are what actually
+# deal with a flaky network.
+# ---------------------------------------------------------------------
+log "verifying node credentials against ${API_URL}..."
+verify_body="{\"node_id\":\"${NODE_ID}\",\"agent_version\":\"${VERSION_NUM}\",\"probers\":[],\"since_seq\":0,\"sent_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+if [ -n "$PROXY" ]; then
+  verify_status="$(curl -s -o /dev/null -w '%{http_code}' --proxy "$PROXY" --max-time 10 -X POST "${API_URL}/v1/nodes/heartbeat" -H "Authorization: Bearer ${NODE_ID}:${API_KEY}" -H "Content-Type: application/json" -d "$verify_body" || true)"
+else
+  verify_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST "${API_URL}/v1/nodes/heartbeat" -H "Authorization: Bearer ${NODE_ID}:${API_KEY}" -H "Content-Type: application/json" -d "$verify_body" || true)"
+fi
+if [ "$verify_status" = "401" ]; then
+  err "radar-api rejected these credentials (401) -- double check --node_id/--api_key (or the existing installation's, if you didn't pass fresh ones)"
+fi
+if [ "$verify_status" != "200" ]; then
+  log "couldn't confirm credentials against ${API_URL} (HTTP ${verify_status:-no response}) -- continuing anyway, since this looks like a network issue rather than a credential one"
+fi
+
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
