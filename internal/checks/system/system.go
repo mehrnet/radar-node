@@ -1,5 +1,5 @@
 // Package system implements a self-monitoring check: the node
-// reports its own resource usage (CPU, memory, disk, uptime, and
+// reports its own resource usage (CPU load, memory, disk, uptime, and
 // network throughput) rather than probing anything external. It
 // ignores probe.Options's Target entirely -- there is nothing to
 // dial, the box running the check *is* the subject.
@@ -17,6 +17,7 @@ import (
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
 )
@@ -51,6 +52,10 @@ func (c *Checker) Type() string { return "system" }
 func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	start := time.Now()
 
+	loadAvg, err := load.AvgWithContext(ctx)
+	if err != nil {
+		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("read load average: %w", err))
+	}
 	vmem, err := mem.VirtualMemoryWithContext(ctx)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("read memory: %w", err))
@@ -65,6 +70,9 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 
 	result := map[string]any{
+		"load1":               loadAvg.Load1,
+		"load5":               loadAvg.Load5,
+		"load15":              loadAvg.Load15,
 		"mem_total_bytes":     int64(vmem.Total),
 		"mem_available_bytes": int64(vmem.Available),
 		"mem_used_percent":    vmem.UsedPercent,
