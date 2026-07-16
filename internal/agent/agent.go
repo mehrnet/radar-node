@@ -233,6 +233,19 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 // added specifically so this exact re-run-to-upgrade path doesn't hit
 // ETXTBSY). This process exiting is what lets that cp succeed; there
 // is deliberately no attempt to replace this binary in-process.
+// selfUpdateLogPath is where the detached installer's own stdout/
+// stderr goes -- deliberately NOT this process's inherited os.Stdout.
+// A systemd service's stdout is a journal stream tied to that unit's
+// own lifecycle; once this process exits and the unit is marked
+// inactive (which happens within about a second, well before the
+// installer finishes downloading/replacing/restarting), writes from a
+// process that merely inherited that fd can vanish from the journal
+// entirely -- observed in practice as install.sh silently appearing to
+// do nothing, with zero output anywhere, on every single attempt. A
+// plain, independent file survives regardless of what happens to the
+// parent unit.
+const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
+
 func (a *agent) selfUpdate() {
 	args := []string{"--node_id=" + a.nodeID, "--api_key=" + strings.TrimPrefix(a.apiKey, a.nodeID+":"), "--api_url=" + a.apiURL}
 	if a.proxyURL != "" {
@@ -242,13 +255,20 @@ func (a *agent) selfUpdate() {
 	log.Printf("agent: update requested -- re-running install script to upgrade: %s", installCmd)
 
 	cmd := selfUpdateCommand(installCmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	logFile, err := os.OpenFile(selfUpdateLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		log.Printf("agent: self-update: could not open %s (%v) -- falling back to this process's own stdout, which may not survive the restart that follows", selfUpdateLogPath, err)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	} else {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+	}
 	if err := cmd.Start(); err != nil {
 		log.Printf("agent: self-update failed to start: %v", err)
 		return
 	}
-	log.Printf("agent: install script launched (pid %d) -- exiting so it can replace this process", cmd.Process.Pid)
+	log.Printf("agent: install script launched (pid %d), logging to %s -- exiting so it can replace this process", cmd.Process.Pid, selfUpdateLogPath)
 	os.Exit(0)
 }
 
