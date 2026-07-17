@@ -2,20 +2,23 @@
 // module's YAML `action:` field can reference, called in-process
 // instead of spawning a `command:` subprocess. Every module is still
 // just a file; `action:` only picks which built-in does the work.
-// Most actions here have zero subprocess overhead (tcp/udp/dns/icmp/
-// http/system); xray_proxy_test/singbox_proxy_test are the exception
-// -- they still shell out to the engine binary, since reimplementing
-// an xray/sing-box-compatible client isn't reasonable, but the
-// protocol-agnostic config handling and port remapping around that
-// subprocess is real Go logic that doesn't fit the argv-template
-// `command:` model, so it lives here rather than as a `run:` module.
+//
+// xray_proxy_test/singbox_proxy_test used to live here (shelling out
+// to whatever xray/sing-box binary an operator had manually placed on
+// PATH or pointed at via XRAY_BIN/SINGBOX_BIN) -- removed now that
+// engine binaries are a managed install.sh concern (see
+// --install-xray/--install-wireguard/--install-openvpn, fetched from
+// mehrnet/static-builds), not something this binary reaches for
+// itself. The equivalent probers are ordinary run:-based modules now
+// (see examples/modules/xray.yaml), like wireguard/openvpn always
+// were, rather than a special-cased built-in action for xray/sing-box
+// specifically.
 package action
 
 import (
 	"github.com/mehrnet/radar-node/internal/checks/dns"
 	"github.com/mehrnet/radar-node/internal/checks/httpcheck"
 	"github.com/mehrnet/radar-node/internal/checks/icmp"
-	"github.com/mehrnet/radar-node/internal/checks/proxytest"
 	"github.com/mehrnet/radar-node/internal/checks/system"
 	"github.com/mehrnet/radar-node/internal/checks/tcp"
 	"github.com/mehrnet/radar-node/internal/checks/udp"
@@ -28,14 +31,12 @@ import (
 // number of differently-configured modules can reference the same
 // action.
 var Registry = map[string]probe.Checker{
-	"tcp_connect":        tcp.New(),
-	"udp_probe":          udp.New(),
-	"dns_query":          dns.New(),
-	"icmp_ping":          icmp.New(),
-	"http_request":       httpcheck.New(),
-	"system_stats":       system.New(),
-	"xray_proxy_test":    proxytest.NewXray(),
-	"singbox_proxy_test": proxytest.NewSingBox(),
+	"tcp_connect":  tcp.New(),
+	"udp_probe":    udp.New(),
+	"dns_query":    dns.New(),
+	"icmp_ping":    icmp.New(),
+	"http_request": httpcheck.New(),
+	"system_stats": system.New(),
 }
 
 // Get returns the Checker registered under name, if any.

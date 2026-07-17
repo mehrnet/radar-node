@@ -1,0 +1,28 @@
+name: wireguard
+request:
+  - name: private_key
+    type: string
+    required: true
+  - name: address
+    type: string
+    required: true
+  - name: peer_public_key
+    type: string
+    required: true
+  - name: peer_preshared_key
+    type: string
+  - name: endpoint
+    type: string
+    required: true
+  - name: allowed_ips
+    type: array
+    required: true
+  - name: persistent_keepalive
+    type: number
+run:
+  command: ["/bin/sh", "__MODULES_DIR__/wireguard-test.sh", "{{params_json}}", "{{target}}", "{{timeout_ms}}"]
+collect:
+  format: writeout_json
+response:
+  - name: http_code
+    type: number

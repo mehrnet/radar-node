@@ -197,41 +197,20 @@ output, since a check's own failure modes (partial data, a tool's varying
 output shape on error) shouldn't be conflated with a request-validation
 rejection.
 
-### Generic xray/sing-box proxying
+### Bundled engine modules (xray, WireGuard, OpenVPN)
 
-`xray_proxy_test`/`singbox_proxy_test` are native actions (see
-`internal/checks/proxytest`) that take a full engine config plus which
-port in it is the local test entry point, and are entirely
-protocol-agnostic -- neither reads anything protocol-specific out of the
-config, so any protocol either engine supports (vless, vmess, trojan,
-shadowsocks, hysteria2, ...) works with zero radar-node code changes.
-Building the config from a share link (`vless://...`, `vmess://...`, ...)
-is a client-side/UI concern, the same way 3x-ui converts share links to
-JSON in the browser -- radar-node only ever receives the finished config.
-
-```yaml
-name: xray
-action: xray_proxy_test
-request:
-  - name: config
-    type: object
-    required: true
-  - name: socks_port
-    type: number
-    required: true
-```
-
-`socks_port` is **never bound as-is**. A node's environment isn't fully
-known in advance -- another process could already hold that port, or two
-probes could legitimately want to test through "the same" port
-concurrently -- so the node always silently reallocates the matching
-inbound (whichever one's `port`/`listen_port` equals `socks_port`) to a
-real free local port before launching the engine, and reports results
-against whichever port it actually used. `socks_port` only ever serves to
-identify *which* inbound to remap; the account/probe never sees or needs to
-know remapping happened. A `socks_port` that doesn't match any inbound in
-`config` comes back as `error_code: "invalid_params"`, same as any other
-request-schema mismatch.
+There is no built-in Go action for any proxy/VPN engine -- `xray_proxy_test`/
+`singbox_proxy_test` used to be native actions here, removed in favor of
+ordinary `run:`-based modules driving real, independently-versioned engine
+binaries. install.sh's `--install-xray`/`--install-wireguard`/
+`--install-openvpn` flags fetch those binaries (statically built, tracked
+daily against upstream) from
+[mehrnet/static-builds](https://github.com/mehrnet/static-builds), and drop
+the matching module YAML + wrapper script into `modules.d` -- see that
+repo's own README for exactly what gets installed where. This is a managed
+install concern, not something this binary reaches for itself; a node with
+none of these flags used at install time simply never has those probers in
+its inventory at all.
 
 For `run:`-based modules, the following placeholders resolve in every
 `prepare`/`run`/`teardown` command, sourced only from the fixed set below

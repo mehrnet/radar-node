@@ -21,6 +21,17 @@ PROXY=""
 VERSION="latest"
 UNINSTALL=0
 
+# Optional bundled engine modules (see install/modules/ and
+# https://github.com/mehrnet/static-builds) -- off unless explicitly
+# requested, or already installed (see the "still opted in" check
+# further down, once TOOLS_DIR is known).
+INSTALL_XRAY=0
+INSTALL_WIREGUARD=0
+INSTALL_OPENVPN=0
+REMOVE_XRAY=0
+REMOVE_WIREGUARD=0
+REMOVE_OPENVPN=0
+
 usage() {
   cat <<'EOF'
 Usage: install.sh --node_id=<id> --api_key=<secret> [options]
@@ -38,11 +49,25 @@ Options:
                       other flag is needed -- this ignores --node_id/--api_key)
   -h, --help         show this help
 
+Optional bundled engine modules (each fetches a statically-built binary
+from mehrnet/static-builds and drops the matching module + wrapper
+script into modules.d -- see that repo's README for what's actually
+installed):
+  --install-xray        xray-core, for a generic proxy-config probe
+  --install-wireguard   a WireGuard tunnel probe (needs CAP_NET_ADMIN --
+                         applied to the binary via setcap on a root install)
+  --install-openvpn     an OpenVPN tunnel probe (linux only)
+  --remove-xray / --remove-wireguard / --remove-openvpn
+                        undo the corresponding --install-* above
+
 --node_id/--api_key/--api_url/--proxy are only required the first time --
 re-running this same command on a machine that already has radar-node
 installed (e.g. to pick up a new release) reuses whatever's already
 configured there for any of these you don't pass again, so a bare
-`| sh -s` upgrades an existing install with no arguments at all.
+`| sh -s` upgrades an existing install with no arguments at all -- this
+includes any --install-* engine module already opted into: it's kept
+up to date on every re-run without needing to repeat the flag, unless
+the matching --remove-* is passed.
 EOF
 }
 
@@ -57,6 +82,12 @@ for arg in "$@"; do
     --proxy=*) PROXY="${arg#*=}" ;;
     --version=*) VERSION="${arg#*=}" ;;
     --uninstall) UNINSTALL=1 ;;
+    --install-xray) INSTALL_XRAY=1 ;;
+    --install-wireguard) INSTALL_WIREGUARD=1 ;;
+    --install-openvpn) INSTALL_OPENVPN=1 ;;
+    --remove-xray) REMOVE_XRAY=1 ;;
+    --remove-wireguard) REMOVE_WIREGUARD=1 ;;
+    --remove-openvpn) REMOVE_OPENVPN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) err "unknown argument: $arg (see --help)" ;;
   esac
@@ -82,13 +113,26 @@ esac
 if [ "$(id -u)" = "0" ]; then
   INSTALL_BIN_DIR="/usr/local/bin"
   MODULES_DIR="/etc/radar-node/modules.d"
+  TOOLS_DIR="/etc/radar-node/tools"
   IS_ROOT=1
 else
   INSTALL_BIN_DIR="${HOME}/.local/bin"
   MODULES_DIR="${HOME}/.config/radar-node/modules.d"
+  TOOLS_DIR="${HOME}/.config/radar-node/tools"
   IS_ROOT=0
 fi
 label="com.mehrnet.radar-node"
+
+# A bundled engine module already opted into on a previous run is kept
+# up to date on every later bare re-run, the same way radar-node's own
+# binary is -- its presence on disk *is* the "still opted in" record,
+# no separate state file needed. Only skipped if this exact run is the
+# one removing it (--remove-* was just passed above).
+if [ "$UNINSTALL" != "1" ]; then
+  [ "$INSTALL_XRAY" = "0" ] && [ "$REMOVE_XRAY" = "0" ] && [ -f "${TOOLS_DIR}/xray" ] && INSTALL_XRAY=1
+  [ "$INSTALL_WIREGUARD" = "0" ] && [ "$REMOVE_WIREGUARD" = "0" ] && [ -f "${TOOLS_DIR}/radar-wg" ] && INSTALL_WIREGUARD=1
+  [ "$INSTALL_OPENVPN" = "0" ] && [ "$REMOVE_OPENVPN" = "0" ] && [ -f "${TOOLS_DIR}/openvpn" ] && INSTALL_OPENVPN=1
+fi
 
 if [ "$UNINSTALL" = "1" ]; then
   if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
@@ -114,8 +158,8 @@ if [ "$UNINSTALL" = "1" ]; then
   fi
 
   rm -f "${INSTALL_BIN_DIR}/${BIN_NAME}"
-  rm -rf "$MODULES_DIR"
-  log "removed ${INSTALL_BIN_DIR}/${BIN_NAME} and ${MODULES_DIR}"
+  rm -rf "$MODULES_DIR" "$TOOLS_DIR"
+  log "removed ${INSTALL_BIN_DIR}/${BIN_NAME}, ${MODULES_DIR}, and ${TOOLS_DIR}"
   log "radar-node has been fully uninstalled from this machine."
   exit 0
 fi
@@ -324,6 +368,137 @@ if [ "$OS" = "linux" ] && [ "$IS_ROOT" = "1" ] && command -v sysctl >/dev/null 2
   sysctl -w net.ipv4.ping_group_range="0 2147483647" >/dev/null 2>&1 || true
   mkdir -p /etc/sysctl.d 2>/dev/null
   echo "net.ipv4.ping_group_range = 0 2147483647" > /etc/sysctl.d/99-radar-node-icmp.conf 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------
+# Optional bundled engine modules -- fetched from mehrnet/static-builds
+# (a separate repo, its own daily-cron-checked release per tool, see
+# that repo's own README) rather than built or bundled here. Runs
+# before the service (re)start further down so a module just dropped
+# into $MODULES_DIR is actually picked up -- modules load once at
+# agent startup, not on a file-system watch.
+# ---------------------------------------------------------------------
+resolve_static_build_tag() {
+  # $1 = tag prefix (e.g. "xray", "openvpn", "wireguard-go"). Can't use
+  # GitHub's /releases/latest here -- that returns the single most
+  # recent release across *all three* tools' tags in that one repo,
+  # not scoped to this one -- so this lists releases and takes the
+  # newest whose tag starts with the prefix (GitHub returns the list
+  # newest-first).
+  prefix="$1"
+  tmp_meta="$(mktemp)"
+  curl_get "https://api.github.com/repos/mehrnet/static-builds/releases?per_page=30" "$tmp_meta"
+  tag="$(grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp_meta" | sed -E 's/.*"([^"]+)"$/\1/' | grep "^${prefix}-" | head -n1)"
+  rm -f "$tmp_meta"
+  [ -n "$tag" ] || err "no mehrnet/static-builds release found matching ${prefix}-* -- see https://github.com/mehrnet/static-builds/releases"
+  printf '%s\n' "$tag"
+}
+
+# $1 = static-builds tag prefix, $2 = asset filename prefix (its own
+# <name>_<version>_<os>_<arch>.<ext> convention), $3 = installed binary
+# filename, $4 = space-separated module files to fetch from this repo's
+# own install/modules/.
+install_static_tool() {
+  tag_prefix="$1"; asset_prefix="$2"; bin_name="$3"; module_files="$4"
+
+  tag="$(resolve_static_build_tag "$tag_prefix")"
+  # Strip our own "<prefix>-" wrapper, then a possible leading "v" from
+  # upstream's own tag underneath it (xray/openvpn's are "vX.Y.Z";
+  # wireguard-go's is a bare commit hash with no "v" to strip -- a
+  # no-op then, not an error) -- static-builds' own asset filenames
+  # never include that "v" (see mehrnet/static-builds' publish.sh).
+  version="${tag#"${tag_prefix}"-}"
+  version="${version#v}"
+  ext="tar.gz"
+  [ "$OS" = "windows" ] && ext="zip"
+  asset="${asset_prefix}_${version}_${OS}_${ARCH}.${ext}"
+  base_url="https://github.com/mehrnet/static-builds/releases/download/${tag}"
+
+  log "installing ${bin_name} (${tag})..."
+  tmp_asset="$(mktemp)"
+  curl_get "${base_url}/${asset}" "$tmp_asset"
+
+  tmp_sums="$(mktemp)"
+  if curl_get "${base_url}/checksums.txt" "$tmp_sums" 2>/dev/null; then
+    expected="$(grep "  ${asset}\$" "$tmp_sums" | awk '{print $1}')"
+    if [ -n "$expected" ]; then
+      actual=""
+      if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$tmp_asset" | awk '{print $1}')"
+      elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "$tmp_asset" | awk '{print $1}')"
+      fi
+      if [ -n "$actual" ]; then
+        [ "$actual" = "$expected" ] || err "checksum mismatch for ${asset} (expected $expected, got $actual)"
+      fi
+    fi
+  else
+    log "checksums.txt not found for ${tag}, skipping verification"
+  fi
+  rm -f "$tmp_sums"
+
+  extract_dir="$(mktemp -d)"
+  if [ "$ext" = "zip" ]; then
+    command -v unzip >/dev/null 2>&1 || err "unzip is required to install ${bin_name}"
+    unzip -q "$tmp_asset" -d "$extract_dir"
+  else
+    tar -xzf "$tmp_asset" -C "$extract_dir"
+  fi
+  rm -f "$tmp_asset"
+
+  mkdir -p "$TOOLS_DIR"
+  cp "${extract_dir}/${asset_prefix}" "${TOOLS_DIR}/${bin_name}"
+  chmod +x "${TOOLS_DIR}/${bin_name}"
+  rm -rf "$extract_dir"
+  log "installed ${TOOLS_DIR}/${bin_name}"
+
+  mkdir -p "$MODULES_DIR"
+  for f in $module_files; do
+    tmp_module="$(mktemp)"
+    curl_get "https://raw.githubusercontent.com/${REPO}/main/install/modules/${f}" "$tmp_module"
+    sed "s#__MODULES_DIR__#${MODULES_DIR}#g; s#__TOOLS_DIR__#${TOOLS_DIR}#g" "$tmp_module" > "${MODULES_DIR}/${f}"
+    rm -f "$tmp_module"
+    case "$f" in *.sh) chmod +x "${MODULES_DIR}/${f}" ;; esac
+  done
+  log "installed module: ${module_files}"
+}
+
+remove_static_tool() {
+  # $1 = installed binary filename, $2 = space-separated module files
+  bin_name="$1"; module_files="$2"
+  rm -f "${TOOLS_DIR}/${bin_name}"
+  for f in $module_files; do
+    rm -f "${MODULES_DIR}/${f}"
+  done
+  log "removed ${bin_name} and its module files"
+}
+
+if [ "$REMOVE_XRAY" = "1" ]; then
+  remove_static_tool "xray" "xray.yaml xray-prepare.sh"
+elif [ "$INSTALL_XRAY" = "1" ]; then
+  install_static_tool "xray" "xray" "xray" "xray.yaml xray-prepare.sh"
+fi
+
+if [ "$REMOVE_WIREGUARD" = "1" ]; then
+  remove_static_tool "radar-wg" "wireguard.yaml wireguard-test.sh"
+elif [ "$INSTALL_WIREGUARD" = "1" ]; then
+  [ "$OS" = "linux" ] || err "--install-wireguard is linux-only (radar-wg's netlink dependency doesn't target $OS)"
+  install_static_tool "wireguard-go" "radar-wg" "radar-wg" "wireguard.yaml wireguard-test.sh"
+  # CAP_NET_ADMIN (creating the TUN device) via setcap on the binary
+  # itself, rather than requiring the whole agent process to run as
+  # root just for this one prober -- only possible (and only needed)
+  # on a root install; harmless to skip otherwise, radar-wg just won't
+  # work until this node's agent runs with that capability some other way.
+  if [ "$IS_ROOT" = "1" ] && command -v setcap >/dev/null 2>&1; then
+    setcap cap_net_admin+ep "${TOOLS_DIR}/radar-wg" || log "setcap failed -- radar-wg will need CAP_NET_ADMIN some other way"
+  fi
+fi
+
+if [ "$REMOVE_OPENVPN" = "1" ]; then
+  remove_static_tool "openvpn" "openvpn.yaml openvpn-test.sh"
+elif [ "$INSTALL_OPENVPN" = "1" ]; then
+  [ "$OS" = "linux" ] || err "--install-openvpn is linux-only (only linux/amd64+arm64 static builds are published)"
+  install_static_tool "openvpn" "openvpn" "openvpn" "openvpn.yaml openvpn-test.sh"
 fi
 
 API_KEY_COMBINED="${NODE_ID}:${API_KEY}"

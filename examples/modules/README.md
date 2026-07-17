@@ -5,42 +5,14 @@ module system (see `../../README.md` and `internal/module`), proving
 the mechanism against genuine xray-core and sing-box binaries -- not
 mocked.
 
-## `xray.yaml` / `singbox.yaml` -- the recommended way to test either engine
+## `xray-vless.yaml` / `singbox-trojan.yaml` -- `run:`-based reference
 
-Generic, protocol-agnostic actions (`internal/checks/proxytest`, `action:
-xray_proxy_test`/`singbox_proxy_test`) rather than `run:`-based modules:
-a probe supplies the engine's full client config (however it was built --
-e.g. converted client-side from a share link, the way 3x-ui does it) plus
-`socks_port`, which inbound in that config is the local test entry point.
-Neither action reads anything protocol-specific out of the config, so any
-protocol either engine supports works with zero radar-node changes -- this
-is what `xray-vless`/`singbox-trojan` below have been superseded by for
-the xray/sing-box case specifically.
-
-`socks_port` is never bound as-is -- the node always silently reallocates
-the matching inbound to a real free local port first (see README.md's
-"Generic xray/sing-box proxying" section), so a taken port or two
-concurrent probes never collide. Verified against the same real,
-internet-facing VLESS+REALITY server referenced below: `ok: true,
-http_code: 200` through the generic `xray` module with the declared
-`socks_port` deliberately pre-occupied by an unrelated process the whole
-time (proving the silent remap, not just the proxy tunnel itself), and a
-deliberately wrong declared port (matching no inbound at all) correctly
-came back `error_code: "invalid_params"`.
-
-```jsonc
-// example probe params
-{
-  "config": { /* full xray or sing-box client config JSON */ },
-  "socks_port": 1234
-}
-```
-
-## `xray-vless.yaml` / `singbox-trojan.yaml` -- bespoke `run:`-based reference
-
-Still valid, still tested -- kept as a reference for genuinely bespoke
-external-tool integrations that don't fit the generic config+port shape
-above.
+There is no built-in Go action for xray/sing-box (there used to be --
+`xray_proxy_test`/`singbox_proxy_test`, removed once engine binaries
+became an install.sh-managed concern; see
+[mehrnet/static-builds](https://github.com/mehrnet/static-builds) and
+`--install-xray` in the main README). Every engine integration is a
+plain `run:`-based module now, these two included.
 
 - `xray-vless.yaml` + `prepare-vless.sh` -- tests a VLESS proxy.
   Supports plaintext, TLS, and REALITY (`security=reality`, matching

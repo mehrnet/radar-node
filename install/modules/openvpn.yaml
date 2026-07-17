@@ -1,0 +1,16 @@
+name: openvpn
+request:
+  - name: config
+    type: string
+    required: true
+  - name: auth_user
+    type: string
+  - name: auth_pass
+    type: string
+run:
+  command: ["/bin/sh", "__MODULES_DIR__/openvpn-test.sh", "{{params_json}}", "{{target}}", "{{timeout_ms}}"]
+collect:
+  format: writeout_json
+response:
+  - name: http_code
+    type: number
