@@ -209,6 +209,18 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			a.selfUpdate()
 		case "delete":
 			a.handleDeleteCommand()
+		case "install_xray":
+			a.reinstall("--install-xray")
+		case "remove_xray":
+			a.reinstall("--remove-xray")
+		case "install_wireguard":
+			a.reinstall("--install-wireguard")
+		case "remove_wireguard":
+			a.reinstall("--remove-wireguard")
+		case "install_openvpn":
+			a.reinstall("--install-openvpn")
+		case "remove_openvpn":
+			a.reinstall("--remove-openvpn")
 		}
 	}
 
@@ -247,12 +259,31 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
 
 func (a *agent) selfUpdate() {
+	a.reinstall("")
+}
+
+// reinstall re-execs install.sh with this node's own existing
+// node_id/api_key/api_url/proxy (exactly like a plain "update" does),
+// plus one extra flag when the request is really about a bundled
+// engine module rather than radar-node's own version -- e.g.
+// "--install-xray" for the "install_xray" pendingCommand. install.sh
+// itself does the actual fetch/verify/place and the service restart
+// that picks up a module just dropped into modules.d; this is only
+// ever "re-run that same script, with one more argument than usual."
+func (a *agent) reinstall(extraFlag string) {
 	args := []string{"--node_id=" + a.nodeID, "--api_key=" + strings.TrimPrefix(a.apiKey, a.nodeID+":"), "--api_url=" + a.apiURL}
 	if a.proxyURL != "" {
 		args = append(args, "--proxy="+a.proxyURL)
 	}
+	if extraFlag != "" {
+		args = append(args, extraFlag)
+	}
 	installCmd := fmt.Sprintf("curl -fsSL %s | sh -s -- %s", installScriptURL, strings.Join(args, " "))
-	log.Printf("agent: update requested -- re-running install script to upgrade: %s", installCmd)
+	reason := "update requested"
+	if extraFlag != "" {
+		reason = extraFlag + " requested"
+	}
+	log.Printf("agent: %s -- re-running install script: %s", reason, installCmd)
 
 	cmd := selfUpdateCommand(installCmd)
 	logFile, err := os.OpenFile(selfUpdateLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
