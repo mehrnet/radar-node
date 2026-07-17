@@ -1,6 +1,6 @@
 // Package agent implements the `radar-node agent` loop. Unlike
 // the original design, the server never tells this agent what's due
-// -- it syncs job *definitions* incrementally (folded into
+// -- it syncs probe *definitions* incrementally (folded into
 // POST /v1/nodes/heartbeat's since_seq/events, see heartbeatLoop)
 // into a local cache, decides for itself when something is due using
 // its own clock-corrected notion of "now" (see clock.go), runs it
@@ -52,8 +52,8 @@ type Config struct {
 	// main.version's own fallback.
 	Version string
 	// SchedulerTick is how often the local scheduler checks its
-	// cached jobs for due-ness. This governs real-world scheduling
-	// granularity (a 30s-interval job can fire up to one tick late),
+	// cached probes for due-ness. This governs real-world scheduling
+	// granularity (a 30s-interval probe can fire up to one tick late),
 	// not network traffic -- a tick with nothing due does no I/O at
 	// all.
 	SchedulerTick time.Duration
@@ -65,7 +65,7 @@ type Config struct {
 }
 
 // agent bundles everything the two concurrent loops (heartbeat --
-// which also carries job-definition sync, see heartbeatLoop --
+// which also carries probe-definition sync, see heartbeatLoop --
 // and scheduler) share, so neither needs a long, overlapping
 // positional parameter list just to thread the same handful of
 // dependencies through -- client/nodeID/reg in particular were
@@ -79,7 +79,7 @@ type agent struct {
 	proxyURL    string
 	version     string
 	reg         registry.Registry
-	cache       *jobCache
+	cache       *probeCache
 	clock       *clockSync
 	concurrency int
 	// node_status starts optimistic; the first heartbeat/results
@@ -126,7 +126,7 @@ func Run(ctx context.Context, cfg Config) error {
 		proxyURL:    cfg.ProxyURL,
 		version:     version,
 		reg:         reg,
-		cache:       newJobCache(),
+		cache:       newProbeCache(),
 		clock:       &clockSync{},
 		concurrency: cfg.Concurrency,
 	}
@@ -146,7 +146,7 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-// heartbeatLoop also carries job-definition sync and clock
+// heartbeatLoop also carries probe-definition sync and clock
 // calibration -- folded in from what used to be a separate
 // eventsSyncLoop polling GET /v1/nodes/events on its own timer. Both
 // loops fired on a fixed interval regardless of activity and each
@@ -202,7 +202,7 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		}
 		if len(resp.Events) > 0 {
 			a.cache.applyEvents(resp.Events)
-			log.Printf("agent: synced %d job event(s)", len(resp.Events))
+			log.Printf("agent: synced %d probe event(s)", len(resp.Events))
 		}
 		switch resp.Command {
 		case "update":
@@ -394,28 +394,28 @@ func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {
 			if s, _ := a.status.Load().(string); s != wire.NodeStatusActive {
 				continue
 			}
-			a.runDueJobs(ctx)
+			a.runDueProbes(ctx)
 		}
 	}
 }
 
-func (a *agent) runDueJobs(ctx context.Context) {
+func (a *agent) runDueProbes(ctx context.Context) {
 	now := a.clock.now()
-	due := a.cache.dueJobs(now)
+	due := a.cache.dueProbes(now)
 	if len(due) == 0 {
 		return
 	}
 
 	// Claim immediately, before executing anything -- so a fast
-	// subsequent tick can't re-select the same job while this run is
+	// subsequent tick can't re-select the same probe while this run is
 	// still in flight. If reporting later fails, this occurrence is
-	// simply lost (an interval job is due again next interval); that
+	// simply lost (an interval probe is due again next interval); that
 	// is the accepted failure mode, not silent double-execution.
-	for _, job := range due {
-		a.cache.markRun(job.ID, now)
+	for _, pr := range due {
+		a.cache.markRun(pr.ID, now)
 	}
 
-	results := a.executeJobs(ctx, due)
+	results := a.executeProbes(ctx, due)
 	if len(results) == 0 {
 		return
 	}
@@ -432,71 +432,71 @@ func (a *agent) runDueJobs(ctx context.Context) {
 		log.Printf("agent: post results: %v", err)
 		return
 	}
-	log.Printf("agent: tick complete: %d job(s) run, %d results, %d accepted, %d rejected",
+	log.Printf("agent: tick complete: %d probe(s) run, %d results, %d accepted, %d rejected",
 		len(due), len(results), resp.Accepted, resp.Rejected)
 }
 
-// executeJobs runs every probe of every due job concurrently, bounded
-// by a semaphore sized to a.concurrency. Deliberately a single flat
-// pool, no split between I/O-wait and CPU-bound stages -- see
+// executeProbes runs every check of every due probe concurrently,
+// bounded by a semaphore sized to a.concurrency. Deliberately a single
+// flat pool, no split between I/O-wait and CPU-bound stages -- see
 // README.md's scheduler notes for the two-tier semaphore this
 // should grow into once real load numbers justify it.
-func (a *agent) executeJobs(ctx context.Context, due []wire.JobSnapshot) []wire.Result {
+func (a *agent) executeProbes(ctx context.Context, due []wire.ProbeSnapshot) []wire.Result {
 	sem := make(chan struct{}, a.concurrency)
 	var mu sync.Mutex
 	var results []wire.Result
 	var wg sync.WaitGroup
 
-	for _, job := range due {
+	for _, pr := range due {
 		runID := newRunID()
-		count := job.ProbeCount
+		count := pr.ProbeCount
 		if count < 1 {
 			count = 1
 		}
 		for seq := 1; seq <= count; seq++ {
 			wg.Add(1)
 			sem <- struct{}{}
-			go func(job wire.JobSnapshot, runID string, seq int) {
+			go func(pr wire.ProbeSnapshot, runID string, seq int) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				r := a.runProbe(ctx, job, runID, seq)
+				r := a.runCheck(ctx, pr, runID, seq)
 				mu.Lock()
 				results = append(results, r)
 				mu.Unlock()
-			}(job, runID, seq)
+			}(pr, runID, seq)
 		}
 	}
 	wg.Wait()
 	return results
 }
 
-func (a *agent) runProbe(ctx context.Context, job wire.JobSnapshot, runID string, seq int) wire.Result {
-	mode := probe.Mode(job.Mode)
+func (a *agent) runCheck(ctx context.Context, pr wire.ProbeSnapshot, runID string, seq int) wire.Result {
+	mode := probe.Mode(pr.Mode)
 	if mode == "" {
 		mode = probe.ModeWarm
 	}
 
-	checker, ok := a.reg.Get(job.Prober)
+	checker, ok := a.reg.Get(pr.Prober)
 	var r probe.Result
 	if !ok {
-		r = probe.Fail(job.Prober, job.Target, mode, seq, fmt.Errorf("unknown prober %q", job.Prober))
+		r = probe.Fail(pr.Prober, pr.Target, mode, seq, fmt.Errorf("unknown prober %q", pr.Prober))
 	} else {
-		timeout := time.Duration(job.TimeoutMs) * time.Millisecond
+		timeout := time.Duration(pr.TimeoutMs) * time.Millisecond
 		if timeout <= 0 {
 			timeout = 5 * time.Second
 		}
 		r = checker.Check(ctx, probe.Options{
-			Target:  job.Target,
+			Target:  pr.Target,
 			Timeout: timeout,
 			Mode:    mode,
 			Seq:     seq,
-			Params:  job.Params,
+			Params:  pr.Params,
 		})
 	}
 
 	return wire.Result{
 		RunID:      runID,
-		JobID:      job.ID,
+		ProbeID:    pr.ID,
 		Result:     r,
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}

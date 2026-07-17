@@ -130,7 +130,7 @@ collect:
 // action-based module actually reaches the registered Go
 // implementation (tcp_connect) rather than going anywhere near a
 // subprocess -- a real TCP listener on this box, dialed through the
-// module system exactly like a job would.
+// module system exactly like a probe would.
 func TestChecker_ActionModule_RunsNativeImplementation(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -1,5 +1,5 @@
 // Package proxytest implements a generic xray/sing-box proxy check:
-// a job supplies a full engine config (however it built it -- e.g.
+// a probe supplies a full engine config (however it built it -- e.g.
 // converted client-side from a vless://, vmess://, trojan://, ...
 // share link, the way 3x-ui does it) plus which port in that config
 // is the local test entry point. There is deliberately no per-
@@ -13,7 +13,7 @@
 // legitimately want to test through the "same" port concurrently --
 // so the node always silently reallocates the test inbound to a real
 // free local port before launching the engine, and reports results
-// against whatever port it actually used. The account/job never sees
+// against whatever port it actually used. The account/probe never sees
 // or needs to know this happened; the declared port only ever serves
 // to identify *which* inbound in the config is the one to remap.
 package proxytest

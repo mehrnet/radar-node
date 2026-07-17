@@ -1,5 +1,5 @@
 // Command radar-node is the radar-node CLI. `probe` is a
-// standalone one-shot check runner; `agent` fetches jobs from
+// standalone one-shot check runner; `agent` fetches probes from
 // radar-api, runs them through the same Checkers, and reports
 // results back -- see README.md for the wire contract.
 package main
@@ -91,7 +91,7 @@ agent flags:
   --api-key string       "node_id:secret" bearer token (required)
   --api-proxy string      proxy for the agent's own radar-api traffic
                           (http://, https://, socks5://, socks5h://)
-  --scheduler-tick duration    how often to check cached jobs for due-ness (default "2s")
+  --scheduler-tick duration    how often to check cached probes for due-ness (default "2s")
   --concurrency int       max probes running at once (default 64)
   --modules-dir path      load/override modules from *.yaml/*.yml here,
                           on top of the embedded defaults

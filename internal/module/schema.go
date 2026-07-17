@@ -38,7 +38,7 @@ import (
 // just one.
 //
 // Group names an arbitrary tab/section a field belongs to in the
-// job detail view (e.g. "cpu", "memory", "network") -- fields sharing
+// probe detail view (e.g. "cpu", "memory", "network") -- fields sharing
 // a Group are shown together. Fields with no Group fall into a
 // catch-all.
 //
@@ -126,12 +126,12 @@ func validateRequest(fields []FieldSchema, params map[string]any) error {
 }
 
 // matchesType accepts the natural Go type a JSON-sourced param
-// carries (a real job's params always arrive this way, faithfully
+// carries (a real probe's params always arrive this way, faithfully
 // typed end to end from radar-api), but is deliberately lenient about
 // a string that looks like the right type -- --param on the `probe`
 // CLI can only ever produce strings, and rejecting `--param count=5`
 // against a `number` field would be a real ergonomics regression for
-// local testing that a job's actual params never hit in practice.
+// local testing that a probe's actual params never hit in practice.
 func matchesType(v any, wantType string) bool {
 	switch wantType {
 	case "string":

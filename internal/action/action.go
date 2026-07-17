@@ -24,7 +24,7 @@ import (
 
 // Registry maps an action name to its implementation. Action names
 // are an internal library, distinct from prober names: a loaded
-// module's `name:` is what a job's `prober` field refers to, and any
+// module's `name:` is what a probe's `prober` field refers to, and any
 // number of differently-configured modules can reference the same
 // action.
 var Registry = map[string]probe.Checker{

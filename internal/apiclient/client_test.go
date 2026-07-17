@@ -25,7 +25,7 @@ func TestHeartbeat_SendsSinceSeqAndParsesEvents(t *testing.T) {
 			SpecVersion: 1,
 			NodeStatus:  "active",
 			ServerTime:  "2026-07-13T00:00:00Z",
-			Events:      []wire.Event{{Seq: 11, EventType: "created", Job: wire.JobSnapshot{ID: "job_1", Target: "1.2.3.4:443", Prober: "tcp"}}},
+			Events:      []wire.Event{{Seq: 11, EventType: "created", Probe: wire.ProbeSnapshot{ID: "probe_1", Target: "1.2.3.4:443", Prober: "tcp"}}},
 		})
 	}))
 	defer srv.Close()
@@ -44,7 +44,7 @@ func TestHeartbeat_SendsSinceSeqAndParsesEvents(t *testing.T) {
 	if gotReq.SinceSeq != 10 {
 		t.Fatalf("expected since_seq=10 in the request body, got %d", gotReq.SinceSeq)
 	}
-	if len(resp.Events) != 1 || resp.Events[0].Job.ID != "job_1" {
+	if len(resp.Events) != 1 || resp.Events[0].Probe.ID != "probe_1" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
@@ -66,7 +66,7 @@ func TestPostResults_SendsBody(t *testing.T) {
 	resp, err := c.PostResults(context.Background(), wire.ResultsRequest{
 		NodeID:  "node_1",
 		BatchID: "batch_1",
-		Results: []wire.Result{{RunID: "run_1", JobID: "job_1"}},
+		Results: []wire.Result{{RunID: "run_1", ProbeID: "probe_1"}},
 	})
 	if err != nil {
 		t.Fatal(err)

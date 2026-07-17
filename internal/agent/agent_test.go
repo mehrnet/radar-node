@@ -19,7 +19,7 @@ import (
 type fakeAPI struct {
 	mu               sync.Mutex
 	target           string
-	served           bool // hand out the one job-created event exactly once
+	served           bool // hand out the one probe-created event exactly once
 	gotResults       []wire.Result
 	resultsAdded     chan struct{}
 	lastAgentVersion string
@@ -72,15 +72,15 @@ func (f *fakeAPI) handler() http.Handler {
 			resp.Events = []wire.Event{{
 				Seq:       1,
 				EventType: "created",
-				Job: wire.JobSnapshot{
-					ID:           "job_test",
+				Probe: wire.ProbeSnapshot{
+					ID:           "probe_test",
 					Target:       f.target,
 					Prober:       "tcp",
 					Mode:         "warm",
 					ProbeCount:   2,
 					TimeoutMs:    1000,
 					ScheduleType: "once",
-					Status:       wire.JobStatusActive,
+					Status:       wire.ProbeStatusActive,
 					StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
 				},
 			}}
@@ -90,7 +90,7 @@ func (f *fakeAPI) handler() http.Handler {
 	return mux
 }
 
-func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
+func TestRun_SyncsExecutesAndReportsProbe(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +123,7 @@ func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
 		})
 	}()
 
-	// Wait for both probes of the one job (a "once" job, already
+	// Wait for both checks of the one probe (a "once" probe, already
 	// past its starts_at, so it's due the moment it's synced) to be
 	// reported, or time out if the loop never syncs/schedules/
 	// executes/reports correctly.
@@ -155,7 +155,7 @@ func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
 	}
 	seenSeqs := map[int]bool{}
 	for _, r := range fake.gotResults {
-		if r.RunID == "" || r.JobID != "job_test" {
+		if r.RunID == "" || r.ProbeID != "probe_test" {
 			t.Errorf("unexpected correlation fields: %+v", r)
 		}
 		if !r.Ok {
@@ -169,7 +169,7 @@ func TestRun_SyncsExecutesAndReportsJob(t *testing.T) {
 	if !seenSeqs[1] || !seenSeqs[2] {
 		t.Fatalf("expected seq 1 and 2 (probe_count=2), got %+v", fake.gotResults)
 	}
-	// A "once" job must only ever run once even though the scheduler
+	// A "once" probe must only ever run once even though the scheduler
 	// ticks many times over a 5s wait -- if markRun-before-execute
 	// wasn't working, we'd see far more than 2 results.
 }

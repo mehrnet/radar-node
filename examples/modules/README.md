@@ -9,7 +9,7 @@ mocked.
 
 Generic, protocol-agnostic actions (`internal/checks/proxytest`, `action:
 xray_proxy_test`/`singbox_proxy_test`) rather than `run:`-based modules:
-a job supplies the engine's full client config (however it was built --
+a probe supplies the engine's full client config (however it was built --
 e.g. converted client-side from a share link, the way 3x-ui does it) plus
 `socks_port`, which inbound in that config is the local test entry point.
 Neither action reads anything protocol-specific out of the config, so any
@@ -29,7 +29,7 @@ deliberately wrong declared port (matching no inbound at all) correctly
 came back `error_code: "invalid_params"`.
 
 ```jsonc
-// example job params
+// example probe params
 {
   "config": { /* full xray or sing-box client config JSON */ },
   "socks_port": 1234
@@ -51,7 +51,7 @@ above.
   Trojan proxy via sing-box.
 
 Both follow the same shape: `prepare` is a small shell script that
-reads the job's `{{params_json}}` (server host/port and the
+reads the probe's `{{params_json}}` (server host/port and the
 protocol's credential), generates a client config for the allocated
 local SOCKS port (`{{alloc_port}}`), and `exec`s the real engine
 binary so it becomes the long-lived process the executor supervises.

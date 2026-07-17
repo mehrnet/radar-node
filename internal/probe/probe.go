@@ -31,7 +31,7 @@ type Options struct {
 	// config for a custom module, ...) without forcing every Checker
 	// to share one bloated options struct. Typed any (not
 	// map[string]string) because a custom module's {{params_json}}
-	// placeholder needs the true, possibly-nested value a job
+	// placeholder needs the true, possibly-nested value a probe
 	// supplied -- flattening to strings here would silently defeat
 	// that mechanism for every custom module, even though native
 	// checks only ever read scalar string values out of it via
@@ -66,7 +66,7 @@ type Result struct {
 	Error     string   `json:"error,omitempty"`
 	// ErrorCode is a small, closed, machine-parseable enum -- unset
 	// for a normal probe failure (network error, timeout, ...), set
-	// to ErrorCodeInvalidParams when a job's request didn't match its
+	// to ErrorCodeInvalidParams when a probe's request didn't match its
 	// module's declared request schema and the probe was never
 	// actually attempted. Lets a UI distinguish "this is
 	// misconfigured" from "the target is actually down" instead of
@@ -76,7 +76,7 @@ type Result struct {
 }
 
 // ErrorCodeInvalidParams marks a Result produced by request-schema
-// validation rejecting a job before any real probe/action ran.
+// validation rejecting a probe before any real probe/action ran.
 const ErrorCodeInvalidParams = "invalid_params"
 
 // Envelope is the top-level shape printed by the CLI: a single ok
@@ -127,7 +127,7 @@ func Fail(checkType, target string, mode Mode, seq int, err error) Result {
 	}
 }
 
-// Invalid builds a failed Result for a job whose params didn't match
+// Invalid builds a failed Result for a probe whose params didn't match
 // its module's declared request schema -- no probe/action was ever
 // attempted, unlike Fail which always represents a real attempt that
 // didn't succeed.

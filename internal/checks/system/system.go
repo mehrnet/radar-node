@@ -26,7 +26,7 @@ import (
 // package -- network throughput is a rate, not a point-in-time
 // reading, so it needs the previous sample to diff against. The zero
 // value isn't meant to be used directly; always construct via New().
-// A single instance is shared across every job that uses the "system"
+// A single instance is shared across every probe that uses the "system"
 // prober (see action.Registry) -- there is only one machine to report
 // on, so sharing counters across concurrent callers is correct, not
 // just convenient. The mutex serializes the read-diff-write, it
@@ -48,7 +48,7 @@ func (c *Checker) Type() string { return "system" }
 // syscall-only, cgo-free API -- so this runs the same on every
 // platform radar-node ships for. Target/params are unused; every
 // field reported comes from the local machine regardless of what a
-// job specifies.
+// probe specifies.
 func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	start := time.Now()
 
@@ -95,7 +95,7 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	// package-level "last sample" state and diffs against it for us --
 	// unlike net.IOCounters, there's no cumulative-counter API to do
 	// this ourselves from, and no reason to duplicate gopsutil's
-	// bookkeeping when it already does this exact job. Same shape as
+	// bookkeeping when it already does this exact check. Same shape as
 	// net throughput either way: nothing to diff against on the very
 	// first call, so it's omitted rather than reported as 0.
 	if pct, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pct) > 0 {

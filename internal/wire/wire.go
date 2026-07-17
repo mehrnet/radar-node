@@ -2,7 +2,7 @@
 // and radar-api, per README.md. Changing a field here is a
 // breaking change to that spec and must be reflected in SpecVersion.
 //
-// There is no more server-computed dispatch. A node syncs job
+// There is no more server-computed dispatch. A node syncs probe
 // definitions incrementally (POST /v1/nodes/heartbeat's since_seq/
 // events) into its own local cache and decides for itself when
 // something is due -- see internal/agent's scheduler. Results are
@@ -17,10 +17,10 @@ import (
 
 const SpecVersion = 1
 
-// JobSnapshot is the full current definition of a job, as carried by
-// every Event -- a node applies this directly to its local cache
+// ProbeSnapshot is the full current definition of a probe, as carried
+// by every Event -- a node applies this directly to its local cache
 // with no follow-up lookup of any kind.
-type JobSnapshot struct {
+type ProbeSnapshot struct {
 	ID              string         `json:"id"`
 	Target          string         `json:"target"`
 	Prober          string         `json:"prober"`
@@ -35,24 +35,24 @@ type JobSnapshot struct {
 	Status          string         `json:"status"` // "active" | "paused" | "archived" | "inactive_billing"
 }
 
-// Event is one entry from the job-definition change log a node syncs
+// Event is one entry from the probe-definition change log a node syncs
 // incrementally via POST /v1/nodes/heartbeat's since_seq/events
 // fields. Seq is a plain, not-necessarily-contiguous cursor: a node's
 // next heartbeat always sends since_seq = the highest one it has
 // already applied.
 type Event struct {
-	Seq       int         `json:"seq"`
-	EventType string      `json:"event_type"` // "created" | "updated" | "removed"
-	Job       JobSnapshot `json:"job"`
+	Seq       int           `json:"seq"`
+	EventType string        `json:"event_type"` // "created" | "updated" | "removed"
+	Probe     ProbeSnapshot `json:"probe"`
 }
 
 // Result is probe.Result plus the correlation fields needed to route
-// it back to the right job/account server-side. RunID is minted by
+// it back to the right probe/account server-side. RunID is minted by
 // the node itself (see internal/agent's scheduler), not issued by
 // the server -- there is no dispatch step to issue one from anymore.
 type Result struct {
-	RunID string `json:"run_id"`
-	JobID string `json:"job_id"`
+	RunID   string `json:"run_id"`
+	ProbeID string `json:"probe_id"`
 	probe.Result
 	ObservedAt string `json:"observed_at"`
 }
@@ -67,8 +67,8 @@ type ResultsRequest struct {
 }
 
 // ResultAck is one result's acceptance outcome. Reason is a closed,
-// small enum (e.g. "account_inactive", "job_inactive", "duplicate",
-// "unknown_job") the node only logs -- it carries no billing meaning
+// small enum (e.g. "account_inactive", "probe_inactive", "duplicate",
+// "unknown_probe") the node only logs -- it carries no billing meaning
 // on the node side.
 type ResultAck struct {
 	RunID    string `json:"run_id"`
@@ -187,8 +187,8 @@ const (
 )
 
 const (
-	JobStatusActive          = "active"
-	JobStatusPaused          = "paused"
-	JobStatusArchived        = "archived"
-	JobStatusInactiveBilling = "inactive_billing"
+	ProbeStatusActive          = "active"
+	ProbeStatusPaused          = "paused"
+	ProbeStatusArchived        = "archived"
+	ProbeStatusInactiveBilling = "inactive_billing"
 )

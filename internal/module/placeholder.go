@@ -66,7 +66,7 @@ type execContext struct {
 // "sni" param was supplied) resolves to an empty string -- modules
 // are expected to declare sane defaults in their own command
 // (equivalent to how a shell script would handle an unset var),
-// since the alternative (hard error) would let a job's choice of
+// since the alternative (hard error) would let a probe's choice of
 // which params to include change whether a module even runs.
 func (ec execContext) resolve(argv []string) []string {
 	out := make([]string, len(argv))

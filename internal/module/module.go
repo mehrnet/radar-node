@@ -9,11 +9,11 @@
 //
 // Trust boundary (see README.md): module *definitions* come
 // only from local YAML files, read once at process start. A remote
-// job can only *invoke* an already-loaded module by name with typed
+// probe can only *invoke* an already-loaded module by name with typed
 // parameters -- it can never introduce a new command or placeholder.
 // This package enforces that by rejecting any unrecognized
-// {{placeholder}} at load time, before a single remote job is ever
-// processed, and by validating every job's params against the
+// {{placeholder}} at load time, before a single remote probe is ever
+// processed, and by validating every probe's params against the
 // module's declared Request schema before running anything.
 package module
 
@@ -70,7 +70,7 @@ type Module struct {
 	Collect  Collect `yaml:"collect,omitempty"`
 	Teardown *Step   `yaml:"teardown,omitempty"`
 	// Request/Response declare this module's data form: which params
-	// a job must/may supply, and what a successful result's Extra
+	// a probe must/may supply, and what a successful result's Extra
 	// carries. Request is enforced before every run (see
 	// internal/module/checker.go); Response is declarative/
 	// documentation only, validated for well-formedness at load time
