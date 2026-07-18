@@ -72,4 +72,12 @@ if [ ! -f "$UP_SIGNAL" ]; then
   exit 0
 fi
 
-curl --silent --max-time "$timeout_s" -o /dev/null -w '{"latency_ms": %{time_total}, "http_code": %{http_code}}' "$TARGET"
+# curl's %{time_total} is seconds, not milliseconds -- every native
+# Go check reports genuine ms (see internal/probe/latency()), so this
+# converts before labeling the field "latency_ms" rather than silently
+# under-reporting by 1000x.
+out=$(curl --silent --max-time "$timeout_s" -o /dev/null -w '%{time_total} %{http_code}' "$TARGET")
+time_total=${out% *}
+http_code=${out##* }
+latency_ms=$(awk -v t="$time_total" 'BEGIN { printf "%.3f", t * 1000 }')
+printf '{"latency_ms": %s, "http_code": %s}\n' "$latency_ms" "$http_code"

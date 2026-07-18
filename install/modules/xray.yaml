@@ -9,11 +9,7 @@ request:
 prepare:
   command: ["/bin/sh", "__MODULES_DIR__/xray-prepare.sh", "{{params_json}}", "{{alloc_port}}"]
 run:
-  command: ["curl", "--silent", "--max-time", "5",
-            "--socks5-hostname", "127.0.0.1:{{alloc_port}}",
-            "-o", "/dev/null",
-            "-w", "{\"latency_ms\": %{time_total}, \"http_code\": %{http_code}}",
-            "{{target}}"]
+  command: ["/bin/sh", "__MODULES_DIR__/xray-run.sh", "{{alloc_port}}", "{{target}}"]
 collect:
   format: writeout_json
 response:
