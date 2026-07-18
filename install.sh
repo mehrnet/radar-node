@@ -474,9 +474,9 @@ remove_static_tool() {
 }
 
 if [ "$REMOVE_XRAY" = "1" ]; then
-  remove_static_tool "xray" "xray.yaml xray-prepare.sh"
+  remove_static_tool "xray" "xray.yaml xray-prepare.sh xray-run.sh"
 elif [ "$INSTALL_XRAY" = "1" ]; then
-  install_static_tool "xray" "xray" "xray" "xray.yaml xray-prepare.sh"
+  install_static_tool "xray" "xray" "xray" "xray.yaml xray-prepare.sh xray-run.sh"
 fi
 
 if [ "$REMOVE_WIREGUARD" = "1" ]; then
