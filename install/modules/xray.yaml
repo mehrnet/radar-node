@@ -12,10 +12,12 @@ run:
   command: ["curl", "--silent", "--max-time", "5",
             "--socks5-hostname", "127.0.0.1:{{alloc_port}}",
             "-o", "/dev/null",
-            "-w", "{\"http_code\": %{http_code}}",
+            "-w", "{\"latency_ms\": %{time_total}, \"http_code\": %{http_code}}",
             "{{target}}"]
 collect:
   format: writeout_json
 response:
+  - name: latency_ms
+    type: number
   - name: http_code
     type: number

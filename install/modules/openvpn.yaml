@@ -12,5 +12,7 @@ run:
 collect:
   format: writeout_json
 response:
+  - name: latency_ms
+    type: number
   - name: http_code
     type: number

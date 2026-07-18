@@ -68,8 +68,8 @@ while [ ! -f "$UP_SIGNAL" ] && [ "$waited" -lt "$timeout_s" ]; do
   waited=$((waited + 1))
 done
 if [ ! -f "$UP_SIGNAL" ]; then
-  echo '{"http_code": 0}'
+  echo '{"latency_ms": 0, "http_code": 0}'
   exit 0
 fi
 
-curl --silent --max-time "$timeout_s" -o /dev/null -w '{"http_code": %{http_code}}' "$TARGET"
+curl --silent --max-time "$timeout_s" -o /dev/null -w '{"latency_ms": %{time_total}, "http_code": %{http_code}}' "$TARGET"

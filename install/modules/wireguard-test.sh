@@ -27,4 +27,4 @@ trap cleanup EXIT
 timeout_s=$(( (TIMEOUT_MS + 999) / 1000 ))
 [ "$timeout_s" -lt 1 ] && timeout_s=1
 
-curl --silent --max-time "$timeout_s" -o /dev/null -w '{"http_code": %{http_code}}' "$TARGET"
+curl --silent --max-time "$timeout_s" -o /dev/null -w '{"latency_ms": %{time_total}, "http_code": %{http_code}}' "$TARGET"
