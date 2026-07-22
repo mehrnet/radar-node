@@ -1,6 +1,18 @@
 name: openvpn
 version: "2.7.5-1"
 url: https://radar.mehrnet.com/install/modules/openvpn.yaml
+os: [linux]
+arch: [amd64, arm64]
+install:
+  - name: openvpn
+    kind: binary
+    version: "2.7.5-1"
+    url: https://radar.mehrnet.com/releases/openvpn/openvpn_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/openvpn
+  - name: openvpn-test.sh
+    kind: file
+    url: https://radar.mehrnet.com/install/modules/openvpn-test.sh
+    path: __MODULES_DIR__/openvpn-test.sh
 request:
   - name: config
     type: string

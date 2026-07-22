@@ -403,3 +403,149 @@ collect:
 		t.Fatalf("expected all fixed + param.* placeholders to be accepted, got %v", err)
 	}
 }
+
+func TestParseBytes_ParsesOSArchAndInstall(t *testing.T) {
+	m, err := module.ParseBytes([]byte(`
+name: xray
+version: "26.3.27-1"
+url: https://radar.mehrnet.com/install/modules/xray.yaml
+os: [linux, darwin, windows]
+arch: [amd64, arm64]
+install:
+  - name: xray
+    kind: binary
+    version: "26.3.27-1"
+    url: https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/xray
+  - name: xray-prepare.sh
+    kind: file
+    url: https://radar.mehrnet.com/install/modules/xray-prepare.sh
+    path: __MODULES_DIR__/xray-prepare.sh
+  - name: xray-run.sh
+    kind: file
+    url: https://radar.mehrnet.com/install/modules/xray-run.sh
+    path: __MODULES_DIR__/xray-run.sh
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.OS) != 3 || m.OS[0] != "linux" || m.OS[2] != "windows" {
+		t.Errorf("expected os: [linux, darwin, windows], got %v", m.OS)
+	}
+	if len(m.Arch) != 2 || m.Arch[0] != "amd64" {
+		t.Errorf("expected arch: [amd64, arm64], got %v", m.Arch)
+	}
+	if len(m.Install) != 3 {
+		t.Fatalf("expected exactly three install entries, got %d", len(m.Install))
+	}
+	dep := m.Install[0]
+	if dep.Name != "xray" || dep.Version != "26.3.27-1" || dep.IsFile() {
+		t.Errorf("unexpected install dependency: %+v", dep)
+	}
+	if !m.Install[1].IsFile() || m.Install[1].Name != "xray-prepare.sh" {
+		t.Errorf("expected xray-prepare.sh as a file entry, got %+v", m.Install[1])
+	}
+	if !m.Install[2].IsFile() || m.Install[2].Name != "xray-run.sh" {
+		t.Errorf("expected xray-run.sh as a file entry, got %+v", m.Install[2])
+	}
+}
+
+func TestInstallDependency_ResolveURL_SubstitutesPlatformAndPicksExt(t *testing.T) {
+	dep := module.InstallDependency{URL: "https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}"}
+	if got := dep.ResolveURL("linux", "amd64"); got != "https://radar.mehrnet.com/releases/xray/xray_latest_linux_amd64.tar.gz" {
+		t.Errorf("linux/amd64: got %q", got)
+	}
+	if got := dep.ResolveURL("windows", "arm64"); got != "https://radar.mehrnet.com/releases/xray/xray_latest_windows_arm64.zip" {
+		t.Errorf("windows/arm64: expected .zip, got %q", got)
+	}
+}
+
+func TestLoadDir_RejectsInstallDependencyMissingName(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-install
+install:
+  - url: https://example.com/bad_{os}_{arch}.{ext}
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an install dependency missing name")
+	}
+}
+
+func TestLoadDir_RejectsInstallDependencyMissingURL(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-install
+install:
+  - name: bad
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an install dependency missing url")
+	}
+}
+
+func TestLoadDir_RejectsInstallDependencyMissingPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-install
+install:
+  - name: bad
+    url: https://example.com/bad_{os}_{arch}.{ext}
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an install dependency missing path")
+	}
+}
+
+func TestLoadDir_RejectsInstallDependencyPathOutsideKnownDirs(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-install
+install:
+  - name: bad
+    url: https://example.com/bad_{os}_{arch}.{ext}
+    path: /etc/cron.d/bad
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an install dependency path outside __TOOLS_DIR__/__MODULES_DIR__")
+	}
+}
+
+func TestLoadDir_RejectsInstallDependencyInvalidKind(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-install
+install:
+  - name: bad
+    kind: archive
+    url: https://example.com/bad_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/bad
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an install dependency with an invalid kind")
+	}
+}

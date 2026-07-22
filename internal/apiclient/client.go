@@ -32,7 +32,7 @@ type Client struct {
 // traffic, unrelated to any proxy links checks might test. Supported
 // schemes: http, https, socks5, socks5h.
 func New(baseURL, apiKey, proxyURL string) (*Client, error) {
-	transport, err := buildTransport(proxyURL)
+	transport, err := BuildTransport(proxyURL)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,12 @@ func New(baseURL, apiKey, proxyURL string) (*Client, error) {
 	}, nil
 }
 
-func buildTransport(proxyURL string) (*http.Transport, error) {
+// BuildTransport builds an *http.Transport routed through proxyURL
+// (empty means direct, no proxy). Exported so other packages that
+// need their own HTTP client through the same proxy conventions
+// (schemes: http, https, socks5, socks5h) -- e.g. moduleinstall's own
+// module/binary downloads -- don't have to reimplement this.
+func BuildTransport(proxyURL string) (*http.Transport, error) {
 	t := &http.Transport{}
 	if proxyURL == "" {
 		return t, nil

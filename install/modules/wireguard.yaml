@@ -1,6 +1,18 @@
 name: wireguard
 version: "ecfc5a8d5446-1"
 url: https://radar.mehrnet.com/install/modules/wireguard.yaml
+os: [linux]
+arch: [amd64, arm64]
+install:
+  - name: radar-wg
+    kind: binary
+    version: "ecfc5a8d5446-1"
+    url: https://radar.mehrnet.com/releases/wireguard-go/radar-wg_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/radar-wg
+  - name: wireguard-test.sh
+    kind: file
+    url: https://radar.mehrnet.com/install/modules/wireguard-test.sh
+    path: __MODULES_DIR__/wireguard-test.sh
 request:
   - name: private_key
     type: string

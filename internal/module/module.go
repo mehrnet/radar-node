@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -74,6 +75,23 @@ type Module struct {
 	// release.
 	Version string `yaml:"version,omitempty"`
 	URL     string `yaml:"url,omitempty"`
+	// OS/Arch restrict which platforms this module can even be
+	// installed on at all -- e.g. openvpn/wireguard-go ship linux-only
+	// builds. Both empty means no restriction (the embedded tcp/udp/
+	// dns/... defaults, or any module with no remote Install
+	// dependency to begin with). Checked against runtime.GOOS/GOARCH
+	// by --fetch-module/--install-module before downloading anything,
+	// and reported to radar-api (see registry.ModuleVersions) so the
+	// dashboard can grey out an install this node could never use.
+	OS   []string `yaml:"os,omitempty"`
+	Arch []string `yaml:"arch,omitempty"`
+	// Install is this module's own remote artifacts -- what
+	// --fetch-module/--install-module actually download and place. A
+	// flat list of separately-declared entries, each its own full URL
+	// and Kind ("binary" or "file") -- e.g. xray declares the xray
+	// binary plus its two wrapper scripts as three independent entries,
+	// each independently versioned.
+	Install []InstallDependency `yaml:"install,omitempty"`
 	// Action names a built-in implementation from internal/action
 	// (e.g. "tcp_connect") to call directly, in-process -- no
 	// subprocess, no Prepare/Run/Collect/Teardown.
@@ -105,6 +123,61 @@ type Module struct {
 	compiledPattern *regexp.Regexp // set by validate, only for Collect.Format == "regex"
 }
 
+// InstallDependency is one remote artifact a module needs, as
+// declared in its own install: list -- what --fetch-module/
+// --install-module download and place. A module with a binary plus
+// helper scripts (e.g. xray's prepare/run wrappers) declares one
+// entry per artifact, each with its own full URL -- there is no
+// implicit "relative to the module's own directory" path, so a
+// dependency can be hosted anywhere.
+type InstallDependency struct {
+	Name    string `yaml:"name"`
+	Version string `yaml:"version,omitempty"`
+	// Kind is "binary" (default if omitted) or "file". A binary is
+	// fetched as a goreleaser-style archive, checksum-verified against
+	// its URL's own ".checksum.txt" sidecar, and extracted before being
+	// written to Path. A file is fetched as-is (no archive, no
+	// checksum sidecar) and written to Path directly -- e.g. a
+	// prepare/run wrapper script or a static config a run.command
+	// shells out to.
+	Kind string `yaml:"kind,omitempty"`
+	// URL may contain {os}/{arch}/{ext} placeholders -- see
+	// ResolveURL, which substitutes them for a specific platform
+	// before anything is actually fetched. This is the *source*;
+	// Path below is the destination. Required for every entry, binary
+	// or file alike.
+	URL string `yaml:"url"`
+	// Path is where this dependency actually gets written on disk --
+	// the destination side of the source/destination pair alongside
+	// URL. Must start with the literal "__TOOLS_DIR__/" or
+	// "__MODULES_DIR__/" placeholder (the same convention a fetched
+	// file's own *contents* already use, see moduleinstall's
+	// substitutePlaceholders), resolved to the real, resolved
+	// directory (root vs. non-root installs differ) at install time --
+	// never a bare/absolute path, so a module can't be authored to
+	// write anywhere else on disk. Required for every entry.
+	Path string `yaml:"path"`
+}
+
+// IsFile reports whether d is a plain file dependency rather than a
+// binary -- the only two kinds InstallDependency supports.
+func (d InstallDependency) IsFile() bool {
+	return d.Kind == "file"
+}
+
+// ResolveURL substitutes {os}/{arch}/{ext} in d.URL for the given
+// platform -- ext is "zip" for windows, "tar.gz" otherwise, matching
+// goreleaser's own archive format split (see this repo's own
+// .goreleaser.yaml).
+func (d InstallDependency) ResolveURL(goos, arch string) string {
+	ext := "tar.gz"
+	if goos == "windows" {
+		ext = "zip"
+	}
+	r := strings.NewReplacer("{os}", goos, "{arch}", arch, "{ext}", ext)
+	return r.Replace(d.URL)
+}
+
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 func (m *Module) validate() error {
@@ -116,6 +189,20 @@ func (m *Module) validate() error {
 	}
 	if err := validateFieldSchema(m.Response, m.Name, "response"); err != nil {
 		return err
+	}
+	for i, dep := range m.Install {
+		if dep.Name == "" {
+			return fmt.Errorf("module %q: install[%d]: name is required", m.Name, i)
+		}
+		if dep.URL == "" {
+			return fmt.Errorf("module %q: install[%d] (%s): url is required", m.Name, i, dep.Name)
+		}
+		if dep.Kind != "" && dep.Kind != "binary" && dep.Kind != "file" {
+			return fmt.Errorf("module %q: install[%d] (%s): kind must be \"binary\" or \"file\", got %q", m.Name, i, dep.Name, dep.Kind)
+		}
+		if !strings.HasPrefix(dep.Path, "__TOOLS_DIR__/") && !strings.HasPrefix(dep.Path, "__MODULES_DIR__/") {
+			return fmt.Errorf("module %q: install[%d] (%s): path must start with __TOOLS_DIR__/ or __MODULES_DIR__/, got %q", m.Name, i, dep.Name, dep.Path)
+		}
 	}
 
 	hasAction := m.Action != ""
@@ -268,6 +355,14 @@ func loadFile(fsys fs.FS, name string) (Module, error) {
 	if err != nil {
 		return Module{}, err
 	}
+	return ParseBytes(data)
+}
+
+// ParseBytes parses a single module's raw YAML source directly,
+// without going through LoadFS/LoadDir's directory listing -- used by
+// --fetch-module, which downloads a module's yaml over HTTP rather
+// than reading it from a local directory.
+func ParseBytes(data []byte) (Module, error) {
 	var m Module
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return Module{}, fmt.Errorf("parse yaml: %w", err)

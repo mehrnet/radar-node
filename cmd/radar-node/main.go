@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/agent"
+	"github.com/mehrnet/radar-node/internal/moduleinstall"
 	"github.com/mehrnet/radar-node/internal/output"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
@@ -45,6 +46,12 @@ func main() {
 		err = runAgent(os.Args[2:])
 	case "init":
 		err = runInit(os.Args[2:])
+	case "fetch-module":
+		err = runFetchModule(os.Args[2:])
+	case "install-module":
+		err = runInstallModule(os.Args[2:])
+	case "remove-module":
+		err = runRemoveModule(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("radar-node", version)
 		return
@@ -101,6 +108,28 @@ init flags:
                           into (default ".") -- refuses to overwrite
                           an existing file unless --force is set
   --force                 overwrite files that already exist at path
+
+fetch-module/install-module/remove-module:
+  radar-node fetch-module <url>     download+install a module from its own
+                                      YAML URL (e.g. https://radar.mehrnet.com/
+                                      install/modules/xray.yaml) -- becomes
+                                      "locally known" by name afterward
+  radar-node install-module <name>  re-fetch an already locally-known module,
+                                      using its own recorded url (no other
+                                      state needed -- also how to check for
+                                      an update)
+  radar-node remove-module <name>   remove an already locally-known module's
+                                      installed binaries, files, and its own
+                                      module YAML
+
+  --modules-dir path      where a module's own YAML + sibling files go
+                          (default: /etc/radar-node/modules.d as root,
+                          ~/.config/radar-node/modules.d otherwise)
+  --tools-dir path        where a module's installed binaries go (default:
+                          /etc/radar-node/tools as root, ~/.config/radar-node/
+                          tools otherwise)
+  --proxy string          proxy for these downloads (http://, https://,
+                          socks5://, socks5h://)
 
 Examples:
   radar-node probe 1.1.1.1:443 --type tcp --param tls=true
@@ -263,6 +292,76 @@ func runInit(args []string) error {
 		}
 		fmt.Println(dest)
 	}
+	return nil
+}
+
+// defaultModuleDirs mirrors install.sh's own root-vs-user split: root
+// gets system-wide directories, anyone else gets user-scoped ones
+// under $HOME -- so a bare `radar-node fetch-module <url>` (no
+// --modules-dir/--tools-dir) lands in the same place install.sh's own
+// bundled-module install would put it.
+func defaultModuleDirs() (modulesDir, toolsDir string) {
+	if os.Geteuid() == 0 {
+		return "/etc/radar-node/modules.d", "/etc/radar-node/tools"
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "radar-node", "modules.d"), filepath.Join(home, ".config", "radar-node", "tools")
+}
+
+func moduleInstallFlags(fs *flag.FlagSet) *moduleinstall.Config {
+	cfg := &moduleinstall.Config{}
+	defaultModulesDir, defaultToolsDir := defaultModuleDirs()
+	fs.StringVar(&cfg.ModulesDir, "modules-dir", defaultModulesDir, "")
+	fs.StringVar(&cfg.ToolsDir, "tools-dir", defaultToolsDir, "")
+	fs.StringVar(&cfg.ProxyURL, "proxy", "", "")
+	return cfg
+}
+
+func runFetchModule(args []string) error {
+	fs := flag.NewFlagSet("fetch-module", flag.ContinueOnError)
+	cfg := moduleInstallFlags(fs)
+	if err := fs.Parse(partitionFlags(args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("expected exactly one <url> argument")
+	}
+	if err := moduleinstall.Fetch(context.Background(), *cfg, fs.Arg(0)); err != nil {
+		return err
+	}
+	fmt.Println("fetched", fs.Arg(0))
+	return nil
+}
+
+func runInstallModule(args []string) error {
+	fs := flag.NewFlagSet("install-module", flag.ContinueOnError)
+	cfg := moduleInstallFlags(fs)
+	if err := fs.Parse(partitionFlags(args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("expected exactly one <name> argument")
+	}
+	if err := moduleinstall.Install(context.Background(), *cfg, fs.Arg(0)); err != nil {
+		return err
+	}
+	fmt.Println("installed", fs.Arg(0))
+	return nil
+}
+
+func runRemoveModule(args []string) error {
+	fs := flag.NewFlagSet("remove-module", flag.ContinueOnError)
+	cfg := moduleInstallFlags(fs)
+	if err := fs.Parse(partitionFlags(args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("expected exactly one <name> argument")
+	}
+	if err := moduleinstall.Remove(*cfg, fs.Arg(0)); err != nil {
+		return err
+	}
+	fmt.Println("removed", fs.Arg(0))
 	return nil
 }
 
