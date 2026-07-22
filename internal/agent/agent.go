@@ -309,6 +309,28 @@ func (a *agent) applyModuleActions(actions []string) {
 	a.reinstall(flags...)
 }
 
+// buildInstallCommand is reinstall's own command-string logic, pulled
+// out into a pure function so the proxy handling is unit-testable
+// without spawning a real subprocess. proxyURL, if set, is threaded
+// through twice, for two different reasons: as curl's own --proxy
+// flag on the *outer* fetch of install.sh (a node whose only route to
+// the internet at all is through this proxy could never even
+// downloaded the script otherwise -- raw.githubusercontent.com would
+// simply be unreachable), and again as a plain "--proxy=" argument
+// install.sh itself only gets to see -- and act on, for its own
+// internal downloads and to thread --api-proxy into the agent's own
+// systemd service -- after it's already running.
+func buildInstallCommand(nodeID, apiKey, apiURL, proxyURL string, extraFlags []string) string {
+	args := []string{"--node_id=" + nodeID, "--api_key=" + apiKey, "--api_url=" + apiURL}
+	curlProxyFlag := ""
+	if proxyURL != "" {
+		curlProxyFlag = "--proxy " + proxyURL + " "
+		args = append(args, "--proxy="+proxyURL)
+	}
+	args = append(args, extraFlags...)
+	return fmt.Sprintf("curl -fsSL %s%s | sh -s -- %s", curlProxyFlag, installScriptURL, strings.Join(args, " "))
+}
+
 // reinstall re-execs install.sh with this node's own existing
 // node_id/api_key/api_url/proxy (exactly like a plain "update" does),
 // plus whatever extra flags the request carries when it's really about
@@ -319,12 +341,7 @@ func (a *agent) applyModuleActions(actions []string) {
 // dropped into modules.d; this is only ever "re-run that same script,
 // with some extra arguments than usual."
 func (a *agent) reinstall(extraFlags ...string) {
-	args := []string{"--node_id=" + a.nodeID, "--api_key=" + strings.TrimPrefix(a.apiKey, a.nodeID+":"), "--api_url=" + a.apiURL}
-	if a.proxyURL != "" {
-		args = append(args, "--proxy="+a.proxyURL)
-	}
-	args = append(args, extraFlags...)
-	installCmd := fmt.Sprintf("curl -fsSL %s | sh -s -- %s", installScriptURL, strings.Join(args, " "))
+	installCmd := buildInstallCommand(a.nodeID, strings.TrimPrefix(a.apiKey, a.nodeID+":"), a.apiURL, a.proxyURL, extraFlags)
 	reason := "update requested"
 	if len(extraFlags) > 0 {
 		reason = strings.Join(extraFlags, " ") + " requested"
