@@ -24,7 +24,7 @@ gives you a one-time `node_id` and `api_key`. Then, on the machine that
 should run the node:
 
 ```sh
-curl -fsSL https://radar.mehrnet.com/install.sh \
+curl -fsSL https://radar.mehrnet.com/install/node.sh \
   | sh -s -- --node_id=<node_id> --api_key=<api_key>
 ```
 
@@ -49,14 +49,21 @@ Options:
   --api_url=URL      radar-api base URL (default: https://radar-api.mehrnet.com)
   --proxy=URL        proxy for both this installer's downloads and the running
                      agent's radar-api traffic (http://, https://, socks5://, socks5h://)
-  --version=VERSION  install a specific release instead of the latest, e.g. 0.2
   --uninstall        stop and fully remove radar-node from this machine (no
                       other flag is needed -- this ignores --node_id/--api_key)
   -h, --help         show this help
 ```
 
-For Windows, grab a release asset manually from the
-[Releases page](https://github.com/mehrnet/radar-node/releases).
+There's no `--version=` pin -- the installer (and everything it downloads:
+this binary, and the bundled xray/wireguard-go/openvpn engine modules
+below) is mirrored at [radar.mehrnet.com](https://radar.mehrnet.com) as
+only ever the single latest build of each, never a version history (see
+that repo's own `releases-sync.sh`). The real installed version is read
+back from the extracted binary itself (`radar-node version`) once it's on
+disk, not guessed beforehand.
+
+For Windows, grab a release asset manually from
+[radar.mehrnet.com/releases/radar-node/](https://radar.mehrnet.com/releases/radar-node/).
 
 ### Remote update / delete
 
@@ -64,13 +71,17 @@ Deleting a node from the radar UI stops it (via its next heartbeat) but does
 *not* remove it from the machine -- to fully clean up, run:
 
 ```sh
-curl -fsSL https://radar.mehrnet.com/install.sh \
+curl -fsSL https://radar.mehrnet.com/install/node.sh \
   | sh -s -- --uninstall
 ```
 
 An "Update" button in the UI (shown when a newer release exists) re-runs the
 install script on the node's own machine automatically -- no action needed
-there.
+there. This agent acknowledges the update request before acting on it (see
+[`POST /v1/nodes/ack`](#post-v1nodesack) below), so the dashboard can tell
+"delivered" apart from "actually received and applying it" instead of the
+update button reappearing the instant one heartbeat handed the request
+back, with the node still mid-restart.
 
 ## Build
 
@@ -657,6 +668,57 @@ reading `node_status`/per-result `reason`, is the entire extent of what a
 node needs to understand about its own standing -- everything else (why
 it's inactive, what plan the account is on, what the balance is) is
 `radar-api`/dashboard-only information a node never sees.
+
+Two more fields ride along on this same response, both owner-triggered
+from the radar UI:
+
+- `command` -- `"delete"` (this node was removed from radar; stop running
+  and tell the operator how to fully uninstall) or, only for an agent
+  older than the ack protocol below, `"update"` as a backward-compatible
+  fallback. `"delete"` is not fire-once: it keeps coming until the agent
+  uninstalls for good or an owner restores the node. A current agent has
+  no `"update"` case in its own dispatch at all -- see `pending_action`
+  instead.
+- `pending_action` -- an `{"id", "kind", "actions"}` object (`kind` is
+  `"update"` or `"module_actions"`; `actions` is only present for the
+  latter, the same `install_xray`/`remove_wireguard`/... strings the edit
+  modal's Save button batches) still awaiting this agent's
+  acknowledgement. Absent once acked -- see
+  [`POST /v1/nodes/ack`](#post-v1nodesack) directly below for why acking
+  matters and what this agent does with `kind`/`actions` once it has.
+  Redelivered on every heartbeat while un-acked, up to a small fixed
+  number of attempts, then dropped server-side if never acknowledged (an
+  older, pre-ack agent that only understands `command` above falls into
+  exactly this path for `"update"`, resolved instead by the server simply
+  noticing this node's own `agent_version` changed on a later heartbeat).
+
+#### `POST /v1/nodes/ack`
+
+Confirms receipt of a `pending_action` a heartbeat just handed back --
+call this the instant this agent decides to act on it (before re-execing
+`install.sh`, which is about to kill this process), never after. This is
+what lets `radar-api` tell "delivered in a heartbeat response" apart from
+"actually received and being acted on", instead of clearing the pending
+state the moment it's handed back once -- which used to make the
+dashboard's update button reappear, with this node still mid-restart,
+after nothing more than one heartbeat round trip.
+
+Request:
+```jsonc
+{ "id": "action_9f2c...redacted...a41d" }
+```
+
+Response (200 -- acknowledged):
+```jsonc
+{ "ok": true }
+```
+
+A `410` means `radar-api` no longer recognizes this id -- either it was
+never truly pending, or the server already gave up on it (too many
+un-acked heartbeats, or something else superseded it) before this ack
+arrived. Either way, this agent must not proceed with whatever it was
+about to do: an ack that loses this race is the signal to bail, not to
+barrel ahead assuming the server still agrees the action is live.
 
 #### `POST /v1/nodes/modules`
 

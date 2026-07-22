@@ -1,17 +1,18 @@
 #!/bin/sh
 # radar-node installer -- POSIX sh, no bashisms, safe to pipe from curl:
 #
-#   curl -fsSL https://radar.mehrnet.com/install.sh \
+#   curl -fsSL https://radar.mehrnet.com/install/node.sh \
 #     | sh -s -- --node_id=node_xxx --api_key=xxxxx
 #
 # Served from radar's own origin (a plain copy of this exact file,
-# kept in sync by hand whenever it changes -- see radar/install.sh)
-# rather than raw.githubusercontent.com directly, so a node whose
-# network policy allowlists radar.mehrnet.com but not GitHub can still
-# install/update. Downloads the right release asset for this OS/arch
-# from GitHub Releases, installs the binary, and sets up radar-node as
-# a persistent service (systemd on Linux, launchd on macOS) so the
-# copy-pasted command above is the only step a user ever has to take.
+# kept in sync by hand whenever it changes -- see radar/install/
+# node.sh) rather than raw.githubusercontent.com directly, so a node
+# whose network policy allowlists radar.mehrnet.com but not GitHub can
+# still install/update. Downloads the right release asset for this
+# OS/arch from GitHub Releases, installs the binary, and sets up
+# radar-node as a persistent service (systemd on Linux, launchd on
+# macOS) so the copy-pasted command above is the only step a user
+# ever has to take.
 set -e
 
 REPO="mehrnet/radar-node"

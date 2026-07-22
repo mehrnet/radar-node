@@ -36,11 +36,11 @@ import (
 // is what lets it reuse install.sh's own stop-download-replace-
 // restart sequence instead of this process trying to replace its own
 // running binary directly. Served from radar's own origin (a plain
-// copy of this exact file, kept in sync by hand -- see radar/
-// install.sh) rather than raw.githubusercontent.com directly, so a
-// node whose network policy allowlists radar.mehrnet.com but not
-// GitHub can still self-update.
-const installScriptURL = "https://radar.mehrnet.com/install.sh"
+// copy of this exact file, kept in sync by hand -- see radar/install/
+// node.sh) rather than raw.githubusercontent.com directly, so a node
+// whose network policy allowlists radar.mehrnet.com but not GitHub
+// can still self-update.
+const installScriptURL = "https://radar.mehrnet.com/install/node.sh"
 
 type Config struct {
 	APIURL   string
