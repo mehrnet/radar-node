@@ -133,6 +133,15 @@ type HeartbeatResponse struct {
 	// retried the next time it does heartbeat, no worse than any other
 	// heartbeat-carried state.
 	Command string `json:"command,omitempty"`
+	// ModuleActions batches every bundled-engine install_*/remove_*
+	// action radar-api's edit modal collected in one Save into a
+	// single delivery here, rather than one fire-once Command per
+	// click -- see radar-api's nodes.pending_module_actions and
+	// POST /v1/nodes/:id/module-actions. Applied as one re-exec of
+	// install.sh carrying every corresponding --install-*/--remove-*
+	// flag at once (agent.go's reinstall), same fire-once/empty-means-
+	// nothing semantics as Command.
+	ModuleActions []string `json:"module_actions,omitempty"`
 }
 
 // HeartbeatRejection is the body of a 409 response to

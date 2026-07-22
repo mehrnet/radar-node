@@ -209,18 +209,9 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			a.selfUpdate()
 		case "delete":
 			a.handleDeleteCommand()
-		case "install_xray":
-			a.reinstall("--install-xray")
-		case "remove_xray":
-			a.reinstall("--remove-xray")
-		case "install_wireguard":
-			a.reinstall("--install-wireguard")
-		case "remove_wireguard":
-			a.reinstall("--remove-wireguard")
-		case "install_openvpn":
-			a.reinstall("--install-openvpn")
-		case "remove_openvpn":
-			a.reinstall("--remove-openvpn")
+		}
+		if len(resp.ModuleActions) > 0 {
+			a.applyModuleActions(resp.ModuleActions)
 		}
 	}
 
@@ -259,29 +250,63 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
 
 func (a *agent) selfUpdate() {
-	a.reinstall("")
+	a.reinstall()
+}
+
+// moduleActionFlags maps a wire-level "install_xray"/"remove_wireguard"
+// style action name to install.sh's matching --install-xray/--remove-
+// wireguard flag. Unrecognized entries are dropped rather than failing
+// the whole batch -- radar-api validates this set already (see its
+// nodeModuleActionsSchema), so an entry that doesn't map here can only
+// mean a newer server introduced an action this older agent build
+// doesn't know about yet, not a real error.
+func moduleActionFlags(actions []string) []string {
+	flags := make([]string, 0, len(actions))
+	for _, action := range actions {
+		flag, ok := strings.CutPrefix(action, "install_")
+		if ok {
+			flags = append(flags, "--install-"+flag)
+			continue
+		}
+		if flag, ok := strings.CutPrefix(action, "remove_"); ok {
+			flags = append(flags, "--remove-"+flag)
+		}
+	}
+	return flags
+}
+
+// applyModuleActions re-execs install.sh once with every bundled-
+// engine flag this heartbeat's batch named, e.g. installing xray and
+// removing wireguard together becomes one
+// "--install-xray --remove-wireguard" re-run instead of two separate
+// fire-once commands one click (and one full install.sh re-run) apart.
+func (a *agent) applyModuleActions(actions []string) {
+	flags := moduleActionFlags(actions)
+	if len(flags) == 0 {
+		return
+	}
+	a.reinstall(flags...)
 }
 
 // reinstall re-execs install.sh with this node's own existing
 // node_id/api_key/api_url/proxy (exactly like a plain "update" does),
-// plus one extra flag when the request is really about a bundled
-// engine module rather than radar-node's own version -- e.g.
-// "--install-xray" for the "install_xray" pendingCommand. install.sh
-// itself does the actual fetch/verify/place and the service restart
-// that picks up a module just dropped into modules.d; this is only
-// ever "re-run that same script, with one more argument than usual."
-func (a *agent) reinstall(extraFlag string) {
+// plus whatever extra flags the request carries when it's really about
+// bundled engine modules rather than radar-node's own version -- e.g.
+// "--install-xray" for an "install_xray" action, one or more at once
+// (see applyModuleActions). install.sh itself does the actual fetch/
+// verify/place and the service restart that picks up a module just
+// dropped into modules.d; this is only ever "re-run that same script,
+// with some extra arguments than usual."
+func (a *agent) reinstall(extraFlags ...string) {
 	args := []string{"--node_id=" + a.nodeID, "--api_key=" + strings.TrimPrefix(a.apiKey, a.nodeID+":"), "--api_url=" + a.apiURL}
 	if a.proxyURL != "" {
 		args = append(args, "--proxy="+a.proxyURL)
 	}
-	if extraFlag != "" {
-		args = append(args, extraFlag)
-	}
+	args = append(args, extraFlags...)
 	installCmd := fmt.Sprintf("curl -fsSL %s | sh -s -- %s", installScriptURL, strings.Join(args, " "))
 	reason := "update requested"
-	if extraFlag != "" {
-		reason = extraFlag + " requested"
+	if len(extraFlags) > 0 {
+		reason = strings.Join(extraFlags, " ") + " requested"
 	}
 	log.Printf("agent: %s -- re-running install script: %s", reason, installCmd)
 
