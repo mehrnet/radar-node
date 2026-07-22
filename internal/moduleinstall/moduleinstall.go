@@ -167,7 +167,7 @@ func Remove(cfg Config, name string) error {
 		return fmt.Errorf("%s: %w", yamlPath, err)
 	}
 	for _, dep := range m.Install {
-		if destPath, err := resolveInstallPath(dep.Path, cfg); err == nil {
+		if destPath, err := resolveExistingPath(dep.Path, cfg); err == nil {
 			_ = os.Remove(destPath)
 		}
 	}
@@ -253,13 +253,15 @@ func installDependency(ctx context.Context, client *http.Client, cfg Config, dep
 }
 
 // resolveInstallPath substitutes dep.Path's leading __TOOLS_DIR__/ or
-// __MODULES_DIR__/ placeholder (already enforced at validate() time --
-// see module.InstallDependency's own doc comment) for the real,
-// resolved directory, then confirms the result still actually lives
-// under that directory -- a defense-in-depth check against a
-// dependency name/path containing ".." after substitution, since
-// --fetch-module trusts whatever module YAML the operator points it
-// at, remote content included.
+// __MODULES_DIR__/ placeholder for the real, resolved directory, then
+// confirms the result still actually lives under that directory -- a
+// defense-in-depth check against a dependency name/path containing
+// ".." after substitution, since --fetch-module trusts whatever
+// module YAML the operator points it at, remote content included.
+// Strict on purpose: this is what decides where a *new* download gets
+// written, so an already-resolved absolute path is rejected rather
+// than trusted -- only resolveExistingPath (Remove's own, more
+// permissive counterpart) accepts that form.
 func resolveInstallPath(path string, cfg Config) (string, error) {
 	var baseDir, rel string
 	switch {
@@ -275,6 +277,19 @@ func resolveInstallPath(path string, cfg Config) (string, error) {
 		return "", fmt.Errorf("path %q escapes its base directory", path)
 	}
 	return full, nil
+}
+
+// resolveExistingPath is resolveInstallPath's permissive counterpart,
+// used only by Remove -- which is naming a file to delete, not a new
+// one to write, so an already-absolute Path (e.g. install.sh's own
+// legacy substitution having already resolved a local copy's
+// placeholder before this package ever saw it -- see
+// module.InstallDependency.Path's own doc comment) is accepted as-is.
+func resolveExistingPath(path string, cfg Config) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	return resolveInstallPath(path, cfg)
 }
 
 // substitutePlaceholders resolves __MODULES_DIR__/__TOOLS_DIR__ in a

@@ -335,3 +335,50 @@ func TestRemove_FailsWhenNotLocallyKnown(t *testing.T) {
 		t.Fatal("expected an error removing a module that was never fetched")
 	}
 }
+
+// Regression test for the v0.26 production incident: install.sh's own
+// legacy substitution rewrites every file it deploys under modules.d,
+// module YAML included, so an already-installed module's own Path may
+// already be a resolved absolute path rather than the
+// __TOOLS_DIR__/__MODULES_DIR__ placeholder form. Remove must still
+// be able to find and delete it.
+func TestRemove_DeletesAlreadyResolvedAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	cfg := moduleinstall.Config{ModulesDir: filepath.Join(dir, "modules.d"), ToolsDir: filepath.Join(dir, "tools")}
+	if err := os.MkdirAll(cfg.ToolsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.ModulesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binPath := filepath.Join(cfg.ToolsDir, "openvpn")
+	if err := os.WriteFile(binPath, []byte("fake binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlPath := filepath.Join(cfg.ModulesDir, "openvpn.yaml")
+	yaml := fmt.Sprintf(`
+name: openvpn
+install:
+  - name: openvpn
+    kind: binary
+    url: https://example.com/openvpn_{os}_{arch}.{ext}
+    path: %s
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`, binPath)
+	if err := os.WriteFile(yamlPath, []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := moduleinstall.Remove(cfg, "openvpn"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(binPath); err == nil {
+		t.Error("expected the binary at its already-resolved absolute path to be removed")
+	}
+	if _, err := os.Stat(yamlPath); err == nil {
+		t.Error("expected the module yaml to be removed")
+	}
+}

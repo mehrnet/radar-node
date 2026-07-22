@@ -513,21 +513,31 @@ collect:
 	}
 }
 
-func TestLoadDir_RejectsInstallDependencyPathOutsideKnownDirs(t *testing.T) {
+// A locally-installed module's path may already be a resolved
+// absolute path, not the __TOOLS_DIR__/__MODULES_DIR__ placeholder --
+// install.sh's own legacy substitution rewrites every file it deploys
+// under modules.d, module YAML included, before this package ever
+// sees it (see a real production incident this regression test
+// reproduces: v0.26 crash-looped on every already-updated node for
+// exactly this reason). LoadDir must tolerate that; only
+// moduleinstall's own write path enforces the strict placeholder
+// form.
+func TestLoadDir_AcceptsAlreadyResolvedAbsolutePath(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "bad.yaml", `
-name: bad-install
+	writeFile(t, dir, "openvpn.yaml", `
+name: openvpn
 install:
-  - name: bad
-    url: https://example.com/bad_{os}_{arch}.{ext}
-    path: /etc/cron.d/bad
+  - name: openvpn
+    kind: binary
+    url: https://example.com/openvpn_{os}_{arch}.{ext}
+    path: /etc/radar-node/tools/openvpn
 run:
   command: ["echo", "{{target}}"]
 collect:
   format: writeout_json
 `)
-	if _, err := module.LoadDir(dir); err == nil {
-		t.Fatal("expected an error for an install dependency path outside __TOOLS_DIR__/__MODULES_DIR__")
+	if _, err := module.LoadDir(dir); err != nil {
+		t.Fatalf("expected an already-resolved absolute path to load without error, got %v", err)
 	}
 }
 

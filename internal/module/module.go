@@ -149,13 +149,18 @@ type InstallDependency struct {
 	URL string `yaml:"url"`
 	// Path is where this dependency actually gets written on disk --
 	// the destination side of the source/destination pair alongside
-	// URL. Must start with the literal "__TOOLS_DIR__/" or
+	// URL. In a module's canonical source (radar.mehrnet.com/install/
+	// modules/*.yaml), this is always the literal "__TOOLS_DIR__/" or
 	// "__MODULES_DIR__/" placeholder (the same convention a fetched
 	// file's own *contents* already use, see moduleinstall's
-	// substitutePlaceholders), resolved to the real, resolved
-	// directory (root vs. non-root installs differ) at install time --
-	// never a bare/absolute path, so a module can't be authored to
-	// write anywhere else on disk. Required for every entry.
+	// substitutePlaceholders/resolveInstallPath, which enforce that
+	// format strictly since they're the ones about to write a file).
+	// Only required to be non-empty here: a copy already sitting in
+	// --modules-dir may have this placeholder already resolved to a
+	// real absolute path by install.sh's own blanket substitution over
+	// every file it deploys -- LoadDir must still parse that (it's
+	// only ever displayed/reported from here, not resolved further),
+	// so validation stays permissive at parse time.
 	Path string `yaml:"path"`
 }
 
@@ -200,8 +205,8 @@ func (m *Module) validate() error {
 		if dep.Kind != "" && dep.Kind != "binary" && dep.Kind != "file" {
 			return fmt.Errorf("module %q: install[%d] (%s): kind must be \"binary\" or \"file\", got %q", m.Name, i, dep.Name, dep.Kind)
 		}
-		if !strings.HasPrefix(dep.Path, "__TOOLS_DIR__/") && !strings.HasPrefix(dep.Path, "__MODULES_DIR__/") {
-			return fmt.Errorf("module %q: install[%d] (%s): path must start with __TOOLS_DIR__/ or __MODULES_DIR__/, got %q", m.Name, i, dep.Name, dep.Path)
+		if dep.Path == "" {
+			return fmt.Errorf("module %q: install[%d] (%s): path is required", m.Name, i, dep.Name)
 		}
 	}
 
