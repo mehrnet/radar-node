@@ -24,7 +24,7 @@ gives you a one-time `node_id` and `api_key`. Then, on the machine that
 should run the node:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mehrnet/radar-node/main/install.sh \
+curl -fsSL https://radar.mehrnet.com/install.sh \
   | sh -s -- --node_id=<node_id> --api_key=<api_key>
 ```
 
@@ -64,7 +64,7 @@ Deleting a node from the radar UI stops it (via its next heartbeat) but does
 *not* remove it from the machine -- to fully clean up, run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mehrnet/radar-node/main/install.sh \
+curl -fsSL https://radar.mehrnet.com/install.sh \
   | sh -s -- --uninstall
 ```
 
