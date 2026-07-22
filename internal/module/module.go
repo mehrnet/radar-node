@@ -61,6 +61,19 @@ type Module struct {
 	Name          string `yaml:"name"`
 	Engine        string `yaml:"engine,omitempty"`
 	EngineVersion string `yaml:"engine_version,omitempty"`
+	// Version/URL are this module *package's* own version and the
+	// manifest URL it can be re-fetched from -- distinct from
+	// Engine/EngineVersion above (which describe the underlying tool
+	// this module wraps, e.g. "xray"/"26.3.27"). Version is free-form
+	// (e.g. "26.3.27-1", an upstream-version-plus-our-own-packaging-
+	// revision suffix), reported per heartbeat (see registry.
+	// ModuleVersions) for the dashboard to show and eventually compare
+	// against this same URL's own current copy to offer an update.
+	// Both optional -- the embedded tcp/udp/dns/... defaults have
+	// neither, they're versioned implicitly with radar-node's own
+	// release.
+	Version string `yaml:"version,omitempty"`
+	URL     string `yaml:"url,omitempty"`
 	// Action names a built-in implementation from internal/action
 	// (e.g. "tcp_connect") to call directly, in-process -- no
 	// subprocess, no Prepare/Run/Collect/Teardown.

@@ -169,7 +169,10 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		resp, err := a.client.Heartbeat(hbCtx, wire.HeartbeatRequest{
 			NodeID:       a.nodeID,
 			AgentVersion: a.version,
+			OS:           runtime.GOOS,
+			Arch:         runtime.GOARCH,
 			Probers:      proberHashes,
+			Modules:      a.reg.ModuleVersions(),
 			SinceSeq:     a.cache.lastKnownSeq(),
 			SentAt:       sentAt.UTC().Format(time.RFC3339Nano),
 		})

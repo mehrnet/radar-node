@@ -104,12 +104,38 @@ type ResultsResponse struct {
 // for (almost always) zero new information. 0 means a full resync,
 // same meaning the old standalone endpoint gave a fresh cache.
 type HeartbeatRequest struct {
-	SpecVersion  int      `json:"spec_version"`
-	NodeID       string   `json:"node_id"`
-	AgentVersion string   `json:"agent_version"`
-	Probers      []string `json:"probers"`
-	SinceSeq     int      `json:"since_seq"`
-	SentAt       string   `json:"sent_at"`
+	SpecVersion  int    `json:"spec_version"`
+	NodeID       string `json:"node_id"`
+	AgentVersion string `json:"agent_version"`
+	// OS/Arch are this process's own runtime.GOOS/GOARCH -- how
+	// radar-api knows whether a given bundled module (not every
+	// engine has builds for every platform, e.g. openvpn/wireguard-go
+	// are linux-only) can even be offered to this specific node at
+	// all, not just whether one's already installed.
+	OS      string   `json:"os,omitempty"`
+	Arch    string   `json:"arch,omitempty"`
+	Probers []string `json:"probers"`
+	// Modules is every loaded module's own Version/URL (see
+	// module.Module's own doc comment), keyed by prober_id -- entirely
+	// separate from Probers' content-addressed prober_id:file_hash
+	// pairs above, which exist for the module-sync handshake, not
+	// human-readable version tracking. A module authored without
+	// either (the embedded tcp/udp/dns/... defaults, or an
+	// unmigrated custom module) is simply absent from this map, not
+	// included with null fields.
+	Modules  map[string]ModuleVersion `json:"modules,omitempty"`
+	SinceSeq int                      `json:"since_seq"`
+	SentAt   string                   `json:"sent_at"`
+}
+
+// ModuleVersion is one loaded module's own version/manifest-url, as
+// reported per prober_id in HeartbeatRequest.Modules. Version/URL are
+// both nil (not omitted) when a module was authored without them --
+// "we checked, there is no version" is a real, reportable state,
+// distinct from "this module isn't in the map at all".
+type ModuleVersion struct {
+	Version *string `json:"version"`
+	URL     *string `json:"url"`
 }
 
 // HeartbeatResponse is the body returned by a successful

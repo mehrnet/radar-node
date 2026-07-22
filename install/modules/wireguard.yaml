@@ -1,4 +1,6 @@
 name: wireguard
+version: "ecfc5a8d5446-1"
+url: https://radar.mehrnet.com/install/modules/wireguard.yaml
 request:
   - name: private_key
     type: string

@@ -16,6 +16,7 @@ import (
 
 	"github.com/mehrnet/radar-node/internal/module"
 	"github.com/mehrnet/radar-node/internal/probe"
+	"github.com/mehrnet/radar-node/internal/wire"
 )
 
 //go:embed defaults/*.yaml
@@ -38,6 +39,8 @@ type entry struct {
 	rawYAML  string
 	fileHash string
 	manifest module.Manifest
+	version  string
+	url      string
 }
 
 type Registry map[string]entry
@@ -55,7 +58,7 @@ func Default() (Registry, error) {
 }
 
 func (r Registry) add(m module.Module) {
-	r[m.Name] = entry{checker: module.NewChecker(m), rawYAML: m.RawYAML, fileHash: m.FileHash, manifest: m.ToManifest()}
+	r[m.Name] = entry{checker: module.NewChecker(m), rawYAML: m.RawYAML, fileHash: m.FileHash, manifest: m.ToManifest(), version: m.Version, url: m.URL}
 }
 
 func (r Registry) loadFS(fsys fs.FS) error {
@@ -112,4 +115,29 @@ func (r Registry) ProberHashes() []string {
 func (r Registry) RawYAML(proberID string) (yamlSrc, fileHash string, manifest module.Manifest, ok bool) {
 	e, ok := r[proberID]
 	return e.rawYAML, e.fileHash, e.manifest, ok
+}
+
+// ModuleVersions is every loaded module's own Version/URL (see
+// module.Module's own doc comment), keyed by prober_id, for reporting
+// in a wire.HeartbeatRequest. A module authored without either (the
+// embedded tcp/udp/dns/... defaults, or an unmigrated custom module)
+// is omitted entirely rather than included with null fields -- the
+// per-field null-vs-absent distinction only matters once a module is
+// actually in this map at all.
+func (r Registry) ModuleVersions() map[string]wire.ModuleVersion {
+	out := map[string]wire.ModuleVersion{}
+	for name, e := range r {
+		if e.version == "" && e.url == "" {
+			continue
+		}
+		mv := wire.ModuleVersion{}
+		if v := e.version; v != "" {
+			mv.Version = &v
+		}
+		if u := e.url; u != "" {
+			mv.URL = &u
+		}
+		out[name] = mv
+	}
+	return out
 }

@@ -98,6 +98,69 @@ request:
 	}
 }
 
+func TestDefault_ModuleVersions_EmptyForBuiltinsWithNeither(t *testing.T) {
+	reg, err := registry.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The embedded tcp/udp/dns/... defaults have no version/url of
+	// their own -- they're versioned implicitly with radar-node's own
+	// release, so none of them should show up here at all.
+	if got := reg.ModuleVersions(); len(got) != 0 {
+		t.Errorf("expected no module versions for the embedded defaults, got %+v", got)
+	}
+}
+
+func TestLoadModules_ModuleVersions_ReportsVersionAndURLWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeFile(dir, "xray.yaml", `
+name: xray
+version: "26.3.27-1"
+url: https://radar.mehrnet.com/install/modules/xray.yaml
+run:
+  command: ["true"]
+collect:
+  format: writeout_json
+`); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(dir, "wireguard.yaml", `
+name: wireguard
+run:
+  command: ["true"]
+collect:
+  format: writeout_json
+`); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := registry.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.LoadModules(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	versions := reg.ModuleVersions()
+	xray, ok := versions["xray"]
+	if !ok {
+		t.Fatalf("expected \"xray\" in ModuleVersions, got %+v", versions)
+	}
+	if xray.Version == nil || *xray.Version != "26.3.27-1" {
+		t.Errorf("expected xray version 26.3.27-1, got %v", xray.Version)
+	}
+	if xray.URL == nil || *xray.URL != "https://radar.mehrnet.com/install/modules/xray.yaml" {
+		t.Errorf("expected xray's url, got %v", xray.URL)
+	}
+
+	// wireguard.yaml declared neither -- absent from the map entirely,
+	// same as the embedded builtins, not present with null fields.
+	if _, ok := versions["wireguard"]; ok {
+		t.Errorf("expected \"wireguard\" to be absent from ModuleVersions (no version/url declared), got an entry")
+	}
+}
+
 func writeFile(dir, name, content string) error {
 	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644)
 }

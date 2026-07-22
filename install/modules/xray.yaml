@@ -1,4 +1,6 @@
 name: xray
+version: "26.3.27-1"
+url: https://radar.mehrnet.com/install/modules/xray.yaml
 request:
   - name: config
     type: object
