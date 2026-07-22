@@ -124,24 +124,36 @@ type HeartbeatResponse struct {
 	// Owner-triggered from the radar UI (see radar-api's
 	// nodes.pending_command), delivered here rather than a separate
 	// channel because heartbeat is this node's only poll. Empty/absent
-	// means no command. "update": re-run the install script to fetch
-	// the latest release and replace this process. "delete": this
-	// node was removed from radar -- stop running and tell the
-	// operator how to fully uninstall. Sent at most once per command
-	// (the server clears it after handing it back), so a request that
-	// never reaches a running agent (offline, crashed) is simply
-	// retried the next time it does heartbeat, no worse than any other
-	// heartbeat-carried state.
+	// means no command. "delete": this node was removed from radar --
+	// stop running and tell the operator how to fully uninstall. Not
+	// fire-once: kept coming until the agent uninstalls for good or an
+	// owner restores the node.
 	Command string `json:"command,omitempty"`
-	// ModuleActions batches every bundled-engine install_*/remove_*
-	// action radar-api's edit modal collected in one Save into a
-	// single delivery here, rather than one fire-once Command per
-	// click -- see radar-api's nodes.pending_module_actions and
-	// POST /v1/nodes/:id/module-actions. Applied as one re-exec of
-	// install.sh carrying every corresponding --install-*/--remove-*
-	// flag at once (agent.go's reinstall), same fire-once/empty-means-
-	// nothing semantics as Command.
-	ModuleActions []string `json:"module_actions,omitempty"`
+	// PendingAction is an "update" or bundled-prober module-actions
+	// batch, still awaiting this agent's acknowledgement (see
+	// radar-api's nodes.pending_action and POST /v1/nodes/ack) --
+	// absent once acked, since there's nothing left to redeliver. Call
+	// AckAction with PendingAction.ID *before* acting on it (before
+	// reinstall/selfUpdate, which are about to kill this process) --
+	// that's what lets the server tell "delivered" apart from
+	// "received and being acted on" instead of clearing this the
+	// instant it's handed back once, which used to make the dashboard
+	// prematurely show the update button again while this node was
+	// still mid-restart.
+	PendingAction *PendingAction `json:"pending_action,omitempty"`
+}
+
+// PendingAction is the payload named in HeartbeatResponse.PendingAction
+// -- see its doc comment.
+type PendingAction struct {
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`              // "update" or "module_actions"
+	Actions []string `json:"actions,omitempty"` // only for kind == "module_actions"
+}
+
+// AckRequest is the body of POST /v1/nodes/ack.
+type AckRequest struct {
+	ID string `json:"id"`
 }
 
 // HeartbeatRejection is the body of a 409 response to

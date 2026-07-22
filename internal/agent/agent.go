@@ -205,13 +205,11 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			log.Printf("agent: synced %d probe event(s)", len(resp.Events))
 		}
 		switch resp.Command {
-		case "update":
-			a.selfUpdate()
 		case "delete":
 			a.handleDeleteCommand()
 		}
-		if len(resp.ModuleActions) > 0 {
-			a.applyModuleActions(resp.ModuleActions)
+		if resp.PendingAction != nil {
+			a.handlePendingAction(ctx, resp.PendingAction)
 		}
 	}
 
@@ -251,6 +249,29 @@ const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
 
 func (a *agent) selfUpdate() {
 	a.reinstall()
+}
+
+// handlePendingAction acks the given action *before* acting on it --
+// reinstall/selfUpdate are about to kill this process (re-exec
+// install.sh, stop the service, replace the binary), so there'd be no
+// later point at which this process could still confirm receipt. If
+// the server rejects the ack (410: it already gave up on this id
+// after too many un-acked heartbeats, or something else superseded
+// it), this bails without touching install.sh at all -- proceeding
+// anyway would just race whatever the server has already moved on to.
+func (a *agent) handlePendingAction(ctx context.Context, action *wire.PendingAction) {
+	ackCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := a.client.AckAction(ackCtx, action.ID); err != nil {
+		log.Printf("agent: could not ack pending action %s (%v) -- not acting on it this heartbeat", action.ID, err)
+		return
+	}
+	switch action.Kind {
+	case "update":
+		a.selfUpdate()
+	case "module_actions":
+		a.applyModuleActions(action.Actions)
+	}
 }
 
 // moduleActionFlags maps a wire-level "install_xray"/"remove_wireguard"

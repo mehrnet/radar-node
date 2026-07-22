@@ -182,3 +182,12 @@ func (c *Client) UploadModules(ctx context.Context, req wire.ModulesUploadReques
 	}
 	return &out, nil
 }
+
+// AckAction confirms receipt of a HeartbeatResponse.PendingAction --
+// call this before acting on it (see PendingAction's own doc comment).
+// A 410 means the server already gave up on this id (too slow, or
+// superseded); the caller should treat that as "don't proceed" rather
+// than a generic error.
+func (c *Client) AckAction(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/nodes/ack", wire.AckRequest{ID: id}, nil)
+}
