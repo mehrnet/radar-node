@@ -101,6 +101,9 @@ Requires Go 1.26+. Release builds (tagged) are handled by `.goreleaser.yaml`.
 radar-node probe <target> [flags]
 radar-node agent [flags]
 radar-node init [-C path]
+radar-node fetch-module <url> [flags]
+radar-node install-module <name> [flags]
+radar-node remove-module <name> [flags]
 ```
 
 ### `probe` -- one-shot check runner
@@ -154,6 +157,67 @@ Writes the six embedded default module files (`tcp.yaml`, `udp.yaml`,
 `init` is run, or a directory is pointed at with `--modules-dir`, they only
 exist embedded inside the binary. `--force` overwrites files that already
 exist there.
+
+### `fetch-module` / `install-module` / `remove-module` -- Go-native module install
+
+```sh
+radar-node fetch-module https://radar.mehrnet.com/install/modules/xray.yaml
+radar-node install-module xray   # re-fetch an already locally-known module, using its own recorded url
+radar-node remove-module xray
+```
+
+| Flag | Meaning |
+|---|---|
+| `--modules-dir` | where a module's own YAML + file-kind dependencies go (default: `/etc/radar-node/modules.d` as root, `~/.config/radar-node/modules.d` otherwise) |
+| `--tools-dir` | where a module's binary-kind dependencies go (default: `/etc/radar-node/tools` as root, `~/.config/radar-node/tools` otherwise) |
+| `--proxy` | proxy for these downloads (`http://`, `https://`, `socks5://`, `socks5h://`) |
+
+The Go-native counterpart to the shell-based `install.sh --install-xray`/
+`--install-wireguard`/`--install-openvpn` flags described below -- same
+target directories, same checksum verification, same module YAML schema,
+different entry point. `fetch-module` downloads a module's own YAML from a
+URL, checks this node's platform against its declared `os`/`arch` (if any),
+downloads+verifies+installs every dependency in its `install:` list, then
+writes the module YAML itself into `--modules-dir` -- what makes it
+"locally known" for a later `install-module`/`remove-module` by name alone.
+No separate state is kept beside that YAML: its own `url:` field is exactly
+what `install-module <name>` re-fetches from, so re-running it later is how
+to pick up an update. `remove-module <name>` deletes everything that
+module's own `install:` list named plus the YAML itself.
+
+A module's `install:` list is a flat set of remote artifacts, each with an
+explicit source `url` and destination `path`:
+
+```yaml
+name: xray
+os: [linux, darwin, windows]     # platforms this module can even be installed on; omit for "any"
+arch: [amd64, arm64]
+install:
+  - name: xray
+    kind: binary                 # "binary" (default) or "file"
+    version: "26.3.27-1"
+    url: https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/xray
+  - name: xray-prepare.sh
+    kind: file
+    url: https://radar.mehrnet.com/install/modules/xray-prepare.sh
+    path: __MODULES_DIR__/xray-prepare.sh
+```
+
+- `kind: binary` (the default) is fetched as a goreleaser-style archive
+  (`{os}`/`{arch}`/`{ext}` placeholders in `url` resolve per this node's own
+  platform, `{ext}` is `zip` on windows, `tar.gz` elsewhere), checksum-
+  verified against the asset URL's own `.checksum.txt` sidecar, extracted,
+  and written to `path` as an executable.
+- `kind: file` is fetched as-is -- no archive, no checksum sidecar -- and
+  written to `path` directly, e.g. a `prepare`/`run` wrapper script.
+- `path` must start with the literal `__TOOLS_DIR__/` or `__MODULES_DIR__/`
+  placeholder in a module's *canonical source* (what `fetch-module`
+  actually resolves against); a module already sitting in `--modules-dir`
+  may have this already resolved to a real path (see install.sh's own
+  substitution below) -- `fetch-module`/`install-module` always re-fetch
+  the canonical source fresh rather than trusting whatever's on disk, so
+  that distinction never matters in practice.
 
 ## Modules
 
@@ -218,10 +282,36 @@ binaries. install.sh's `--install-xray`/`--install-wireguard`/
 daily against upstream) from
 [mehrnet/static-builds](https://github.com/mehrnet/static-builds), and drop
 the matching module YAML + wrapper script into `modules.d` -- see that
-repo's own README for exactly what gets installed where. This is a managed
-install concern, not something this binary reaches for itself; a node with
-none of these flags used at install time simply never has those probers in
-its inventory at all.
+repo's own README for exactly what gets installed where, and see
+[`fetch-module`/`install-module`/`remove-module`](#fetch-module--install-module--remove-module----go-native-module-install)
+above for the same install: schema these modules declare, and the
+Go-native (rather than shell-flag-driven) way to fetch/update/remove one.
+This is a managed install concern, not something this binary reaches for
+itself; a node with none of these flags used at install time simply never
+has those probers in its inventory at all.
+
+install.sh writes each module's own YAML to disk *verbatim* -- its
+`__TOOLS_DIR__`/`__MODULES_DIR__` placeholders (inside `install:` entries'
+`path` fields) are left unresolved, exactly as fetched from
+`radar.mehrnet.com`. Only the wrapper scripts alongside it (e.g.
+`xray-prepare.sh`) get those placeholders substituted for this node's real,
+resolved directories, since their references are shell command-line
+arguments meant to be resolved once, at install time. (Before this was
+fixed, install.sh ran the same substitution over the module YAML too --
+harmless while `install:`/`path` didn't exist yet, but the day they were
+added, a resolved-instead-of-placeholder `path` value failed this binary's
+own stricter parsing on every subsequent boot, crash-looping every node
+whose modules got refreshed by that release. `LoadDir`'s own parsing is
+permissive about this on purpose now -- see `module.InstallDependency.Path`'s
+doc comment -- but install.sh writing the placeholder form in the first
+place is what keeps a local module's YAML byte-identical to its canonical
+source.)
+
+`version:`/`url:` on a loaded module (and each of its `install:` entries)
+are what a heartbeat reports back to `radar-api` (see `registry.
+ModuleVersions` and [`POST /v1/nodes/heartbeat`](#post-v1nodesheartbeat)
+below) -- how the dashboard knows a bundled module has a newer version
+available, the same way it already knows about `radar-node` itself.
 
 For `run:`-based modules, the following placeholders resolve in every
 `prepare`/`run`/`teardown` command, sourced only from the fixed set below
@@ -606,16 +696,34 @@ populated once rather than repeated on every heartbeat. `since_seq` is
 this node's probe-event cursor (0 for a full resync) -- see
 [Event](#event) and [Local scheduling](#local-scheduling).
 
+`os`/`arch` are this process's own `runtime.GOOS`/`runtime.GOARCH` --
+how `radar-api` knows whether a given bundled module (not every engine
+has builds for every platform) can even be offered to this specific
+node at all. `modules` is every *loaded* module's own `version`/`url`
+(both `null`, not omitted, for a module authored without them -- the
+embedded tcp/udp/dns/... defaults, or an unmigrated custom module),
+keyed by `prober_id` -- entirely separate from `probers`' own
+`prober_id:file_hash` pairs above, which exist for the module-sync
+handshake, not human-readable version tracking. This is how the
+dashboard shows a bundled module's own version under a node's title,
+and eventually flags one as outdated the same way it already does for
+`agent_version` itself.
+
 Request:
 ```jsonc
 {
   "spec_version": 1,
   "node_id": "node_01J8Z1A2B3C4D5E6F7G8H9J0KL",
   "agent_version": "0.3.1",
+  "os": "linux",
+  "arch": "amd64",
   "probers": [
     "tcp:6985e90a888a115f28bbc83ae985f30a399e9ca9ab162a3af734bbd1ac2e64f",
     "xray-vless:a1b2c3d4e5f6..."
   ],
+  "modules": {
+    "xray-vless": { "version": "26.3.27-1", "url": "https://radar.mehrnet.com/install/modules/xray.yaml" }
+  },
   "since_seq": 42,
   "sent_at": "2026-07-12T10:00:00.000Z"
 }
