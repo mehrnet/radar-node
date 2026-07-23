@@ -118,8 +118,21 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 // startPrepare launches the prepare command detached from run's
 // output, bound to ctx so it's killed when Check() returns, and
 // waits until either alloc_port is accepting connections (typical
-// for a module that starts a local proxy inbound) or a short
-// readiness deadline elapses.
+// for a module that starts a local proxy inbound) or a readiness
+// deadline elapses.
+//
+// That deadline is half of this probe's own configured timeout_ms,
+// not a flat constant -- a module whose prepare step has to actually
+// establish outbound connectivity (e.g. xray, especially under
+// concurrent load or from a network-constrained host) can need
+// meaningfully more than a few seconds, and a fixed cap can't adapt
+// to that no matter how generous timeout_ms is set to. The other half
+// is left for run (+ collect/teardown); ctx itself is already bounded
+// by the full timeout_ms regardless, so this can never exceed that
+// either. (A prior fixed 3s cap here is what made every xray/
+// wireguard/openvpn check across the fleet fail at a high rate even
+// once the real path-resolution bug was fixed -- raising timeout_ms
+// alone did nothing, since 3s < any of the timeout_ms values in use.)
 func (c Checker) startPrepare(ctx context.Context, ec execContext, port int) error {
 	argv := ec.resolve(c.m.Prepare.Command)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -128,7 +141,8 @@ func (c Checker) startPrepare(ctx context.Context, ec execContext, port int) err
 	}
 	go func() { _ = cmd.Wait() }() // reap; ctx cancellation ends the process
 
-	readinessCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	readinessTimeout := time.Duration(ec.TimeoutMs) * time.Millisecond / 2
+	readinessCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
 	defer cancel()
 	return portalloc.WaitForPort(readinessCtx, port)
 }

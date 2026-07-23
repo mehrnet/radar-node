@@ -310,3 +310,74 @@ collect:
 		t.Fatal("expected latency_ms to be set")
 	}
 }
+
+// Regression test: prepare's own readiness wait used to be a flat 3s
+// regardless of the probe's own configured timeout_ms -- a slow-to-
+// start engine (a real xray under concurrent load, say) could never
+// succeed no matter how generous timeout_ms was set to, since 3s
+// always won. It's now half of timeout_ms instead, so a probe with
+// enough of its own budget gives prepare proportionally more room.
+func TestChecker_PrepareReadinessScalesWithTimeout(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	dir := t.TempDir()
+	// Only starts listening after a deliberate delay -- longer than
+	// the old flat 3s cap, short enough to fit inside half of a
+	// generous timeout_ms.
+	// Loops accepting connections (like TestChecker_PrepareThenRun's own
+	// listener) rather than handling just one -- readiness's own probe
+	// connection and the real client's later one both connect here, and
+	// a single-accept-then-exit listener would let the readiness check
+	// consume the only connection the real client needed.
+	slowListenerScript := filepath.Join(dir, "slow-listener.py")
+	if err := os.WriteFile(slowListenerScript, []byte(`
+import socket, sys, time
+time.sleep(4)
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen(1)
+while True:
+    conn, _ = s.accept()
+    conn.close()
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clientScript := filepath.Join(dir, "client.py")
+	if err := os.WriteFile(clientScript, []byte(`
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=2)
+s.close()
+print('{"latency_ms": 1}')
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := loadOne(t, `
+name: slow-prepare
+engine: fake-tunnel
+prepare:
+  command: ["python3", "`+slowListenerScript+`", "{{alloc_port}}"]
+run:
+  command: ["python3", "`+clientScript+`", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+`)
+	c := module.NewChecker(m)
+
+	// Half of 10s (5s) comfortably covers the listener's 4s startup
+	// delay -- would have failed under the old flat 3s cap.
+	res := c.Check(context.Background(), probe.Options{Target: "unused", Timeout: 10 * time.Second, Mode: probe.ModeWarm, Seq: 1})
+	if !res.Ok {
+		t.Fatalf("expected a generous timeout_ms to give prepare enough room for a 4s startup, got error %q", res.Error)
+	}
+
+	// Half of 2s (1s) does not cover it -- proves this is actually
+	// proportional, not just "now always generous".
+	res = c.Check(context.Background(), probe.Options{Target: "unused", Timeout: 2 * time.Second, Mode: probe.ModeWarm, Seq: 1})
+	if res.Ok {
+		t.Fatal("expected a short timeout_ms to still not give a 4s startup enough room")
+	}
+}
