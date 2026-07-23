@@ -706,8 +706,10 @@ keyed by `prober_id` -- entirely separate from `probers`' own
 `prober_id:file_hash` pairs above, which exist for the module-sync
 handshake, not human-readable version tracking. This is how the
 dashboard shows a bundled module's own version under a node's title,
-and eventually flags one as outdated the same way it already does for
-`agent_version` itself.
+and flags one as outdated (`outdated_modules` on `GET /v1/nodes`) the
+same way it already does for `agent_version` itself -- both share the
+same remediation, since re-running install.sh/node.sh refreshes every
+already-opted-into module in the same pass as the binary itself.
 
 Request:
 ```jsonc
