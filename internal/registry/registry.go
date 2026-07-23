@@ -72,13 +72,17 @@ func (r Registry) loadFS(fsys fs.FS) error {
 	return nil
 }
 
-// LoadModules loads every module in dir (see module.LoadDir) and adds
-// each as a Checker, overriding any embedded default of the same
+// LoadModules loads every module in dir (see module.LoadDir), resolves
+// each one's own __MODULES_DIR__/__TOOLS_DIR__ command placeholders
+// against dir/toolsDir (see module.Module.ResolveDirPlaceholders --
+// this is what lets install.sh/--fetch-module write a module's YAML
+// verbatim rather than baking real paths into it themselves), and
+// adds each as a Checker, overriding any embedded default of the same
 // name -- a user's own tcp.yaml in --modules-dir replaces the
 // embedded one rather than conflicting with it. A dir of "" is a
 // no-op, not an error, so --modules-dir is optional everywhere it's
 // exposed as a flag.
-func (r Registry) LoadModules(dir string) error {
+func (r Registry) LoadModules(dir, toolsDir string) error {
 	if dir == "" {
 		return nil
 	}
@@ -87,7 +91,7 @@ func (r Registry) LoadModules(dir string) error {
 		return fmt.Errorf("load modules from %s: %w", dir, err)
 	}
 	for _, m := range modules {
-		r.add(m)
+		r.add(m.ResolveDirPlaceholders(dir, toolsDir))
 	}
 	return nil
 }

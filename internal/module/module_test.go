@@ -3,6 +3,7 @@ package module_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/mehrnet/radar-node/internal/module"
@@ -461,6 +462,63 @@ func TestInstallDependency_ResolveURL_SubstitutesPlatformAndPicksExt(t *testing.
 	}
 	if got := dep.ResolveURL("windows", "arm64"); got != "https://radar.mehrnet.com/releases/xray/xray_latest_windows_arm64.zip" {
 		t.Errorf("windows/arm64: expected .zip, got %q", got)
+	}
+}
+
+// Regression test for a real production incident: install.sh writing
+// a module's own YAML verbatim (see moduleinstall.go's own comment on
+// why) left every prepare/run command's own __MODULES_DIR__/
+// __TOOLS_DIR__ references unresolved -- nothing had ever substituted
+// them anywhere else, since that substitution used to be install.sh's
+// own job for the *whole file*, command blocks included. Every
+// xray/wireguard/openvpn check across the fleet started failing
+// ("prepare: did not become ready ... context deadline exceeded")
+// the moment that verbatim-write change shipped. ResolveDirPlaceholders
+// is what registry.LoadModules now calls to fix this at load time
+// instead, regardless of how the module got onto disk.
+func TestResolveDirPlaceholders_SubstitutesCommandArgv(t *testing.T) {
+	m, err := module.ParseBytes([]byte(`
+name: xray
+install:
+  - name: xray
+    kind: binary
+    url: https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/xray
+prepare:
+  command: ["/bin/sh", "__MODULES_DIR__/xray-prepare.sh", "{{params_json}}", "{{alloc_port}}"]
+run:
+  command: ["/bin/sh", "__MODULES_DIR__/xray-run.sh", "{{alloc_port}}", "{{target}}"]
+collect:
+  format: writeout_json
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := m.ResolveDirPlaceholders("/etc/radar-node/modules.d", "/etc/radar-node/tools")
+	wantPrepare := []string{"/bin/sh", "/etc/radar-node/modules.d/xray-prepare.sh", "{{params_json}}", "{{alloc_port}}"}
+	if !reflect.DeepEqual(resolved.Prepare.Command, wantPrepare) {
+		t.Errorf("prepare.command: got %v, want %v", resolved.Prepare.Command, wantPrepare)
+	}
+	wantRun := []string{"/bin/sh", "/etc/radar-node/modules.d/xray-run.sh", "{{alloc_port}}", "{{target}}"}
+	if !reflect.DeepEqual(resolved.Run.Command, wantRun) {
+		t.Errorf("run.command: got %v, want %v", resolved.Run.Command, wantRun)
+	}
+	// {{...}} placeholders are a completely separate mechanism
+	// (resolved per-probe at run time, not here) -- untouched.
+	if resolved.Prepare.Command[2] != "{{params_json}}" {
+		t.Errorf("expected {{params_json}} left alone, got %q", resolved.Prepare.Command[2])
+	}
+	// install[].path is a *different* placeholder use (resolved by
+	// moduleinstall.go at fetch/install time, never by this) -- also
+	// untouched here.
+	if resolved.Install[0].Path != "__TOOLS_DIR__/xray" {
+		t.Errorf("expected install[].path left alone, got %q", resolved.Install[0].Path)
+	}
+	// The module's own identity (used for the heartbeat content-
+	// addressing handshake) must keep reflecting the literal on-disk
+	// bytes, not this resolved copy.
+	if resolved.RawYAML != m.RawYAML || resolved.FileHash != m.FileHash {
+		t.Error("expected RawYAML/FileHash unchanged by resolution")
 	}
 }
 

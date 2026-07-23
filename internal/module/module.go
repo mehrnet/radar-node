@@ -380,3 +380,39 @@ func ParseBytes(data []byte) (Module, error) {
 	m.FileHash = hex.EncodeToString(sum[:])
 	return m, nil
 }
+
+// ResolveDirPlaceholders substitutes __MODULES_DIR__/__TOOLS_DIR__ in
+// m's prepare/run/teardown command argv for this process's own real,
+// resolved directories -- called once at load time (see registry.
+// LoadModules), the same convention a module's wrapper scripts/
+// install: paths already use, just resolved here instead of by
+// whatever installed the module onto disk. A module's own YAML is
+// always written verbatim by both install.sh and --fetch-module/
+// --install-module (see moduleinstall.go) specifically so this is the
+// only place that ever needs to know the real paths -- neither of
+// those has to re-derive or bake them in, and a module fetched either
+// way behaves identically. Returns a new Module; m itself (and its
+// RawYAML/FileHash, which must keep reflecting the literal on-disk
+// bytes for the heartbeat content-addressing handshake) is untouched.
+func (m Module) ResolveDirPlaceholders(modulesDir, toolsDir string) Module {
+	replace := func(s string) string {
+		s = strings.ReplaceAll(s, "__MODULES_DIR__", modulesDir)
+		s = strings.ReplaceAll(s, "__TOOLS_DIR__", toolsDir)
+		return s
+	}
+	resolveStep := func(step *Step) *Step {
+		if step == nil {
+			return nil
+		}
+		resolved := *step
+		resolved.Command = make([]string, len(step.Command))
+		for i, arg := range step.Command {
+			resolved.Command[i] = replace(arg)
+		}
+		return &resolved
+	}
+	m.Prepare = resolveStep(m.Prepare)
+	m.Run = resolveStep(m.Run)
+	m.Teardown = resolveStep(m.Teardown)
+	return m
+}

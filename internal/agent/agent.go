@@ -66,6 +66,13 @@ type Config struct {
 	// of (and overriding by name) the embedded default fixtures
 	// (tcp/udp/dns/icmp/http/https/system). Empty means defaults-only.
 	ModulesDir string
+	// ToolsDir is only used to resolve __TOOLS_DIR__ in a loaded
+	// module's own prepare/run/teardown command argv (see
+	// registry.LoadModules) -- this process never reads or writes
+	// anything under it itself, unlike --fetch-module/--install-module
+	// (see moduleinstall.Config's own ToolsDir), which actually places
+	// binaries there.
+	ToolsDir string
 }
 
 // agent bundles everything the two concurrent loops (heartbeat --
@@ -114,7 +121,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := reg.LoadModules(cfg.ModulesDir); err != nil {
+	if err := reg.LoadModules(cfg.ModulesDir, cfg.ToolsDir); err != nil {
 		return err
 	}
 

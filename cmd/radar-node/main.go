@@ -92,6 +92,8 @@ probe flags:
                           (tcp: tls,sni,insecure  dns: record,server  http: method)
   --modules-dir path      load/override modules from *.yaml/*.yml here,
                           on top of the embedded defaults
+  --tools-dir path        resolves __TOOLS_DIR__ in a loaded module's own
+                          prepare/run/teardown command (see --modules-dir)
 
 agent flags:
   --api-url string      radar-api base URL (required)
@@ -102,6 +104,8 @@ agent flags:
   --concurrency int       max probes running at once (default 64)
   --modules-dir path      load/override modules from *.yaml/*.yml here,
                           on top of the embedded defaults
+  --tools-dir path        resolves __TOOLS_DIR__ in a loaded module's own
+                          prepare/run/teardown command (see --modules-dir)
 
 init flags:
   -C path                directory to write the default module files
@@ -150,6 +154,7 @@ func runProbe(args []string) error {
 		format     string
 		params     stringMap
 		modulesDir string
+		toolsDir   string
 	)
 
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
@@ -160,6 +165,7 @@ func runProbe(args []string) error {
 	fs.StringVar(&format, "format", "json", "")
 	fs.Var(&params, "param", "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
+	fs.StringVar(&toolsDir, "tools-dir", "", "")
 	// Go's flag package stops parsing at the first non-flag token, so
 	// `probe <target> --type tcp` (target first, as documented in
 	// usage()) would otherwise leave --type unparsed. Every flag here
@@ -177,7 +183,7 @@ func runProbe(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := reg.LoadModules(modulesDir); err != nil {
+	if err := reg.LoadModules(modulesDir, toolsDir); err != nil {
 		return err
 	}
 	checker, ok := reg.Get(checkType)
@@ -218,6 +224,7 @@ func runAgent(args []string) error {
 		schedulerTick time.Duration
 		concurrency   int
 		modulesDir    string
+		toolsDir      string
 	)
 
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
@@ -227,6 +234,7 @@ func runAgent(args []string) error {
 	fs.DurationVar(&schedulerTick, "scheduler-tick", 2*time.Second, "")
 	fs.IntVar(&concurrency, "concurrency", 64, "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
+	fs.StringVar(&toolsDir, "tools-dir", "", "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -248,6 +256,7 @@ func runAgent(args []string) error {
 		SchedulerTick: schedulerTick,
 		Concurrency:   concurrency,
 		ModulesDir:    modulesDir,
+		ToolsDir:      toolsDir,
 	})
 }
 

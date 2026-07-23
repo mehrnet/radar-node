@@ -66,6 +66,55 @@ func TestDefault_TCPActionRunsForReal(t *testing.T) {
 	}
 }
 
+// Regression test for a real production incident: every xray/
+// wireguard/openvpn check across the fleet started failing the moment
+// install.sh began writing a module's own YAML verbatim -- nothing
+// else had ever resolved __MODULES_DIR__/__TOOLS_DIR__ inside a
+// prepare/run/teardown command, that substitution used to be
+// install.sh's own job for the *whole file*. This exercises the real
+// fix end to end: LoadModules resolves them at load time, regardless
+// of what's literally on disk, so the actual subprocess this module's
+// "run" step launches sees real, resolved paths.
+func TestLoadModules_ResolvesDirPlaceholdersInCommand_RealSubprocess(t *testing.T) {
+	dir := t.TempDir()
+	toolsDir := filepath.Join(t.TempDir(), "tools")
+	// Genuinely unresolved, this module would try to run a shell
+	// script at the literal path "__MODULES_DIR__/echo-dirs.sh",
+	// which doesn't exist -- exactly the "did not become ready"/exit-
+	// failure shape the real incident produced.
+	if err := writeFile(dir, "echo-dirs.yaml", `
+name: echo-dirs
+run:
+  command: ["/bin/sh", "-c", "printf '{\"latency_ms\":1,\"modules_dir\":\"%s\",\"tools_dir\":\"%s\"}' __MODULES_DIR__ __TOOLS_DIR__"]
+collect:
+  format: writeout_json
+`); err != nil {
+		t.Fatal(err)
+	}
+
+	reg, err := registry.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.LoadModules(dir, toolsDir); err != nil {
+		t.Fatal(err)
+	}
+	checker, ok := reg.Get("echo-dirs")
+	if !ok {
+		t.Fatal("expected echo-dirs to be registered")
+	}
+	res := checker.Check(context.Background(), probe.Options{Target: "x", Timeout: 2 * time.Second, Mode: probe.ModeWarm, Seq: 1})
+	if !res.Ok {
+		t.Fatalf("expected the resolved command to actually run, got error %q", res.Error)
+	}
+	if got := res.Extra["modules_dir"]; got != dir {
+		t.Errorf("expected __MODULES_DIR__ resolved to %q, got %v", dir, got)
+	}
+	if got := res.Extra["tools_dir"]; got != toolsDir {
+		t.Errorf("expected __TOOLS_DIR__ resolved to %q, got %v", toolsDir, got)
+	}
+}
+
 func TestLoadModules_OverridesEmbeddedDefaultByName(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeFile(dir, "tcp.yaml", `
@@ -83,7 +132,7 @@ request:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.LoadModules(dir); err != nil {
+	if err := reg.LoadModules(dir, ""); err != nil {
 		t.Fatal(err)
 	}
 	checker, _ := reg.Get("tcp")
@@ -138,7 +187,7 @@ collect:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.LoadModules(dir); err != nil {
+	if err := reg.LoadModules(dir, ""); err != nil {
 		t.Fatal(err)
 	}
 
