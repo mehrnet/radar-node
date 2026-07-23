@@ -1,12 +1,12 @@
 name: xray
-version: "26.3.27-1"
+version: "26.3.27-2"
 url: https://radar.mehrnet.com/install/modules/xray.yaml
 os: [linux, darwin, windows]
 arch: [amd64, arm64]
 install:
   - name: xray
     kind: binary
-    version: "26.3.27-1"
+    version: "26.3.27-2"
     url: https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}
     path: __TOOLS_DIR__/xray
   - name: xray-prepare.sh
