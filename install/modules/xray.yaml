@@ -1,5 +1,5 @@
 name: xray
-version: "26.3.27-2"
+version: "26.3.27-3"
 url: https://radar.mehrnet.com/install/modules/xray.yaml
 os: [linux, darwin, windows]
 arch: [amd64, arm64]
@@ -27,7 +27,7 @@ request:
 prepare:
   command: ["/bin/sh", "__MODULES_DIR__/xray-prepare.sh", "{{params_json}}", "{{alloc_port}}"]
 run:
-  command: ["/bin/sh", "__MODULES_DIR__/xray-run.sh", "{{alloc_port}}", "{{target}}"]
+  command: ["/bin/sh", "__MODULES_DIR__/xray-run.sh", "{{alloc_port}}", "{{target}}", "{{timeout_ms}}"]
 collect:
   format: writeout_json
 response:
