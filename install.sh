@@ -4,26 +4,35 @@
 #   curl -fsSL https://radar.mehrnet.com/install/node.sh \
 #     | sh -s -- --node_id=node_xxx --api_key=xxxxx
 #
-# Served from radar's own origin (a plain copy of this exact file,
-# kept in sync by hand whenever it changes -- see radar/install/
-# node.sh) rather than raw.githubusercontent.com directly, so a node
-# whose network policy allowlists radar.mehrnet.com but not GitHub can
-# still install/update. Downloads the right release asset for this
-# OS/arch from GitHub Releases, installs the binary, and sets up
-# radar-node as a persistent service (systemd on Linux, launchd on
-# macOS) so the copy-pasted command above is the only step a user
-# ever has to take.
+# Kept byte-identical in three places -- this file, ../install.sh in
+# this same repo, and radar-node's own install.sh -- so a node whose
+# binary has any of those three URLs baked in as its own self-update
+# target always finds a real, working script there. Edit this copy,
+# then copy it verbatim over the other two; there's no meaningful
+# difference between them otherwise.
+#
+# Served from this same origin, which is also where every binary this
+# script downloads (its own release, and the optional xray/wireguard-
+# go/openvpn engine modules) is mirrored: see releases/ at this repo's
+# root and releases-sync.sh, which populates it from mehrnet/radar-
+# node's and mehrnet/static-builds' GitHub releases. Nothing at
+# runtime here ever talks to GitHub at all -- a node whose network
+# policy allowlists radar.mehrnet.com (it already needs to reach this
+# origin's API) but not GitHub can fully install/update regardless.
+# Installs the binary and sets up radar-node as a persistent service
+# (systemd on Linux, launchd on macOS) so the copy-pasted command
+# above is the only step a user ever has to take.
 set -e
 
-REPO="mehrnet/radar-node"
 BIN_NAME="radar-node"
+RELEASES_BASE="https://radar.mehrnet.com/releases"
+MODULES_BASE="https://radar.mehrnet.com/install/modules"
 API_URL_DEFAULT="https://radar-api.mehrnet.com"
 
 NODE_ID=""
 API_KEY=""
 API_URL="$API_URL_DEFAULT"
 PROXY=""
-VERSION="latest"
 UNINSTALL=0
 
 # Optional bundled engine modules (see install/modules/ and
@@ -49,7 +58,6 @@ Options:
   --api_url=URL      radar-api base URL (default: https://radar-api.mehrnet.com)
   --proxy=URL        proxy for both this installer's downloads and the running
                      agent's radar-api traffic (http://, https://, socks5://, socks5h://)
-  --version=VERSION  install a specific release instead of the latest, e.g. 0.2
   --uninstall        stop and fully remove radar-node from this machine (no
                       other flag is needed -- this ignores --node_id/--api_key)
   -h, --help         show this help
@@ -85,7 +93,6 @@ for arg in "$@"; do
     --api_key=*) API_KEY="${arg#*=}" ;;
     --api_url=*) API_URL="${arg#*=}" ;;
     --proxy=*) PROXY="${arg#*=}" ;;
-    --version=*) VERSION="${arg#*=}" ;;
     --uninstall) UNINSTALL=1 ;;
     --install-xray) INSTALL_XRAY=1 ;;
     --install-wireguard) INSTALL_WIREGUARD=1 ;;
@@ -107,7 +114,7 @@ os_raw="$(uname -s)"
 case "$os_raw" in
   Linux) OS=linux ;;
   Darwin) OS=darwin ;;
-  *) err "unsupported OS: $os_raw -- radar-node ships linux/darwin/windows releases; for windows grab a release asset manually from https://github.com/$REPO/releases" ;;
+  *) err "unsupported OS: $os_raw -- radar-node ships linux/darwin/windows releases; for windows grab a release asset manually from ${RELEASES_BASE}/radar-node/" ;;
 esac
 
 # Root gets a real system service (systemd/launchd) so the node
@@ -237,26 +244,60 @@ case "$arch_raw" in
 esac
 
 # ---------------------------------------------------------------------
-# Resolve the release tag (skips the API call entirely if --version
-# pinned a specific one), then download + verify + extract the binary.
+# No API call needed to resolve a version at all anymore -- the mirror
+# (see releases-sync.sh and releases/radar-node/) only ever keeps the
+# single latest release, downloaded straight to a fixed "..._latest_..."
+# name with no version-numbered copy alongside it, so there's nothing
+# else to pin to even if this script wanted to offer it.
 # ---------------------------------------------------------------------
-if [ "$VERSION" = "latest" ]; then
-  log "resolving latest release..."
-  tmp_meta="$(mktemp)"
-  curl_get "https://api.github.com/repos/${REPO}/releases/latest" "$tmp_meta"
-  TAG="$(grep -m1 '"tag_name"' "$tmp_meta" | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')"
-  rm -f "$tmp_meta"
-  [ -n "$TAG" ] || err "couldn't resolve the latest release -- pass --version=X.Y explicitly"
+ASSET="${BIN_NAME}_latest_${OS}_${ARCH}.tar.gz"
+BASE_URL="${RELEASES_BASE}/radar-node"
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+log "downloading ${ASSET}..."
+curl_get "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}"
+
+log "verifying checksum..."
+# One sidecar per asset (just the raw sha256 digest, nothing else) --
+# see releases-sync.sh -- instead of a shared checksums.txt manifest,
+# so there's no line to grep out of a multi-asset file, just the one
+# file that already matches the one asset just downloaded.
+if curl_get "${BASE_URL}/${ASSET}.checksum.txt" "${WORKDIR}/${ASSET}.checksum.txt" 2>/dev/null; then
+  expected="$(cat "${WORKDIR}/${ASSET}.checksum.txt")"
+  if [ -n "$expected" ]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "${WORKDIR}/${ASSET}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual="$(shasum -a 256 "${WORKDIR}/${ASSET}" | awk '{print $1}')"
+    else
+      actual=""
+      log "no sha256sum/shasum available, skipping checksum verification"
+    fi
+    if [ -n "$actual" ]; then
+      [ "$actual" = "$expected" ] || err "checksum mismatch for ${ASSET} (expected $expected, got $actual)"
+    fi
+  fi
 else
-  TAG="v${VERSION#v}"
+  log "${ASSET}.checksum.txt not found, skipping verification"
 fi
-VERSION_NUM="${TAG#v}"
-ASSET="${BIN_NAME}_${VERSION_NUM}_${OS}_${ARCH}.tar.gz"
-BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
+
+log "extracting..."
+tar -xzf "${WORKDIR}/${ASSET}" -C "$WORKDIR"
+[ -f "${WORKDIR}/${BIN_NAME}" ] || err "extracted archive doesn't contain ${BIN_NAME} -- unexpected archive layout"
+chmod +x "${WORKDIR}/${BIN_NAME}"
+
+# The real version, straight from the binary's own embedded build
+# info -- "latest" is only ever a filename on the mirror, never a
+# real version string, so it's not what gets reported to radar-api
+# below or run as the actual service.
+VERSION_NUM="$("${WORKDIR}/${BIN_NAME}" version 2>/dev/null | awk '{print $2}')"
+[ -n "$VERSION_NUM" ] || VERSION_NUM="unknown"
 
 # ---------------------------------------------------------------------
-# Verify these credentials are actually valid before downloading or
-# installing anything -- a wrong node_id/api_key would otherwise still
+# Verify these credentials are actually valid before installing
+# anything -- a wrong node_id/api_key would otherwise still
 # "successfully" install and start a service that just fails to
 # authenticate forever in the background, with no feedback here at
 # all. Piggybacks on the real heartbeat endpoint (the same call the
@@ -282,37 +323,6 @@ fi
 if [ "$verify_status" != "200" ]; then
   log "couldn't confirm credentials against ${API_URL} (HTTP ${verify_status:-no response}) -- continuing anyway, since this looks like a network issue rather than a credential one"
 fi
-
-WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
-
-log "downloading ${ASSET} (${TAG})..."
-curl_get "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}"
-
-log "verifying checksum..."
-if curl_get "${BASE_URL}/checksums.txt" "${WORKDIR}/checksums.txt" 2>/dev/null; then
-  expected="$(grep "  ${ASSET}\$" "${WORKDIR}/checksums.txt" | awk '{print $1}')"
-  if [ -n "$expected" ]; then
-    if command -v sha256sum >/dev/null 2>&1; then
-      actual="$(sha256sum "${WORKDIR}/${ASSET}" | awk '{print $1}')"
-    elif command -v shasum >/dev/null 2>&1; then
-      actual="$(shasum -a 256 "${WORKDIR}/${ASSET}" | awk '{print $1}')"
-    else
-      actual=""
-      log "no sha256sum/shasum available, skipping checksum verification"
-    fi
-    if [ -n "$actual" ]; then
-      [ "$actual" = "$expected" ] || err "checksum mismatch for ${ASSET} (expected $expected, got $actual)"
-    fi
-  fi
-else
-  log "checksums.txt not found for ${TAG}, skipping verification"
-fi
-
-log "extracting..."
-tar -xzf "${WORKDIR}/${ASSET}" -C "$WORKDIR"
-[ -f "${WORKDIR}/${BIN_NAME}" ] || err "extracted archive doesn't contain ${BIN_NAME} -- unexpected archive layout"
-chmod +x "${WORKDIR}/${BIN_NAME}"
 
 # ---------------------------------------------------------------------
 # Install location + service setup -- IS_ROOT/INSTALL_BIN_DIR/
@@ -376,56 +386,36 @@ if [ "$OS" = "linux" ] && [ "$IS_ROOT" = "1" ] && command -v sysctl >/dev/null 2
 fi
 
 # ---------------------------------------------------------------------
-# Optional bundled engine modules -- fetched from mehrnet/static-builds
-# (a separate repo, its own daily-cron-checked release per tool, see
-# that repo's own README) rather than built or bundled here. Runs
-# before the service (re)start further down so a module just dropped
-# into $MODULES_DIR is actually picked up -- modules load once at
-# agent startup, not on a file-system watch.
+# Optional bundled engine modules -- fetched from this same mirror
+# (releases/<tool>/, populated from mehrnet/static-builds by
+# releases-sync.sh) rather than built or bundled here. Runs before the
+# service (re)start further down so a module just dropped into
+# $MODULES_DIR is actually picked up -- modules load once at agent
+# startup, not on a file-system watch.
 # ---------------------------------------------------------------------
-resolve_static_build_tag() {
-  # $1 = tag prefix (e.g. "xray", "openvpn", "wireguard-go"). Can't use
-  # GitHub's /releases/latest here -- that returns the single most
-  # recent release across *all three* tools' tags in that one repo,
-  # not scoped to this one -- so this lists releases and takes the
-  # newest whose tag starts with the prefix (GitHub returns the list
-  # newest-first).
-  prefix="$1"
-  tmp_meta="$(mktemp)"
-  curl_get "https://api.github.com/repos/mehrnet/static-builds/releases?per_page=30" "$tmp_meta"
-  tag="$(grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp_meta" | sed -E 's/.*"([^"]+)"$/\1/' | grep "^${prefix}-" | head -n1)"
-  rm -f "$tmp_meta"
-  [ -n "$tag" ] || err "no mehrnet/static-builds release found matching ${prefix}-* -- see https://github.com/mehrnet/static-builds/releases"
-  printf '%s\n' "$tag"
-}
 
-# $1 = static-builds tag prefix, $2 = asset filename prefix (its own
+# $1 = mirror directory name under releases/ (e.g. "xray", "openvpn",
+# "wireguard-go"), $2 = asset filename prefix (its own
 # <name>_<version>_<os>_<arch>.<ext> convention), $3 = installed binary
-# filename, $4 = space-separated module files to fetch from this repo's
-# own install/modules/.
+# filename, $4 = space-separated module files to fetch from this
+# origin's own install/modules/.
 install_static_tool() {
-  tag_prefix="$1"; asset_prefix="$2"; bin_name="$3"; module_files="$4"
+  tool_dir="$1"; asset_prefix="$2"; bin_name="$3"; module_files="$4"
 
-  tag="$(resolve_static_build_tag "$tag_prefix")"
-  # Strip our own "<prefix>-" wrapper, then a possible leading "v" from
-  # upstream's own tag underneath it (xray/openvpn's are "vX.Y.Z";
-  # wireguard-go's is a bare commit hash with no "v" to strip -- a
-  # no-op then, not an error) -- static-builds' own asset filenames
-  # never include that "v" (see mehrnet/static-builds' publish.sh).
-  version="${tag#"${tag_prefix}"-}"
-  version="${version#v}"
-  ext="tar.gz"
-  [ "$OS" = "windows" ] && ext="zip"
-  asset="${asset_prefix}_${version}_${OS}_${ARCH}.${ext}"
-  base_url="https://github.com/mehrnet/static-builds/releases/download/${tag}"
+  # Always tar.gz: every engine module this installs (xray, wireguard-
+  # go, openvpn) is only ever fetched for linux/darwin (OS resolution
+  # above rejects anything else before this function is ever reached),
+  # and neither ships a windows build a zip branch here would matter for.
+  asset="${asset_prefix}_latest_${OS}_${ARCH}.tar.gz"
+  base_url="${RELEASES_BASE}/${tool_dir}"
 
-  log "installing ${bin_name} (${tag})..."
+  log "installing ${bin_name} (latest)..."
   tmp_asset="$(mktemp)"
   curl_get "${base_url}/${asset}" "$tmp_asset"
 
-  tmp_sums="$(mktemp)"
-  if curl_get "${base_url}/checksums.txt" "$tmp_sums" 2>/dev/null; then
-    expected="$(grep "  ${asset}\$" "$tmp_sums" | awk '{print $1}')"
+  tmp_checksum="$(mktemp)"
+  if curl_get "${base_url}/${asset}.checksum.txt" "$tmp_checksum" 2>/dev/null; then
+    expected="$(cat "$tmp_checksum")"
     if [ -n "$expected" ]; then
       actual=""
       if command -v sha256sum >/dev/null 2>&1; then
@@ -438,17 +428,12 @@ install_static_tool() {
       fi
     fi
   else
-    log "checksums.txt not found for ${tag}, skipping verification"
+    log "${asset}.checksum.txt not found, skipping verification"
   fi
-  rm -f "$tmp_sums"
+  rm -f "$tmp_checksum"
 
   extract_dir="$(mktemp -d)"
-  if [ "$ext" = "zip" ]; then
-    command -v unzip >/dev/null 2>&1 || err "unzip is required to install ${bin_name}"
-    unzip -q "$tmp_asset" -d "$extract_dir"
-  else
-    tar -xzf "$tmp_asset" -C "$extract_dir"
-  fi
+  tar -xzf "$tmp_asset" -C "$extract_dir"
   rm -f "$tmp_asset"
 
   mkdir -p "$TOOLS_DIR"
@@ -460,8 +445,26 @@ install_static_tool() {
   mkdir -p "$MODULES_DIR"
   for f in $module_files; do
     tmp_module="$(mktemp)"
-    curl_get "https://raw.githubusercontent.com/${REPO}/main/install/modules/${f}" "$tmp_module"
-    sed "s#__MODULES_DIR__#${MODULES_DIR}#g; s#__TOOLS_DIR__#${TOOLS_DIR}#g" "$tmp_module" > "${MODULES_DIR}/${f}"
+    curl_get "${MODULES_BASE}/${f}" "$tmp_module"
+    case "$f" in
+      # The module's own manifest (*.yaml) is written verbatim, byte-
+      # identical to the canonical copy at radar.mehrnet.com/install/
+      # modules/ -- __MODULES_DIR__/__TOOLS_DIR__ inside its own
+      # install[].path values are placeholders radar-node itself
+      # resolves at fetch/install time (see moduleinstall.go), not
+      # something this script should ever have baked in early. Doing
+      # so here used to silently break every later `radar-node
+      # fetch-module`/`install-module` re-run against this same local
+      # copy (it'd see an already-resolved absolute path instead of
+      # the placeholder), and crash-looped an entire fleet the one
+      # time this module's own schema started actually using that
+      # field (v0.26). Only the *wrapper scripts* alongside it get the
+      # substitution -- their __MODULES_DIR__/__TOOLS_DIR__ references
+      # are shell command-line arguments, resolved once, right here,
+      # not re-resolved by anything later.
+      *.yaml|*.yml) cp "$tmp_module" "${MODULES_DIR}/${f}" ;;
+      *) sed "s#__MODULES_DIR__#${MODULES_DIR}#g; s#__TOOLS_DIR__#${TOOLS_DIR}#g" "$tmp_module" > "${MODULES_DIR}/${f}" ;;
+    esac
     rm -f "$tmp_module"
     case "$f" in *.sh) chmod +x "${MODULES_DIR}/${f}" ;; esac
   done
@@ -551,7 +554,7 @@ EOF
 
 start_launchd() {
   plist_dir="$1"    # /Library/LaunchDaemons or ~/Library/LaunchAgents
-  label="com.mehrnet.radar-node"
+  # label is already set globally, near the top of this script.
   mkdir -p "$plist_dir"
   plist_file="${plist_dir}/${label}.plist"
 
