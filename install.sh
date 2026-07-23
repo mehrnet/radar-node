@@ -526,7 +526,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url "${API_URL}" --api-key "${API_KEY_COMBINED}" --modules-dir "${MODULES_DIR}" ${EXTRA_ARGS}
+ExecStart=${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url "${API_URL}" --api-key "${API_KEY_COMBINED}" --modules-dir "${MODULES_DIR}" --tools-dir "${TOOLS_DIR}" ${EXTRA_ARGS}
 Restart=always
 RestartSec=2
 
@@ -581,6 +581,8 @@ start_launchd() {
     <string>${API_KEY_COMBINED}</string>
     <string>--modules-dir</string>
     <string>${MODULES_DIR}</string>
+    <string>--tools-dir</string>
+    <string>${TOOLS_DIR}</string>
 ${proxy_args}  </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -602,7 +604,7 @@ EOF
 
 print_manual_run() {
   log "run it yourself:"
-  log "  ${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url \"${API_URL}\" --api-key \"${API_KEY_COMBINED}\" --modules-dir \"${MODULES_DIR}\"${PROXY:+ --api-proxy \"$PROXY\"}"
+  log "  ${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url \"${API_URL}\" --api-key \"${API_KEY_COMBINED}\" --modules-dir \"${MODULES_DIR}\" --tools-dir \"${TOOLS_DIR}\"${PROXY:+ --api-proxy \"$PROXY\"}"
 }
 
 if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
