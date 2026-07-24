@@ -14,7 +14,7 @@ func TestProbeCache_ApplyEvents_CreatedThenDue(t *testing.T) {
 		Seq:       1,
 		EventType: "created",
 		Probe: wire.ProbeSnapshot{
-			ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "once",
+			ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual",
 			StartsAt: now.Add(-time.Minute).UnixMilli(),
 		},
 	}})
@@ -32,7 +32,7 @@ func TestProbeCache_OnceProbe_NotDueAfterRun(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
 	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
-		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "once", StartsAt: now.Add(-time.Minute).UnixMilli(),
+		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
 	}}})
 
 	c.markRun("probe_1", now)
@@ -62,7 +62,7 @@ func TestProbeCache_InactiveStatus_NeverDue(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
 	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
-		ID: "probe_1", Status: wire.ProbeStatusInactiveBilling, ScheduleType: "once", StartsAt: now.Add(-time.Minute).UnixMilli(),
+		ID: "probe_1", Status: wire.ProbeStatusInactiveBilling, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
 	}}})
 	if due := c.dueProbes(now); len(due) != 0 {
 		t.Fatalf("expected an inactive_billing probe to never be due, got %+v", due)
@@ -95,7 +95,7 @@ func TestProbeCache_RemovedEvent_DeletesProbe(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
 	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
-		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "once", StartsAt: now.Add(-time.Minute).UnixMilli(),
+		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
 	}}})
 	c.applyEvents([]wire.Event{{Seq: 2, EventType: "removed", Probe: wire.ProbeSnapshot{ID: "probe_1"}}})
 

@@ -27,7 +27,7 @@ type ProbeSnapshot struct {
 	Mode            string         `json:"mode,omitempty"`
 	ProbeCount      int            `json:"probe_count"`
 	TimeoutMs       int            `json:"timeout_ms"`
-	ScheduleType    string         `json:"schedule_type"` // "once" | "interval"
+	ScheduleType    string         `json:"schedule_type"` // "manual" | "interval"
 	IntervalSeconds int            `json:"interval_seconds,omitempty"`
 	StartsAt        int64          `json:"starts_at"`
 	EndsAt          int64          `json:"ends_at,omitempty"`

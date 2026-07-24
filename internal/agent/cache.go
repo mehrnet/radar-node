@@ -83,7 +83,7 @@ func (c *probeCache) dueProbes(now time.Time) []wire.ProbeSnapshot {
 		}
 
 		var isDue bool
-		if probe.ScheduleType == "once" {
+		if probe.ScheduleType == "manual" {
 			isDue = probe.lastRunAt.IsZero()
 		} else {
 			interval := time.Duration(probe.IntervalSeconds) * time.Second

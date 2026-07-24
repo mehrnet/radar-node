@@ -79,7 +79,7 @@ func (f *fakeAPI) handler() http.Handler {
 					Mode:         "warm",
 					ProbeCount:   2,
 					TimeoutMs:    1000,
-					ScheduleType: "once",
+					ScheduleType: "manual",
 					Status:       wire.ProbeStatusActive,
 					StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
 				},
@@ -123,7 +123,7 @@ func TestRun_SyncsExecutesAndReportsProbe(t *testing.T) {
 		})
 	}()
 
-	// Wait for both checks of the one probe (a "once" probe, already
+	// Wait for both checks of the one probe (a "manual" probe, already
 	// past its starts_at, so it's due the moment it's synced) to be
 	// reported, or time out if the loop never syncs/schedules/
 	// executes/reports correctly.
@@ -169,7 +169,7 @@ func TestRun_SyncsExecutesAndReportsProbe(t *testing.T) {
 	if !seenSeqs[1] || !seenSeqs[2] {
 		t.Fatalf("expected seq 1 and 2 (probe_count=2), got %+v", fake.gotResults)
 	}
-	// A "once" probe must only ever run once even though the scheduler
+	// A "manual" probe must only ever run once even though the scheduler
 	// ticks many times over a 5s wait -- if markRun-before-execute
 	// wasn't working, we'd see far more than 2 results.
 }
