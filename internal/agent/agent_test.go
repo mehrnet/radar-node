@@ -69,21 +69,27 @@ func (f *fakeAPI) handler() http.Handler {
 		}
 		if !f.served {
 			f.served = true
-			resp.Events = []wire.Event{{
-				Seq:       1,
-				EventType: "created",
-				Probe: wire.ProbeSnapshot{
-					ID:           "probe_test",
-					Target:       f.target,
-					Prober:       "tcp",
-					Mode:         "warm",
-					ProbeCount:   2,
-					TimeoutMs:    1000,
-					ScheduleType: "manual",
-					Status:       wire.ProbeStatusActive,
-					StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
-				},
-			}}
+			snapshot := wire.ProbeSnapshot{
+				ID:           "probe_test",
+				Target:       f.target,
+				Prober:       "tcp",
+				Mode:         "warm",
+				ProbeCount:   2,
+				TimeoutMs:    1000,
+				ScheduleType: "manual",
+				Status:       wire.ProbeStatusActive,
+				StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
+			}
+			// "created" alone would never run at all now -- a manual
+			// probe only executes via an explicit "triggered" event, so
+			// this fakes exactly that: a create immediately followed by
+			// one trigger, both applied from a single heartbeat
+			// response the same way a real create-then-click-"Run now"
+			// would arrive across two real ones.
+			resp.Events = []wire.Event{
+				{Seq: 1, EventType: "created", Probe: snapshot},
+				{Seq: 2, EventType: "triggered", RunID: "run_test_trigger", Probe: snapshot},
+			}
 		}
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -123,8 +129,9 @@ func TestRun_SyncsExecutesAndReportsProbe(t *testing.T) {
 		})
 	}()
 
-	// Wait for both checks of the one probe (a "manual" probe, already
-	// past its starts_at, so it's due the moment it's synced) to be
+	// Wait for both checks of the one probe (a "manual" probe, never due
+	// on its own -- these only run because the fake heartbeat handler
+	// also fired a "triggered" event for it, see newFakeAPI) to be
 	// reported, or time out if the loop never syncs/schedules/
 	// executes/reports correctly.
 	got := 0
@@ -169,9 +176,15 @@ func TestRun_SyncsExecutesAndReportsProbe(t *testing.T) {
 	if !seenSeqs[1] || !seenSeqs[2] {
 		t.Fatalf("expected seq 1 and 2 (probe_count=2), got %+v", fake.gotResults)
 	}
-	// A "manual" probe must only ever run once even though the scheduler
-	// ticks many times over a 5s wait -- if markRun-before-execute
-	// wasn't working, we'd see far more than 2 results.
+	// A single "triggered" event must only ever run once even though the
+	// scheduler ticks many times over a 5s wait -- if
+	// drainPendingTriggers wasn't actually draining the queue, we'd see
+	// far more than 2 results.
+	for _, r := range fake.gotResults {
+		if r.RunID != "run_test_trigger" {
+			t.Errorf("expected the server-issued trigger run_id to be reported verbatim, got %+v", r)
+		}
+	}
 }
 
 func TestRun_ReportsConfiguredVersionInHeartbeat(t *testing.T) {

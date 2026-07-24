@@ -42,8 +42,14 @@ type ProbeSnapshot struct {
 // already applied.
 type Event struct {
 	Seq       int           `json:"seq"`
-	EventType string        `json:"event_type"` // "created" | "updated" | "removed"
+	EventType string        `json:"event_type"` // "created" | "updated" | "removed" | "triggered"
 	Probe     ProbeSnapshot `json:"probe"`
+	// RunID is only set for a "triggered" event -- the server-issued id
+	// every node executing this one trigger reports results under, so
+	// they correlate into a single run across nodes instead of each
+	// getting its own independent one (see agent's newRunID, which is
+	// what a normal scheduled run still mints for itself).
+	RunID string `json:"run_id,omitempty"`
 }
 
 // Result is probe.Result plus the correlation fields needed to route

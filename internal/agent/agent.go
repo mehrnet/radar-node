@@ -510,7 +510,8 @@ func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {
 func (a *agent) runDueProbes(ctx context.Context) {
 	now := a.clock.now()
 	due := a.cache.dueProbes(now)
-	if len(due) == 0 {
+	triggers := a.cache.drainPendingTriggers()
+	if len(due) == 0 && len(triggers) == 0 {
 		return
 	}
 
@@ -519,11 +520,14 @@ func (a *agent) runDueProbes(ctx context.Context) {
 	// still in flight. If reporting later fails, this occurrence is
 	// simply lost (an interval probe is due again next interval); that
 	// is the accepted failure mode, not silent double-execution.
+	// Triggers don't touch lastRunAt at all -- they're independent of
+	// due-ness bookkeeping, see applyEvents.
 	for _, pr := range due {
 		a.cache.markRun(pr.ID, now)
 	}
 
 	results := a.executeProbes(ctx, due)
+	results = append(results, a.executeTriggers(ctx, triggers)...)
 	if len(results) == 0 {
 		return
 	}
@@ -540,8 +544,49 @@ func (a *agent) runDueProbes(ctx context.Context) {
 		log.Printf("agent: post results: %v", err)
 		return
 	}
-	log.Printf("agent: tick complete: %d probe(s) run, %d results, %d accepted, %d rejected",
-		len(due), len(results), resp.Accepted, resp.Rejected)
+	log.Printf("agent: tick complete: %d probe(s) run, %d triggered, %d results, %d accepted, %d rejected",
+		len(due), len(triggers), len(results), resp.Accepted, resp.Rejected)
+}
+
+// executeTriggers runs each drained pendingTrigger's probe immediately,
+// under the server-issued RunID it carries (not a freshly minted one --
+// see wire.Event's own comment on RunID) so every node acting on the
+// same trigger reports back correlated under that one id. A trigger
+// for a probe this node no longer has cached (removed between firing
+// and this tick draining it) is silently skipped -- nothing to run.
+func (a *agent) executeTriggers(ctx context.Context, triggers []pendingTrigger) []wire.Result {
+	if len(triggers) == 0 {
+		return nil
+	}
+	sem := make(chan struct{}, a.concurrency)
+	var mu sync.Mutex
+	var results []wire.Result
+	var wg sync.WaitGroup
+
+	for _, t := range triggers {
+		pr, ok := a.cache.get(t.ProbeID)
+		if !ok {
+			continue
+		}
+		count := pr.ProbeCount
+		if count < 1 {
+			count = 1
+		}
+		for seq := 1; seq <= count; seq++ {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(pr wire.ProbeSnapshot, runID string, seq int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				r := a.runCheck(ctx, pr, runID, seq)
+				mu.Lock()
+				results = append(results, r)
+				mu.Unlock()
+			}(pr, t.RunID, seq)
+		}
+	}
+	wg.Wait()
+	return results
 }
 
 // executeProbes runs every check of every due probe concurrently,
