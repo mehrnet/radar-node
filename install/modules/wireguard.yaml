@@ -1,12 +1,12 @@
 name: wireguard
-version: "ecfc5a8d5446-1"
+version: "ecfc5a8d5446-2"
 url: https://radar.mehrnet.com/install/modules/wireguard.yaml
 os: [linux]
 arch: [amd64, arm64]
 install:
   - name: radar-wg
     kind: binary
-    version: "ecfc5a8d5446-1"
+    version: "ecfc5a8d5446-2"
     url: https://radar.mehrnet.com/releases/wireguard-go/radar-wg_latest_{os}_{arch}.{ext}
     path: __TOOLS_DIR__/radar-wg
   - name: wireguard-test.sh
@@ -14,25 +14,9 @@ install:
     url: https://radar.mehrnet.com/install/modules/wireguard-test.sh
     path: __MODULES_DIR__/wireguard-test.sh
 request:
-  - name: private_key
+  - name: config
     type: string
     required: true
-  - name: address
-    type: string
-    required: true
-  - name: peer_public_key
-    type: string
-    required: true
-  - name: peer_preshared_key
-    type: string
-  - name: endpoint
-    type: string
-    required: true
-  - name: allowed_ips
-    type: array
-    required: true
-  - name: persistent_keepalive
-    type: number
 run:
   command: ["/bin/sh", "__MODULES_DIR__/wireguard-test.sh", "{{params_json}}", "{{target}}", "{{timeout_ms}}"]
 collect:

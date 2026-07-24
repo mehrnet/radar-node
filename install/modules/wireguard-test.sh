@@ -6,21 +6,35 @@
 # up -> test -> down sequence happens here, in one `run` step, instead
 # of trying to force it into the prepare/teardown shape.
 #
-# {{params_json}} is passed straight through as radar-wg's own
-# --config: the module's request fields (private_key/address/
-# peer_public_key/...) are deliberately named to match radar-wg's
-# config.json 1:1, so there's nothing to reshape here.
+# `config` is the *raw* wg-quick(8)-style .conf content as a string,
+# same "opaque blob passed straight through" choice openvpn-test.sh
+# makes for its own `config` field -- radar-wg parses wg-quick syntax
+# natively (see static-builds/tools/wireguard-go/config.go), so there's
+# nothing to reshape here beyond pulling that one field out of
+# {{params_json}} into a real file radar-wg's --config can point at.
 set -e
 PARAMS_JSON="$1"
 TARGET="$2"
 TIMEOUT_MS="$3"
 RADAR_WG_BIN="${RADAR_WG_BIN:-__TOOLS_DIR__/radar-wg}"
 
-STATE=$(mktemp /tmp/radar-wg-state-XXXXXX.json)
-cleanup() { "$RADAR_WG_BIN" down --state "$STATE" >/dev/null 2>&1 || true; rm -f "$STATE"; }
+jget() {
+  python3 -c "
+import json, sys
+v = json.load(open(sys.argv[1])).get(sys.argv[2])
+print(v if v is not None else '')
+" "$PARAMS_JSON" "$1"
+}
+
+WORKDIR=$(mktemp -d /tmp/radar-wg-XXXXXX)
+STATE="$WORKDIR/state.json"
+cleanup() { "$RADAR_WG_BIN" down --state "$STATE" >/dev/null 2>&1 || true; rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
-"$RADAR_WG_BIN" up --config "$PARAMS_JSON" --state "$STATE" 1>&2
+CONFIG_FILE="$WORKDIR/tunnel.conf"
+jget config > "$CONFIG_FILE"
+
+"$RADAR_WG_BIN" up --config "$CONFIG_FILE" --state "$STATE" 1>&2
 
 # curl's own --max-time wants whole seconds; round up so a short
 # millisecond timeout never becomes an instant 0s failure.
