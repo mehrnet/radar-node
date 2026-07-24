@@ -1,12 +1,12 @@
 name: wireguard
-version: "ecfc5a8d5446-2"
+version: "ecfc5a8d5446-3"
 url: https://radar.mehrnet.com/install/modules/wireguard.yaml
 os: [linux]
 arch: [amd64, arm64]
 install:
   - name: radar-wg
     kind: binary
-    version: "ecfc5a8d5446-2"
+    version: "ecfc5a8d5446-3"
     url: https://radar.mehrnet.com/releases/wireguard-go/radar-wg_latest_{os}_{arch}.{ext}
     path: __TOOLS_DIR__/radar-wg
   - name: wireguard-test.sh
