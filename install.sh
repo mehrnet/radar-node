@@ -529,6 +529,12 @@ Wants=network-online.target
 ExecStart=${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url "${API_URL}" --api-key "${API_KEY_COMBINED}" --modules-dir "${MODULES_DIR}" --tools-dir "${TOOLS_DIR}" ${EXTRA_ARGS}
 Restart=always
 RestartSec=2
+# Exit code 42 is the agent's own deliberate self-update handoff (see
+# internal/agent/agent.go's selfUpdateExitCode) -- it's about to be
+# replaced/restarted by the installer it just launched, so systemd
+# auto-restarting the still-old binary in the meantime only races
+# that installer's own later "systemctl stop radar-node" step.
+RestartPreventExitStatus=42
 
 [Install]
 WantedBy=$( [ "$systemctl_flags" = "--user" ] && echo "default.target" || echo "multi-user.target" )

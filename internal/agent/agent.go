@@ -261,6 +261,31 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 // parent unit.
 const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
 
+// selfUpdateExitCode is what reinstall() exits with to hand off to
+// the detached installer -- install.sh's own systemd unit template
+// sets RestartPreventExitStatus=<this value> specifically so this one
+// deliberate exit doesn't trigger the unit's normal Restart=always.
+// Without that, systemd has no way to tell "this process is handing
+// off to an installer that's about to replace/restart it anyway" apart
+// from any other exit, and (observed in production) auto-restarts the
+// still-old binary within RestartSec -- which then races install.sh's
+// own later `systemctl stop radar-node`, landing a SIGTERM on
+// whichever instance happens to be running at that moment instead of
+// a cleanly-already-stopped service. Not 0: handleDeleteCommand also
+// exits 0, deliberately relying on Restart=always to relaunch it (see
+// its own comment) -- these two "exit on purpose" paths need opposite
+// systemd behavior, so they can't share a code.
+//
+// launchd (install.sh's macOS service manager) has no equivalent of
+// RestartPreventExitStatus -- KeepAlive has no way to except one
+// specific exit code the way this does, only "restart on any exit" or
+// "restart only on unsuccessful exit," neither of which fits both
+// selfUpdateExitCode and handleDeleteCommand's 0 at once. The same
+// class of race is plausible there too, just not something reproduced
+// or fixed here -- Linux/systemd is where this was actually observed
+// in production.
+const selfUpdateExitCode = 42
+
 func (a *agent) selfUpdate() {
 	a.reinstall()
 }
@@ -390,7 +415,7 @@ func (a *agent) reinstall(extraFlags ...string) {
 		return
 	}
 	log.Printf("agent: installer handed off successfully, logging to %s -- exiting so it can replace this process", selfUpdateLogPath)
-	os.Exit(0)
+	os.Exit(selfUpdateExitCode)
 }
 
 // selfUpdateCommand wraps installCmd in `systemd-run --unit=...` when
