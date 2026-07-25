@@ -254,7 +254,39 @@ ASSET="${BIN_NAME}_latest_${OS}_${ARCH}.tar.gz"
 BASE_URL="${RELEASES_BASE}/radar-node"
 
 WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
+# On any failure from here on (bad download, a checksum mismatch --
+# e.g. from catching the mirror mid-update, a bad archive, ...), make
+# a best-effort attempt to bring the *previous* installation's service
+# back up before this script exits. The agent that triggered a self-
+# update already stopped itself on purpose, to hand off to this exact
+# script (see radar-node's reinstall(), and start_systemd's own
+# RestartPreventExitStatus= below, which deliberately keeps systemd
+# from auto-restarting that specific exit) -- before this trap
+# existed, a failure anywhere past this point left that service
+# completely down (no heartbeats at all) until a human noticed and
+# SSHed in to `systemctl start radar-node` by hand, observed in
+# production for tens of minutes on more than one node after a
+# checksum mismatch during a mirror update in flight. A first-time
+# install has no $existing_unit to fall back to -- nothing to recover,
+# so nothing extra happens there, same as today.
+cleanup_and_recover() {
+  status=$?
+  rm -rf "$WORKDIR"
+  if [ "$status" -ne 0 ] && [ -n "${existing_unit:-}" ] && [ -f "$existing_unit" ]; then
+    log "install failed -- attempting to bring the previous installation back up"
+    if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+      if [ "$IS_ROOT" = "1" ]; then
+        systemctl start radar-node >/dev/null 2>&1 || true
+      else
+        systemctl --user start radar-node >/dev/null 2>&1 || true
+      fi
+    elif [ "$OS" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
+      launchctl load -w "$existing_unit" >/dev/null 2>&1 || true
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_and_recover EXIT
 
 log "downloading ${ASSET}..."
 curl_get "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}"
