@@ -526,91 +526,32 @@ fi
 # startup, not on a file-system watch.
 # ---------------------------------------------------------------------
 
-# $1 = mirror directory name under releases/ (e.g. "xray", "openvpn",
-# "wireguard-go"), $2 = asset filename prefix (its own
-# <name>_<version>_<os>_<arch>.<ext> convention), $3 = installed binary
-# filename, $4 = space-separated module files to fetch from this
-# origin's own install/modules/.
-install_static_tool() {
-  tool_dir="$1"; asset_prefix="$2"; bin_name="$3"; module_files="$4"
-
-  # Always tar.gz: every engine module this installs (xray, wireguard-
-  # go, openvpn) is only ever fetched for linux/darwin (OS resolution
-  # above rejects anything else before this function is ever reached),
-  # and neither ships a windows build a zip branch here would matter for.
-  asset="${asset_prefix}_latest_${OS}_${ARCH}.tar.gz"
-  base_url="${RELEASES_BASE}/${tool_dir}"
-
-  log "installing ${bin_name} (latest)..."
-  tmp_asset="$(mktemp)"
-  curl_get "${base_url}/${asset}" "$tmp_asset"
-
-  tmp_checksum="$(mktemp)"
-  if curl_get "${base_url}/${asset}.checksum.txt" "$tmp_checksum" 2>/dev/null; then
-    expected="$(cat "$tmp_checksum")"
-    if [ -n "$expected" ]; then
-      actual=""
-      if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$tmp_asset" | awk '{print $1}')"
-      elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$tmp_asset" | awk '{print $1}')"
-      fi
-      if [ -n "$actual" ]; then
-        [ "$actual" = "$expected" ] || err "checksum mismatch for ${asset} (expected $expected, got $actual)"
-      fi
-    fi
+# Delegates the actual fetch/verify/place to the just-installed
+# radar-node binary's own fetch-module/install-module/remove-module
+# subcommands (internal/moduleinstall) instead of reimplementing that
+# in shell a second time (the old install_static_tool/remove_static_
+# tool, removed here) -- that shell copy was still on the old mutable
+# "_latest_" asset naming, never updated to the version-pinned,
+# retry-past-CDN-propagation-lag fetch this same install.sh's own
+# self-update above already gained (see fetch_with_retry). One
+# implementation, in Go, covers both paths from here on -- and every
+# module's own install: list already carries the version-pinned URLs
+# that implementation needs (see install/modules/*.yaml's own
+# comments).
+#
+# fetch-module (module not yet locally known: no <name>.yaml in
+# MODULES_DIR yet) vs. install-module (already known -- re-fetches
+# using its own recorded url, same as a bare re-run keeping it
+# updated) mirrors radar-node's own subcommand split; see cmd/radar-
+# node/main.go and moduleinstall.Install's doc comment.
+fetch_or_update_module() {
+  # $1 = module name (matches its own install/modules/<name>.yaml)
+  name="$1"
+  if [ -f "${MODULES_DIR}/${name}.yaml" ]; then
+    "${INSTALL_BIN_DIR}/${BIN_NAME}" install-module "$name" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR" ${PROXY:+--proxy "$PROXY"}
   else
-    log "${asset}.checksum.txt not found, skipping verification"
+    "${INSTALL_BIN_DIR}/${BIN_NAME}" fetch-module "${MODULES_BASE}/${name}.yaml" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR" ${PROXY:+--proxy "$PROXY"}
   fi
-  rm -f "$tmp_checksum"
-
-  extract_dir="$(mktemp -d)"
-  tar -xzf "$tmp_asset" -C "$extract_dir"
-  rm -f "$tmp_asset"
-
-  mkdir -p "$TOOLS_DIR"
-  cp "${extract_dir}/${asset_prefix}" "${TOOLS_DIR}/${bin_name}"
-  chmod +x "${TOOLS_DIR}/${bin_name}"
-  rm -rf "$extract_dir"
-  log "installed ${TOOLS_DIR}/${bin_name}"
-
-  mkdir -p "$MODULES_DIR"
-  for f in $module_files; do
-    tmp_module="$(mktemp)"
-    curl_get "${MODULES_BASE}/${f}" "$tmp_module"
-    case "$f" in
-      # The module's own manifest (*.yaml) is written verbatim, byte-
-      # identical to the canonical copy at radar.mehrnet.com/install/
-      # modules/ -- __MODULES_DIR__/__TOOLS_DIR__ inside its own
-      # install[].path values are placeholders radar-node itself
-      # resolves at fetch/install time (see moduleinstall.go), not
-      # something this script should ever have baked in early. Doing
-      # so here used to silently break every later `radar-node
-      # fetch-module`/`install-module` re-run against this same local
-      # copy (it'd see an already-resolved absolute path instead of
-      # the placeholder), and crash-looped an entire fleet the one
-      # time this module's own schema started actually using that
-      # field (v0.26). Only the *wrapper scripts* alongside it get the
-      # substitution -- their __MODULES_DIR__/__TOOLS_DIR__ references
-      # are shell command-line arguments, resolved once, right here,
-      # not re-resolved by anything later.
-      *.yaml|*.yml) cp "$tmp_module" "${MODULES_DIR}/${f}" ;;
-      *) sed "s#__MODULES_DIR__#${MODULES_DIR}#g; s#__TOOLS_DIR__#${TOOLS_DIR}#g" "$tmp_module" > "${MODULES_DIR}/${f}" ;;
-    esac
-    rm -f "$tmp_module"
-    case "$f" in *.sh) chmod +x "${MODULES_DIR}/${f}" ;; esac
-  done
-  log "installed module: ${module_files}"
-}
-
-remove_static_tool() {
-  # $1 = installed binary filename, $2 = space-separated module files
-  bin_name="$1"; module_files="$2"
-  rm -f "${TOOLS_DIR}/${bin_name}"
-  for f in $module_files; do
-    rm -f "${MODULES_DIR}/${f}"
-  done
-  log "removed ${bin_name} and its module files"
 }
 
 # A module named in both lists at once (only possible when hand-typed
@@ -619,34 +560,23 @@ remove_static_tool() {
 # if/elif always had.
 for m in xray wireguard openvpn; do
   if module_requested "$REMOVE_MODULES" "$m"; then
-    case "$m" in
-      xray) remove_static_tool "xray" "xray.yaml xray-prepare.sh xray-run.sh" ;;
-      wireguard) remove_static_tool "radar-wg" "wireguard.yaml wireguard-test.sh" ;;
-      openvpn) remove_static_tool "openvpn" "openvpn.yaml openvpn-test.sh" ;;
-    esac
+    "${INSTALL_BIN_DIR}/${BIN_NAME}" remove-module "$m" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR"
   elif module_requested "$INSTALL_MODULES" "$m"; then
     case "$m" in
-      xray)
-        install_static_tool "xray" "xray" "xray" "xray.yaml xray-prepare.sh xray-run.sh"
-        ;;
-      wireguard)
-        [ "$OS" = "linux" ] || err "--install-module=wireguard is linux-only (radar-wg's netlink dependency doesn't target $OS)"
-        install_static_tool "wireguard-go" "radar-wg" "radar-wg" "wireguard.yaml wireguard-test.sh"
-        # CAP_NET_ADMIN (creating the TUN device) via setcap on the
-        # binary itself, rather than requiring the whole agent process
-        # to run as root just for this one prober -- only possible
-        # (and only needed) on a root install; harmless to skip
-        # otherwise, radar-wg just won't work until this node's agent
-        # runs with that capability some other way.
-        if [ "$IS_ROOT" = "1" ] && command -v setcap >/dev/null 2>&1; then
-          setcap cap_net_admin+ep "${TOOLS_DIR}/radar-wg" || log "setcap failed -- radar-wg will need CAP_NET_ADMIN some other way"
-        fi
-        ;;
-      openvpn)
-        [ "$OS" = "linux" ] || err "--install-module=openvpn is linux-only (only linux/amd64+arm64 static builds are published)"
-        install_static_tool "openvpn" "openvpn" "openvpn" "openvpn.yaml openvpn-test.sh"
-        ;;
+      wireguard) [ "$OS" = "linux" ] || err "--install-module=wireguard is linux-only (radar-wg's netlink dependency doesn't target $OS)" ;;
+      openvpn) [ "$OS" = "linux" ] || err "--install-module=openvpn is linux-only (only linux/amd64+arm64 static builds are published)" ;;
     esac
+    fetch_or_update_module "$m"
+    # CAP_NET_ADMIN (creating the TUN device) via setcap on the binary
+    # itself, rather than requiring the whole agent process to run as
+    # root just for this one prober -- only possible (and only needed)
+    # on a root install; harmless to skip otherwise, radar-wg just
+    # won't work until this node's agent runs with that capability
+    # some other way. Not something moduleinstall.go itself does --
+    # this stays install.sh's own concern, after the binary lands.
+    if [ "$m" = "wireguard" ] && [ "$IS_ROOT" = "1" ] && command -v setcap >/dev/null 2>&1; then
+      setcap cap_net_admin+ep "${TOOLS_DIR}/radar-wg" || log "setcap failed -- radar-wg will need CAP_NET_ADMIN some other way"
+    fi
   fi
 done
 
