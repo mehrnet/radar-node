@@ -6,8 +6,17 @@ arch: [amd64, arm64]
 install:
   - name: radar-wg
     kind: binary
-    version: "ecfc5a8d5446-10"
-    url: https://radar.mehrnet.com/releases/wireguard-go/radar-wg_latest_{os}_{arch}.{ext}
+    # The literal string in the published asset's filename
+    # (radar-wg_ecfc5a8d5446-r10_...). Unlike xray/openvpn (see their
+    # own comments), wireguard-go's own "-N"/"-rN" suffix here tracks
+    # genuinely distinct radar-wg *binary* builds, not just wrapper-
+    # script revisions -- static-builds/tools/wireguard-go/publish.sh
+    # has no meaningful upstream version to key off (it tracks a raw
+    # vendored commit hash), so this repo's own release tag is the
+    # real version identity. Keep this in sync with whatever tag the
+    # currently-published asset actually used.
+    version: "ecfc5a8d5446-r10"
+    url: https://radar.mehrnet.com/releases/wireguard-go/radar-wg_{version}_{os}_{arch}.{ext}
     path: __TOOLS_DIR__/radar-wg
   - name: wireguard-test.sh
     kind: file

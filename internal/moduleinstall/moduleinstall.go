@@ -52,22 +52,66 @@ func (cfg Config) httpClient() (*http.Client, error) {
 // sidecars all go through it, so proxy handling only has to be
 // correct in one spot.
 func fetchURL(ctx context.Context, client *http.Client, u string) ([]byte, error) {
+	data, _, err := fetchURLWithType(ctx, client, u)
+	return data, err
+}
+
+// fetchURLWithType is fetchURL, but also returns the response's
+// Content-Type -- see fetchImmutableAsset's own comment on why that,
+// not the HTTP status, is what actually distinguishes a real asset
+// from radar.mehrnet.com's own SPA fallback page.
+func fetchURLWithType(ctx context.Context, client *http.Client, u string) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: unexpected status %d", u, resp.StatusCode)
+		return nil, "", fmt.Errorf("GET %s: unexpected status %d", u, resp.StatusCode)
 	}
 	// 200MB safety cap -- comfortably over any real release asset
 	// (the largest today, xray, is ~14MB), just a backstop against a
 	// misbehaving/malicious server never closing the connection.
-	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	return data, resp.Header.Get("Content-Type"), err
+}
+
+// fetchImmutableAsset retries fetchURLWithType a handful of times when
+// the response looks like radar.mehrnet.com's own SPA fallback page
+// (text/html) rather than a real asset. Can't tell them apart by HTTP
+// status: that origin serves a 200 (its own index.html) for any
+// unmatched path rather than a real 404, so a not-yet-published
+// version-pinned asset (see module.InstallDependency's own doc
+// comment on {version}) looks identical to a broken URL at the
+// status-code level -- Content-Type still tells them apart (a real
+// asset is application/gzip/zip or text/plain for the checksum
+// sidecar; the fallback is always text/html). Only used for version-
+// pinned dependencies (installDependency below); anything still on a
+// mutable "_latest_"-style URL keeps the original single-attempt
+// fetchURL, unchanged.
+func fetchImmutableAsset(ctx context.Context, client *http.Client, u string) ([]byte, error) {
+	const maxAttempts = 5
+	for attempt := 1; ; attempt++ {
+		data, ctype, err := fetchURLWithType(ctx, client, u)
+		if err == nil && !strings.HasPrefix(ctype, "text/html") {
+			return data, nil
+		}
+		if attempt >= maxAttempts {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("GET %s: still not published after %d attempts", u, maxAttempts)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Duration(attempt*2) * time.Second):
+		}
+	}
 }
 
 // Fetch downloads a module's YAML from moduleURL, checks this node's
@@ -209,9 +253,19 @@ func installDependency(ctx context.Context, client *http.Client, cfg Config, dep
 	}
 
 	assetURL := dep.ResolveURL(runtime.GOOS, runtime.GOARCH)
+	// A version-pinned dependency points at a permanently-immutable
+	// asset -- worth retrying past a not-yet-published response. One
+	// still on a mutable "_latest_"-style URL isn't (there's no
+	// "not published yet" state to wait out on a target that's always
+	// "published," just possibly stale), so it keeps the original
+	// single-attempt fetch.
+	fetch := fetchURL
+	if dep.Version != "" {
+		fetch = fetchImmutableAsset
+	}
 
 	if dep.IsFile() {
-		content, err := fetchURL(ctx, client, assetURL)
+		content, err := fetch(ctx, client, assetURL)
 		if err != nil {
 			return fmt.Errorf("install %q: fetch %s: %w", dep.Name, assetURL, err)
 		}
@@ -226,12 +280,12 @@ func installDependency(ctx context.Context, client *http.Client, cfg Config, dep
 		return nil
 	}
 
-	assetData, err := fetchURL(ctx, client, assetURL)
+	assetData, err := fetch(ctx, client, assetURL)
 	if err != nil {
 		return fmt.Errorf("install %q: fetch %s: %w", dep.Name, assetURL, err)
 	}
 
-	checksumData, err := fetchURL(ctx, client, assetURL+".checksum.txt")
+	checksumData, err := fetch(ctx, client, assetURL+".checksum.txt")
 	if err != nil {
 		return fmt.Errorf("install %q: fetch checksum %s: %w", dep.Name, assetURL+".checksum.txt", err)
 	}

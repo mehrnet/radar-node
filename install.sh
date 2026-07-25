@@ -232,6 +232,19 @@ curl_get() {
   fi
 }
 
+# Same as curl_get, but prints the response's Content-Type to stdout --
+# see fetch_with_retry's own comment on why that, not the HTTP status,
+# is what actually distinguishes a real asset from this origin's own
+# SPA fallback page.
+curl_get_with_type() {
+  # $1 = url, $2 = output path
+  if [ -n "$PROXY" ]; then
+    curl -fsSL --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
+  else
+    curl -fsSL -w '%{content_type}' "$1" -o "$2"
+  fi
+}
+
 # ---------------------------------------------------------------------
 # ARCH resolution -> goreleaser's naming (OS was already resolved above,
 # before the --uninstall branch, since that needs it too).
@@ -244,14 +257,32 @@ case "$arch_raw" in
 esac
 
 # ---------------------------------------------------------------------
-# No API call needed to resolve a version at all anymore -- the mirror
-# (see releases-sync.sh and releases/radar-node/) only ever keeps the
-# single latest release, downloaded straight to a fixed "..._latest_..."
-# name with no version-numbered copy alongside it, so there's nothing
-# else to pin to even if this script wanted to offer it.
+# Prefer a specific, permanently-immutable version-numbered asset over
+# the old "_latest_" one -- once published, a version-numbered file's
+# content never changes again, so its checksum sidecar can never
+# disagree with it the way "_latest_"'s could (observed in production:
+# a self-update mid-propagation on the mirror could see a binary from
+# one CDN edge and a checksum from another that had already moved on,
+# a genuine mismatch between two individually-valid-but-different
+# states, not corruption). The actual current version comes from
+# radar-api directly -- a live database read, never itself CDN-cached
+# the way a static pointer file under this same mirror would be.
+# Best-effort: if radar-api can't be reached at all, this falls back
+# to the old "_latest_" URL below, same as every release before this
+# one, rather than blocking the update over it entirely.
 # ---------------------------------------------------------------------
-ASSET="${BIN_NAME}_latest_${OS}_${ARCH}.tar.gz"
 BASE_URL="${RELEASES_BASE}/radar-node"
+NODE_VERSION=""
+health_json="$(curl -fsSL ${PROXY:+--proxy "$PROXY"} --max-time 10 "${API_URL}/v1/health" 2>/dev/null || true)"
+if [ -n "$health_json" ]; then
+  NODE_VERSION="$(printf '%s' "$health_json" | sed -n 's/.*"latest_node_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+fi
+if [ -n "$NODE_VERSION" ]; then
+  ASSET="${BIN_NAME}_${NODE_VERSION}_${OS}_${ARCH}.tar.gz"
+else
+  log "couldn't resolve a specific version from ${API_URL}/v1/health -- falling back to the mutable _latest_ asset"
+  ASSET="${BIN_NAME}_latest_${OS}_${ARCH}.tar.gz"
+fi
 
 WORKDIR="$(mktemp -d)"
 # On any failure from here on (bad download, a checksum mismatch --
@@ -288,15 +319,61 @@ cleanup_and_recover() {
 }
 trap cleanup_and_recover EXIT
 
+# Retries only the fetch itself (a not-yet-published version-numbered
+# asset means "radar-api already knows about this version, but the
+# mirror hasn't finished publishing it to this edge yet" -- a real,
+# expected, transient state, not an error) -- a *mismatched checksum*
+# on a version-numbered asset is never retried, since that file's
+# content can never legitimately change once published, so a mismatch
+# there means real corruption. Only used for the version-numbered
+# path; the "_latest_" fallback below keeps its original single-
+# attempt, tolerate-a-missing-sidecar behavior unchanged.
+#
+# Can't just check the HTTP status: this origin serves a 200 (its own
+# SPA's index.html) for *any* unmatched path rather than a real 404,
+# so a not-yet-published asset looks identical to a genuinely broken
+# URL at the status-code level. The content-type header still tells
+# them apart -- a real asset is application/gzip or text/plain (the
+# checksum sidecar), the fallback page is always text/html -- so that,
+# not the status code, is what actually gates the retry here.
+fetch_with_retry() {
+  # $1 = url, $2 = output path, $3 = human-readable label for logging
+  _attempt=1
+  _max_attempts=5
+  while :; do
+    _ctype="$(curl_get_with_type "$1" "$2")" || _ctype=""
+    case "$_ctype" in
+      text/html*|"") : ;; # SPA fallback (not yet published), or the request itself failed -- either way, not a real file
+      *) return 0 ;;
+    esac
+    if [ "$_attempt" -ge "$_max_attempts" ]; then
+      return 1
+    fi
+    log "  ${3} not available yet (attempt ${_attempt}/${_max_attempts}) -- retrying in $((_attempt * 2))s..."
+    sleep $((_attempt * 2))
+    _attempt=$((_attempt + 1))
+  done
+}
+
 log "downloading ${ASSET}..."
-curl_get "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}"
+if [ -n "$NODE_VERSION" ]; then
+  fetch_with_retry "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}" "${ASSET}" || err "failed to download ${ASSET} after retries"
+else
+  curl_get "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}"
+fi
 
 log "verifying checksum..."
 # One sidecar per asset (just the raw sha256 digest, nothing else) --
 # see releases-sync.sh -- instead of a shared checksums.txt manifest,
 # so there's no line to grep out of a multi-asset file, just the one
 # file that already matches the one asset just downloaded.
-if curl_get "${BASE_URL}/${ASSET}.checksum.txt" "${WORKDIR}/${ASSET}.checksum.txt" 2>/dev/null; then
+checksum_fetched=0
+if [ -n "$NODE_VERSION" ]; then
+  fetch_with_retry "${BASE_URL}/${ASSET}.checksum.txt" "${WORKDIR}/${ASSET}.checksum.txt" "${ASSET}.checksum.txt" && checksum_fetched=1
+else
+  curl_get "${BASE_URL}/${ASSET}.checksum.txt" "${WORKDIR}/${ASSET}.checksum.txt" 2>/dev/null && checksum_fetched=1
+fi
+if [ "$checksum_fetched" = "1" ]; then
   expected="$(cat "${WORKDIR}/${ASSET}.checksum.txt")"
   if [ -n "$expected" ]; then
     if command -v sha256sum >/dev/null 2>&1; then

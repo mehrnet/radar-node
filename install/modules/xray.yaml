@@ -6,8 +6,14 @@ arch: [amd64, arm64]
 install:
   - name: xray
     kind: binary
-    version: "26.3.27-2"
-    url: https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}
+    # This is the literal string embedded in the published asset's own
+    # filename (xray_26.3.27_...) -- deliberately not the same as this
+    # module's own top-level version above, which tracks "does this
+    # module need updating at all" and can carry an extra "-N" bump
+    # (wrapper-script-only revisions) the binary release itself never
+    # had. See module.InstallDependency's own doc comment.
+    version: "26.3.27"
+    url: https://radar.mehrnet.com/releases/xray/xray_{version}_{os}_{arch}.{ext}
     path: __TOOLS_DIR__/xray
   - name: xray-prepare.sh
     kind: file

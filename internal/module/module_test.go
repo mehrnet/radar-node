@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/mehrnet/radar-node/internal/module"
@@ -465,6 +466,20 @@ func TestInstallDependency_ResolveURL_SubstitutesPlatformAndPicksExt(t *testing.
 	}
 }
 
+func TestInstallDependency_ResolveURL_SubstitutesVersion(t *testing.T) {
+	dep := module.InstallDependency{Version: "26.3.27", URL: "https://radar.mehrnet.com/releases/xray/xray_{version}_{os}_{arch}.{ext}"}
+	if got := dep.ResolveURL("linux", "amd64"); got != "https://radar.mehrnet.com/releases/xray/xray_26.3.27_linux_amd64.tar.gz" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestInstallDependency_ResolveURL_NoVersionPlaceholderIsANoop(t *testing.T) {
+	dep := module.InstallDependency{Version: "26.3.27", URL: "https://radar.mehrnet.com/releases/xray/xray_latest_{os}_{arch}.{ext}"}
+	if got := dep.ResolveURL("linux", "amd64"); got != "https://radar.mehrnet.com/releases/xray/xray_latest_linux_amd64.tar.gz" {
+		t.Errorf("got %q", got)
+	}
+}
+
 // Regression test for a real production incident: install.sh writing
 // a module's own YAML verbatim (see moduleinstall.go's own comment on
 // why) left every prepare/run command's own __MODULES_DIR__/
@@ -615,5 +630,55 @@ collect:
 `)
 	if _, err := module.LoadDir(dir); err == nil {
 		t.Fatal("expected an error for an install dependency with an invalid kind")
+	}
+}
+
+// Regression test against the *real* production module manifests
+// (radar.mehrnet.com/install/modules/*.yaml, canonically sourced from
+// here) -- specifically, that every binary install: dependency's
+// {version} placeholder actually resolves to something (a non-empty
+// Version field), so a manifest edit can never silently regress back
+// to a mutable "_latest_"-only URL with no version-pinned fetch path
+// at all. Doesn't hit the network -- ResolveURL is pure string
+// substitution -- so this can't tell a *correct* version string from
+// a wrong one, only that one is present and does get substituted in.
+func TestLoadDir_ProductionModuleManifestsResolveVersionedURLs(t *testing.T) {
+	dir, err := filepath.Abs(filepath.Join("..", "..", "install", "modules"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("production module manifests not found at %s (%v) -- skipping", dir, err)
+	}
+	modules, err := module.LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir(%s): %v", dir, err)
+	}
+	byName := make(map[string]module.Module, len(modules))
+	for _, m := range modules {
+		byName[m.Name] = m
+	}
+	for _, name := range []string{"xray", "wireguard", "openvpn"} {
+		m, ok := byName[name]
+		if !ok {
+			t.Errorf("expected module %q to be loaded from %s", name, dir)
+			continue
+		}
+		for _, dep := range m.Install {
+			if dep.IsFile() {
+				continue
+			}
+			if dep.Version == "" {
+				t.Errorf("%s: binary dependency %q has no Version -- {version} in its URL (%q) will resolve to an empty string", name, dep.Name, dep.URL)
+				continue
+			}
+			resolved := dep.ResolveURL("linux", "amd64")
+			if strings.Contains(resolved, "{version}") {
+				t.Errorf("%s: dependency %q's URL still contains a literal {version} after resolving: %q", name, dep.Name, resolved)
+			}
+			if !strings.Contains(resolved, dep.Version) {
+				t.Errorf("%s: dependency %q's resolved URL %q doesn't contain its own Version %q", name, dep.Name, resolved, dep.Version)
+			}
+		}
 	}
 }

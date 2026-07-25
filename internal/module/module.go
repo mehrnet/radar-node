@@ -131,7 +131,16 @@ type Module struct {
 // implicit "relative to the module's own directory" path, so a
 // dependency can be hosted anywhere.
 type InstallDependency struct {
-	Name    string `yaml:"name"`
+	Name string `yaml:"name"`
+	// The exact version string embedded in URL's own published asset
+	// filename (see ResolveURL's {version} substitution) -- not
+	// necessarily the same string as the module's own top-level
+	// Version, which tracks "does this module need updating at all"
+	// (radar-api's own staleness check) and commonly carries an extra
+	// "-N" manifest-revision suffix a binary release itself never had
+	// (e.g. top-level "26.3.27-3" for a manifest/wrapper-script bump
+	// that didn't need a new xray binary at all -- the real download
+	// is still just "xray_26.3.27_...").
 	Version string `yaml:"version,omitempty"`
 	// Kind is "binary" (default if omitted) or "file". A binary is
 	// fetched as a goreleaser-style archive, checksum-verified against
@@ -170,16 +179,23 @@ func (d InstallDependency) IsFile() bool {
 	return d.Kind == "file"
 }
 
-// ResolveURL substitutes {os}/{arch}/{ext} in d.URL for the given
-// platform -- ext is "zip" for windows, "tar.gz" otherwise, matching
-// goreleaser's own archive format split (see this repo's own
-// .goreleaser.yaml).
+// ResolveURL substitutes {os}/{arch}/{ext}/{version} in d.URL for the
+// given platform -- ext is "zip" for windows, "tar.gz" otherwise,
+// matching goreleaser's own archive format split (see this repo's own
+// .goreleaser.yaml). {version} (d.Version) is what points this at a
+// specific, permanently-immutable release asset instead of a mutable
+// "_latest_" one that can be overwritten out from under a concurrent
+// download -- see moduleinstall's installDependency, which fetches the
+// resolved URL and its ".checksum.txt" sidecar as two separate
+// requests that a mutable target could answer inconsistently. Left
+// unsubstituted (a no-op) for any dependency whose URL doesn't
+// reference {version} at all.
 func (d InstallDependency) ResolveURL(goos, arch string) string {
 	ext := "tar.gz"
 	if goos == "windows" {
 		ext = "zip"
 	}
-	r := strings.NewReplacer("{os}", goos, "{arch}", arch, "{ext}", ext)
+	r := strings.NewReplacer("{os}", goos, "{arch}", arch, "{ext}", ext, "{version}", d.Version)
 	return r.Replace(d.URL)
 }
 

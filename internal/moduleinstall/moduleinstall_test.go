@@ -382,3 +382,80 @@ collect:
 		t.Error("expected the module yaml to be removed")
 	}
 }
+
+// Regression test for a real production incident: radar.mehrnet.com
+// serves its own SPA's index.html (a 200, text/html) for any
+// unmatched path instead of a real 404, so a version-pinned asset
+// that hasn't finished publishing to a given CDN edge yet looks
+// identical to a broken URL at the status-code level. A version-
+// pinned dependency (Version set, matching a real production module
+// YAML) must retry past that instead of either failing outright or --
+// worse -- silently checksum-verifying an HTML error page against a
+// checksum sidecar for a completely different (and possibly also-
+// stale) response.
+func TestFetch_RetriesPastSPAFallbackForVersionPinnedAsset(t *testing.T) {
+	dir := t.TempDir()
+	cfg := moduleinstall.Config{ModulesDir: filepath.Join(dir, "modules.d"), ToolsDir: filepath.Join(dir, "tools")}
+
+	binContent := []byte("fake binary content")
+	archive := buildTarGz(t, "thing-bin", binContent)
+	checksum := sha256Hex(archive)
+	assetPath := fmt.Sprintf("/releases/thing_1.0_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	var assetRequests, checksumRequests int
+	mux := http.NewServeMux()
+	var moduleYAML string
+	mux.HandleFunc("/modules/thing.yaml", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, moduleYAML)
+	})
+	mux.HandleFunc(assetPath, func(w http.ResponseWriter, r *http.Request) {
+		assetRequests++
+		if assetRequests == 1 {
+			// Simulate the not-yet-published SPA fallback: 200, but HTML.
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<!DOCTYPE html><html>...</html>")
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Write(archive)
+	})
+	mux.HandleFunc(assetPath+".checksum.txt", func(w http.ResponseWriter, r *http.Request) {
+		checksumRequests++
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, checksum)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	moduleYAML = fmt.Sprintf(`
+name: thing
+version: "1.0-1"
+url: %s/modules/thing.yaml
+os: [%s]
+arch: [%s]
+install:
+  - name: thing-bin
+    kind: binary
+    version: "1.0"
+    url: %s/releases/thing_{version}_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/thing-bin
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`, srv.URL, runtime.GOOS, runtime.GOARCH, srv.URL)
+
+	if err := moduleinstall.Fetch(context.Background(), cfg, srv.URL+"/modules/thing.yaml"); err != nil {
+		t.Fatalf("expected Fetch to retry past the SPA fallback and succeed, got: %v", err)
+	}
+	if assetRequests < 2 {
+		t.Errorf("expected at least 2 requests for the asset (one SPA-fallback, one real), got %d", assetRequests)
+	}
+	binData, err := os.ReadFile(filepath.Join(cfg.ToolsDir, "thing-bin"))
+	if err != nil {
+		t.Fatalf("expected the binary to be installed: %v", err)
+	}
+	if string(binData) != string(binContent) {
+		t.Errorf("installed binary content = %q, want %q", binData, binContent)
+	}
+}
