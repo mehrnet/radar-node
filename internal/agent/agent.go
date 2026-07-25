@@ -314,22 +314,24 @@ func (a *agent) handlePendingAction(ctx context.Context, action *wire.PendingAct
 }
 
 // moduleActionFlags maps a wire-level "install_xray"/"remove_wireguard"
-// style action name to install.sh's matching --install-xray/--remove-
-// wireguard flag. Unrecognized entries are dropped rather than failing
-// the whole batch -- radar-api validates this set already (see its
-// nodeModuleActionsSchema), so an entry that doesn't map here can only
-// mean a newer server introduced an action this older agent build
-// doesn't know about yet, not a real error.
+// style action name to install.sh's matching --install-module=xray/
+// --remove-module=wireguard flag (install.sh's own generic flag pair,
+// not one literal flag per module -- see its own module_requested/
+// module_dispatch). Unrecognized entries are dropped rather than
+// failing the whole batch -- radar-api validates this set already
+// (see its nodeModuleActionsSchema), so an entry that doesn't map here
+// can only mean a newer server introduced an action this older agent
+// build doesn't know about yet, not a real error.
 func moduleActionFlags(actions []string) []string {
 	flags := make([]string, 0, len(actions))
 	for _, action := range actions {
 		flag, ok := strings.CutPrefix(action, "install_")
 		if ok {
-			flags = append(flags, "--install-"+flag)
+			flags = append(flags, "--install-module="+flag)
 			continue
 		}
 		if flag, ok := strings.CutPrefix(action, "remove_"); ok {
-			flags = append(flags, "--remove-"+flag)
+			flags = append(flags, "--remove-module="+flag)
 		}
 	}
 	return flags
@@ -338,8 +340,9 @@ func moduleActionFlags(actions []string) []string {
 // applyModuleActions re-execs install.sh once with every bundled-
 // engine flag this heartbeat's batch named, e.g. installing xray and
 // removing wireguard together becomes one
-// "--install-xray --remove-wireguard" re-run instead of two separate
-// fire-once commands one click (and one full install.sh re-run) apart.
+// "--install-module=xray --remove-module=wireguard" re-run instead of
+// two separate fire-once commands one click (and one full install.sh
+// re-run) apart.
 func (a *agent) applyModuleActions(actions []string) {
 	flags := moduleActionFlags(actions)
 	if len(flags) == 0 {
@@ -374,7 +377,7 @@ func buildInstallCommand(nodeID, apiKey, apiURL, proxyURL string, extraFlags []s
 // node_id/api_key/api_url/proxy (exactly like a plain "update" does),
 // plus whatever extra flags the request carries when it's really about
 // bundled engine modules rather than radar-node's own version -- e.g.
-// "--install-xray" for an "install_xray" action, one or more at once
+// "--install-module=xray" for an "install_xray" action, one or more at once
 // (see applyModuleActions). install.sh itself does the actual fetch/
 // verify/place and the service restart that picks up a module just
 // dropped into modules.d; this is only ever "re-run that same script,

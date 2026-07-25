@@ -1,7 +1,7 @@
 # Bundled engine modules
 
-The module YAML + wrapper scripts install.sh's `--install-xray`/
-`--install-wireguard`/`--install-openvpn` flags drop into `modules.d`,
+The module YAML + wrapper scripts install.sh's `--install-module=xray`/
+`wireguard`/`openvpn` flags drop into `modules.d`,
 paired with the matching static binary fetched from
 [mehrnet/static-builds](https://github.com/mehrnet/static-builds).
 

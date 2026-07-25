@@ -11,7 +11,7 @@ There is no built-in Go action for xray/sing-box (there used to be --
 `xray_proxy_test`/`singbox_proxy_test`, removed once engine binaries
 became an install.sh-managed concern; see
 [mehrnet/static-builds](https://github.com/mehrnet/static-builds) and
-`--install-xray` in the main README). Every engine integration is a
+`--install-module=xray` in the main README). Every engine integration is a
 plain `run:`-based module now, these two included.
 
 - `xray-vless.yaml` + `prepare-vless.sh` -- tests a VLESS proxy.

@@ -37,14 +37,16 @@ UNINSTALL=0
 
 # Optional bundled engine modules (see install/modules/ and
 # https://github.com/mehrnet/static-builds) -- off unless explicitly
-# requested, or already installed (see the "still opted in" check
-# further down, once TOOLS_DIR is known).
-INSTALL_XRAY=0
-INSTALL_WIREGUARD=0
-INSTALL_OPENVPN=0
-REMOVE_XRAY=0
-REMOVE_WIREGUARD=0
-REMOVE_OPENVPN=0
+# requested (--install-module=<name>/--remove-module=<name>, space-
+# separated lists here), or already installed (see the "still opted
+# in" check further down, once TOOLS_DIR is known). One flag pair for
+# any of the fixed set in module_dispatch below, mirroring radar-
+# node's own `install-module <name>`/`remove-module <name>` subcommand
+# naming (see cmd/radar-node/main.go) -- replaces the old one-flag-
+# per-module --install-xray/--remove-wireguard/etc, which no longer
+# parse.
+INSTALL_MODULES=""
+REMOVE_MODULES=""
 
 usage() {
   cat <<'EOF'
@@ -65,22 +67,23 @@ Options:
 Optional bundled engine modules (each fetches a statically-built binary
 from mehrnet/static-builds and drops the matching module + wrapper
 script into modules.d -- see that repo's README for what's actually
-installed):
-  --install-xray        xray-core, for a generic proxy-config probe
-  --install-wireguard   a WireGuard tunnel probe (needs CAP_NET_ADMIN --
-                         applied to the binary via setcap on a root install)
-  --install-openvpn     an OpenVPN tunnel probe (linux only)
-  --remove-xray / --remove-wireguard / --remove-openvpn
-                        undo the corresponding --install-* above
+installed). Repeatable -- e.g. --install-module=xray --install-module=
+wireguard installs both in one run:
+  --install-module=xray        xray-core, for a generic proxy-config probe
+  --install-module=wireguard   a WireGuard tunnel probe (needs CAP_NET_ADMIN
+                                -- applied via setcap on a root install)
+  --install-module=openvpn     an OpenVPN tunnel probe (linux only)
+  --remove-module=<name>       undo the corresponding --install-module=<name>
+                                above
 
 --node_id/--api_key/--api_url/--proxy are only required the first time --
 re-running this same command on a machine that already has radar-node
 installed (e.g. to pick up a new release) reuses whatever's already
 configured there for any of these you don't pass again, so a bare
 `| sh -s` upgrades an existing install with no arguments at all -- this
-includes any --install-* engine module already opted into: it's kept
-up to date on every re-run without needing to repeat the flag, unless
-the matching --remove-* is passed.
+includes any --install-module=<name> engine module already opted into:
+it's kept up to date on every re-run without needing to repeat the
+flag, unless the matching --remove-module=<name> is passed.
 EOF
 }
 
@@ -94,16 +97,30 @@ for arg in "$@"; do
     --api_url=*) API_URL="${arg#*=}" ;;
     --proxy=*) PROXY="${arg#*=}" ;;
     --uninstall) UNINSTALL=1 ;;
-    --install-xray) INSTALL_XRAY=1 ;;
-    --install-wireguard) INSTALL_WIREGUARD=1 ;;
-    --install-openvpn) INSTALL_OPENVPN=1 ;;
-    --remove-xray) REMOVE_XRAY=1 ;;
-    --remove-wireguard) REMOVE_WIREGUARD=1 ;;
-    --remove-openvpn) REMOVE_OPENVPN=1 ;;
+    --install-module=*)
+      m="${arg#*=}"
+      case "$m" in xray|wireguard|openvpn) ;; *) err "unknown module: $m (supported: xray, wireguard, openvpn)" ;; esac
+      INSTALL_MODULES="${INSTALL_MODULES} ${m}"
+      ;;
+    --remove-module=*)
+      m="${arg#*=}"
+      case "$m" in xray|wireguard|openvpn) ;; *) err "unknown module: $m (supported: xray, wireguard, openvpn)" ;; esac
+      REMOVE_MODULES="${REMOVE_MODULES} ${m}"
+      ;;
     -h|--help) usage; exit 0 ;;
     *) err "unknown argument: $arg (see --help)" ;;
   esac
 done
+
+# $1 = space-separated list (INSTALL_MODULES or REMOVE_MODULES), $2 =
+# module name -- both lists start with a leading space (built via
+# "${LIST} name"), so wrapping the needle in spaces too catches an
+# exact match at the start/end without a false hit on a name that's
+# merely a substring of another (there are none today, but the fixed
+# set below could grow one).
+module_requested() {
+  case " $1 " in *" $2 "*) return 0 ;; *) return 1 ;; esac
+}
 
 # ---------------------------------------------------------------------
 # Platform detection -> goreleaser's os/arch naming (see .goreleaser.yaml).
@@ -141,9 +158,15 @@ label="com.mehrnet.radar-node"
 # no separate state file needed. Only skipped if this exact run is the
 # one removing it (--remove-* was just passed above).
 if [ "$UNINSTALL" != "1" ]; then
-  [ "$INSTALL_XRAY" = "0" ] && [ "$REMOVE_XRAY" = "0" ] && [ -f "${TOOLS_DIR}/xray" ] && INSTALL_XRAY=1
-  [ "$INSTALL_WIREGUARD" = "0" ] && [ "$REMOVE_WIREGUARD" = "0" ] && [ -f "${TOOLS_DIR}/radar-wg" ] && INSTALL_WIREGUARD=1
-  [ "$INSTALL_OPENVPN" = "0" ] && [ "$REMOVE_OPENVPN" = "0" ] && [ -f "${TOOLS_DIR}/openvpn" ] && INSTALL_OPENVPN=1
+  for m in xray wireguard openvpn; do
+    if ! module_requested "$INSTALL_MODULES" "$m" && ! module_requested "$REMOVE_MODULES" "$m"; then
+      case "$m" in
+        xray) [ -f "${TOOLS_DIR}/xray" ] && INSTALL_MODULES="${INSTALL_MODULES} xray" ;;
+        wireguard) [ -f "${TOOLS_DIR}/radar-wg" ] && INSTALL_MODULES="${INSTALL_MODULES} wireguard" ;;
+        openvpn) [ -f "${TOOLS_DIR}/openvpn" ] && INSTALL_MODULES="${INSTALL_MODULES} openvpn" ;;
+      esac
+    fi
+  done
 fi
 
 if [ "$UNINSTALL" = "1" ]; then
@@ -590,33 +613,42 @@ remove_static_tool() {
   log "removed ${bin_name} and its module files"
 }
 
-if [ "$REMOVE_XRAY" = "1" ]; then
-  remove_static_tool "xray" "xray.yaml xray-prepare.sh xray-run.sh"
-elif [ "$INSTALL_XRAY" = "1" ]; then
-  install_static_tool "xray" "xray" "xray" "xray.yaml xray-prepare.sh xray-run.sh"
-fi
-
-if [ "$REMOVE_WIREGUARD" = "1" ]; then
-  remove_static_tool "radar-wg" "wireguard.yaml wireguard-test.sh"
-elif [ "$INSTALL_WIREGUARD" = "1" ]; then
-  [ "$OS" = "linux" ] || err "--install-wireguard is linux-only (radar-wg's netlink dependency doesn't target $OS)"
-  install_static_tool "wireguard-go" "radar-wg" "radar-wg" "wireguard.yaml wireguard-test.sh"
-  # CAP_NET_ADMIN (creating the TUN device) via setcap on the binary
-  # itself, rather than requiring the whole agent process to run as
-  # root just for this one prober -- only possible (and only needed)
-  # on a root install; harmless to skip otherwise, radar-wg just won't
-  # work until this node's agent runs with that capability some other way.
-  if [ "$IS_ROOT" = "1" ] && command -v setcap >/dev/null 2>&1; then
-    setcap cap_net_admin+ep "${TOOLS_DIR}/radar-wg" || log "setcap failed -- radar-wg will need CAP_NET_ADMIN some other way"
+# A module named in both lists at once (only possible when hand-typed
+# -- radar-api's own nodeModuleActionsSchema already rejects it at the
+# wire level) resolves to remove, same precedence the old per-module
+# if/elif always had.
+for m in xray wireguard openvpn; do
+  if module_requested "$REMOVE_MODULES" "$m"; then
+    case "$m" in
+      xray) remove_static_tool "xray" "xray.yaml xray-prepare.sh xray-run.sh" ;;
+      wireguard) remove_static_tool "radar-wg" "wireguard.yaml wireguard-test.sh" ;;
+      openvpn) remove_static_tool "openvpn" "openvpn.yaml openvpn-test.sh" ;;
+    esac
+  elif module_requested "$INSTALL_MODULES" "$m"; then
+    case "$m" in
+      xray)
+        install_static_tool "xray" "xray" "xray" "xray.yaml xray-prepare.sh xray-run.sh"
+        ;;
+      wireguard)
+        [ "$OS" = "linux" ] || err "--install-module=wireguard is linux-only (radar-wg's netlink dependency doesn't target $OS)"
+        install_static_tool "wireguard-go" "radar-wg" "radar-wg" "wireguard.yaml wireguard-test.sh"
+        # CAP_NET_ADMIN (creating the TUN device) via setcap on the
+        # binary itself, rather than requiring the whole agent process
+        # to run as root just for this one prober -- only possible
+        # (and only needed) on a root install; harmless to skip
+        # otherwise, radar-wg just won't work until this node's agent
+        # runs with that capability some other way.
+        if [ "$IS_ROOT" = "1" ] && command -v setcap >/dev/null 2>&1; then
+          setcap cap_net_admin+ep "${TOOLS_DIR}/radar-wg" || log "setcap failed -- radar-wg will need CAP_NET_ADMIN some other way"
+        fi
+        ;;
+      openvpn)
+        [ "$OS" = "linux" ] || err "--install-module=openvpn is linux-only (only linux/amd64+arm64 static builds are published)"
+        install_static_tool "openvpn" "openvpn" "openvpn" "openvpn.yaml openvpn-test.sh"
+        ;;
+    esac
   fi
-fi
-
-if [ "$REMOVE_OPENVPN" = "1" ]; then
-  remove_static_tool "openvpn" "openvpn.yaml openvpn-test.sh"
-elif [ "$INSTALL_OPENVPN" = "1" ]; then
-  [ "$OS" = "linux" ] || err "--install-openvpn is linux-only (only linux/amd64+arm64 static builds are published)"
-  install_static_tool "openvpn" "openvpn" "openvpn" "openvpn.yaml openvpn-test.sh"
-fi
+done
 
 API_KEY_COMBINED="${NODE_ID}:${API_KEY}"
 EXTRA_ARGS=""

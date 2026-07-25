@@ -172,9 +172,9 @@ radar-node remove-module xray
 | `--tools-dir` | where a module's binary-kind dependencies go (default: `/etc/radar-node/tools` as root, `~/.config/radar-node/tools` otherwise) |
 | `--proxy` | proxy for these downloads (`http://`, `https://`, `socks5://`, `socks5h://`) |
 
-The Go-native counterpart to the shell-based `install.sh --install-xray`/
-`--install-wireguard`/`--install-openvpn` flags described below -- same
-target directories, same checksum verification, same module YAML schema,
+The Go-native counterpart to the shell-based `install.sh --install-module=
+xray/wireguard/openvpn` flags described below -- same target directories,
+same checksum verification, same module YAML schema,
 different entry point. `fetch-module` downloads a module's own YAML from a
 URL, checks this node's platform against its declared `os`/`arch` (if any),
 downloads+verifies+installs every dependency in its `install:` list, then
@@ -277,9 +277,8 @@ rejection.
 There is no built-in Go action for any proxy/VPN engine -- `xray_proxy_test`/
 `singbox_proxy_test` used to be native actions here, removed in favor of
 ordinary `run:`-based modules driving real, independently-versioned engine
-binaries. install.sh's `--install-xray`/`--install-wireguard`/
-`--install-openvpn` flags fetch those binaries (statically built, tracked
-daily against upstream) from
+binaries. install.sh's `--install-module=xray`/`wireguard`/`openvpn` flags
+fetch those binaries (statically built, tracked daily against upstream) from
 [mehrnet/static-builds](https://github.com/mehrnet/static-builds), and drop
 the matching module YAML + wrapper script into `modules.d` -- see that
 repo's own README for exactly what gets installed where, and see

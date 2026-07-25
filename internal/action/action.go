@@ -7,7 +7,7 @@
 // to whatever xray/sing-box binary an operator had manually placed on
 // PATH or pointed at via XRAY_BIN/SINGBOX_BIN) -- removed now that
 // engine binaries are a managed install.sh concern (see
-// --install-xray/--install-wireguard/--install-openvpn, fetched from
+// --install-module=xray/wireguard/openvpn, fetched from
 // mehrnet/static-builds), not something this binary reaches for
 // itself. The equivalent probers are ordinary run:-based modules now
 // (see examples/modules/xray.yaml), like wireguard/openvpn always

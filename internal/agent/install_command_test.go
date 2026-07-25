@@ -29,8 +29,8 @@ func TestBuildInstallCommand_WithProxy_AppliesToBothTheOuterCurlAndTheScriptArg(
 }
 
 func TestBuildInstallCommand_IncludesExtraFlags(t *testing.T) {
-	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", []string{"--install-xray", "--remove-wireguard"})
-	if !strings.HasSuffix(cmd, "--install-xray --remove-wireguard") {
+	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", []string{"--install-module=xray", "--remove-module=wireguard"})
+	if !strings.HasSuffix(cmd, "--install-module=xray --remove-module=wireguard") {
 		t.Fatalf("expected extra flags appended at the end, got %q", cmd)
 	}
 }
