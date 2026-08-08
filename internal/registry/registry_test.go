@@ -17,7 +17,7 @@ func TestDefault_LoadsAllSixBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"tcp", "udp", "dns", "icmp", "http", "https", "system"} {
+	for _, name := range []string{"tcp", "udp", "dns", "icmp", "http", "https", "system", "subscription-fetch"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("expected %q to be registered by default", name)
 		}
@@ -29,8 +29,8 @@ func TestDefault_LoadsAllSixBuiltins(t *testing.T) {
 			t.Errorf("expected %q's manifest to have a matching name and a non-empty action, got %+v", name, manifest)
 		}
 	}
-	if got := len(reg.ProberHashes()); got != 7 {
-		t.Errorf("expected 7 prober_id:file_hash pairs, got %d: %v", got, reg.ProberHashes())
+	if got := len(reg.ProberHashes()); got != 8 {
+		t.Errorf("expected 8 prober_id:file_hash pairs, got %d: %v", got, reg.ProberHashes())
 	}
 }
 
