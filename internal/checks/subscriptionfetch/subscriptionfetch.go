@@ -1,13 +1,15 @@
 // Package subscriptionfetch implements the "subscription_fetch" prober:
 // fetches a URL (via internal/checks/fetch, called directly -- there's
 // no action-to-action call mechanism, and none is needed for a plain
-// Go import) and parses whatever it finds -- a raw or base64-encoded
-// URI list, a full xray-style JSON config, or a plain host:port proxy
-// list -- into one unified list of discovered proxies, riding back to
-// radar-api in the check's own Extra field. radar-api, not this
-// package, decides what to do with that list (create/archive/leave-
-// alone probes by content hash) -- this package's only job is turning
-// whatever a subscription URL returns into that one normalized shape.
+// Go import) and parses it strictly as whichever SubscriptionType the
+// probe's own "type" param says (base64-xray by default) -- a raw or
+// base64-encoded URI list, a full xray-style JSON config, or a plain
+// host:port proxy list -- into one unified list of discovered proxies,
+// riding back to radar-api in the check's own Extra field. radar-api,
+// not this package, decides what to do with that list (create/archive/
+// leave-alone probes by content hash) -- this package's only job is
+// turning whatever a subscription URL returns into that one normalized
+// shape.
 package subscriptionfetch
 
 import (
@@ -43,7 +45,8 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
 	}
 
-	proxies, err := Parse(body)
+	subType := SubscriptionType(opts.Param("type", string(Base64Xray)))
+	proxies, err := Parse(body, subType)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
 	}

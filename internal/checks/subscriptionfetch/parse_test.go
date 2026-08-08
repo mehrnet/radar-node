@@ -8,7 +8,7 @@ import (
 )
 
 func TestParse_Empty(t *testing.T) {
-	proxies, err := subscriptionfetch.Parse([]byte("  \n  "))
+	proxies, err := subscriptionfetch.Parse([]byte("  \n  "), subscriptionfetch.Base64Xray)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -17,11 +17,30 @@ func TestParse_Empty(t *testing.T) {
 	}
 }
 
+func TestParse_UnknownType(t *testing.T) {
+	_, err := subscriptionfetch.Parse([]byte("21.22.23.24:1080"), subscriptionfetch.SubscriptionType("clash-yaml"))
+	if err == nil {
+		t.Fatalf("expected an error for an unrecognized subscription type")
+	}
+}
+
+func TestParse_Base64XrayButNotActuallyBase64(t *testing.T) {
+	// Explicitly typed base64-xray, but the content is a raw (non-
+	// base64) URI line -- must fail loudly rather than silently
+	// parsing zero proxies, since this is now a real config mistake
+	// (wrong type picked), not an ambiguous input to guess at.
+	line := "vless://a3482e88-686a-4a58-8126-99c9df64b7bf@5.6.7.8:443?encryption=none&security=tls&type=tcp&sni=example.org#my-vless"
+	_, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.Base64Xray)
+	if err == nil {
+		t.Fatalf("expected an error when base64-xray content isn't valid base64")
+	}
+}
+
 func TestParse_RawVmessLine(t *testing.T) {
 	vmessJSON := `{"ps":"my-vmess","add":"1.2.3.4","port":"443","id":"a3482e88-686a-4a58-8126-99c9df64b7bf","aid":"0","scy":"auto","net":"ws","host":"example.com","path":"/ws","tls":"tls","sni":"example.com"}`
 	line := "vmess://" + base64.StdEncoding.EncodeToString([]byte(vmessJSON))
 
-	proxies, err := subscriptionfetch.Parse([]byte(line))
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -46,7 +65,7 @@ func TestParse_Base64EncodedList(t *testing.T) {
 	vlessLine := "vless://a3482e88-686a-4a58-8126-99c9df64b7bf@5.6.7.8:443?encryption=none&security=tls&type=tcp&sni=example.org#my-vless"
 	whole := base64.StdEncoding.EncodeToString([]byte(vlessLine + "\n"))
 
-	proxies, err := subscriptionfetch.Parse([]byte(whole))
+	proxies, err := subscriptionfetch.Parse([]byte(whole), subscriptionfetch.Base64Xray)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,7 +79,7 @@ func TestParse_Base64EncodedList(t *testing.T) {
 
 func TestParse_Trojan(t *testing.T) {
 	line := "trojan://s3cr3t@9.10.11.12:443?sni=trojan.example#my-trojan"
-	proxies, err := subscriptionfetch.Parse([]byte(line))
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +98,7 @@ func TestParse_Trojan(t *testing.T) {
 func TestParse_ShadowsocksSIP002(t *testing.T) {
 	userinfo := base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:p@ssw0rd"))
 	line := "ss://" + userinfo + "@13.14.15.16:8388#my-ss"
-	proxies, err := subscriptionfetch.Parse([]byte(line))
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -91,7 +110,7 @@ func TestParse_ShadowsocksSIP002(t *testing.T) {
 func TestParse_ShadowsocksLegacy(t *testing.T) {
 	whole := base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:p@ssw0rd@17.18.19.20:8388"))
 	line := "ss://" + whole + "#legacy-ss"
-	proxies, err := subscriptionfetch.Parse([]byte(line))
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -102,7 +121,7 @@ func TestParse_ShadowsocksLegacy(t *testing.T) {
 
 func TestParse_PlainProxyList(t *testing.T) {
 	content := "21.22.23.24:1080\nsocks5://user:pass@25.26.27.28:1080#my-socks\n"
-	proxies, err := subscriptionfetch.Parse([]byte(content))
+	proxies, err := subscriptionfetch.Parse([]byte(content), subscriptionfetch.ProxyList)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -125,7 +144,7 @@ func TestParse_XrayJSON(t *testing.T) {
 			{"tag": "blocked", "protocol": "blackhole"}
 		]
 	}`
-	proxies, err := subscriptionfetch.Parse([]byte(content))
+	proxies, err := subscriptionfetch.Parse([]byte(content), subscriptionfetch.XrayJSON)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -135,12 +154,12 @@ func TestParse_XrayJSON(t *testing.T) {
 }
 
 func TestParse_MalformedLineIsSkippedNotFatal(t *testing.T) {
-	content := "vmess://not-valid-base64!!!\n21.22.23.24:1080\n"
-	proxies, err := subscriptionfetch.Parse([]byte(content))
+	content := "vmess://not-valid-base64!!!\ntrojan://s3cr3t@9.10.11.12:443#good-trojan\n"
+	proxies, err := subscriptionfetch.Parse([]byte(content), subscriptionfetch.XrayURIList)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(proxies) != 1 {
+	if len(proxies) != 1 || proxies[0].Name != "good-trojan" {
 		t.Fatalf("expected the one good line to survive, got %+v", proxies)
 	}
 }
