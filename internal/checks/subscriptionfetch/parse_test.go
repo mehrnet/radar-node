@@ -77,6 +77,51 @@ func TestParse_Base64EncodedList(t *testing.T) {
 	}
 }
 
+// Regression for a real production report: a Reality-security vless
+// entry (a genuinely common shape, not an edge case -- every kovira3.ir
+// entry using the reality-cdn path uses it) produced a config missing
+// its own realitySettings entirely, since streamSettingsFor's reality
+// branch used to just stamp `"security": "reality"` and stop there.
+// Without publicKey/shortId at minimum, Reality's handshake can't
+// complete at all -- not "less secure", genuinely non-functional --
+// so every check against it failed silently forever, reading as "no
+// data yet" with no indication why.
+func TestParse_VlessReality(t *testing.T) {
+	line := "vless://1ae04638-e104-4981-8dde-08f24a1014a5@movies2.kovira3.ir:8090?encryption=none&fp=qq&pbk=FSGJiYtzXeGGDtYcrYGO89yeaxnr2aZqIU12ErTt42s&security=reality&sid=1b&sni=play.google.com&spx=%2F5ba417bcf26a54f&type=tcp#kovira"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("expected 1 proxy, got %d", len(proxies))
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	if streamSettings["security"] != "reality" {
+		t.Fatalf("expected reality security, got %+v", streamSettings)
+	}
+	realitySettings, ok := streamSettings["realitySettings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected realitySettings to be present, got %+v", streamSettings)
+	}
+	if realitySettings["publicKey"] != "FSGJiYtzXeGGDtYcrYGO89yeaxnr2aZqIU12ErTt42s" {
+		t.Fatalf("unexpected publicKey: %+v", realitySettings)
+	}
+	if realitySettings["shortId"] != "1b" {
+		t.Fatalf("unexpected shortId: %+v", realitySettings)
+	}
+	if realitySettings["fingerprint"] != "qq" {
+		t.Fatalf("unexpected fingerprint: %+v", realitySettings)
+	}
+	if realitySettings["spiderX"] != "/5ba417bcf26a54f" {
+		t.Fatalf("unexpected spiderX: %+v", realitySettings)
+	}
+	if realitySettings["serverName"] != "play.google.com" {
+		t.Fatalf("unexpected serverName: %+v", realitySettings)
+	}
+}
+
 func TestParse_Trojan(t *testing.T) {
 	line := "trojan://s3cr3t@9.10.11.12:443?sni=trojan.example#my-trojan"
 	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)

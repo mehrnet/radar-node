@@ -37,10 +37,21 @@ func xrayParams(outbound map[string]any) map[string]any {
 	}
 }
 
-func streamSettingsFor(network, security, host, path, sni string) map[string]any {
-	stream := map[string]any{"network": defaultStr(network, "tcp")}
-	effectiveSNI := firstNonEmpty(sni, host)
-	switch security {
+// streamSettingsOpts groups every URI query param streamSettingsFor
+// might need. The reality-specific fields (fingerprint/publicKey/
+// shortID/spiderX) are only ever populated by vless/trojan's own URI
+// query params -- vmess's share-standard JSON has no such fields, so
+// vmess always leaves them zero-valued, which is exactly "not present"
+// to the reality branch below.
+type streamSettingsOpts struct {
+	network, security, host, path, sni       string
+	fingerprint, publicKey, shortID, spiderX string
+}
+
+func streamSettingsFor(o streamSettingsOpts) map[string]any {
+	stream := map[string]any{"network": defaultStr(o.network, "tcp")}
+	effectiveSNI := firstNonEmpty(o.sni, o.host)
+	switch o.security {
 	case "tls":
 		tlsSettings := map[string]any{}
 		if effectiveSNI != "" {
@@ -49,20 +60,40 @@ func streamSettingsFor(network, security, host, path, sni string) map[string]any
 		stream["security"] = "tls"
 		stream["tlsSettings"] = tlsSettings
 	case "reality":
-		// Not a real Reality implementation -- just preserves the
-		// security tag and SNI so the config is at least self-
-		// consistent; full Reality support (short IDs, public keys)
-		// is out of scope for this pass.
+		// Unlike plain TLS, Reality's handshake genuinely can't
+		// complete without its own auth material (publicKey/shortID at
+		// minimum) -- a config missing these isn't "less secure", it's
+		// non-functional, xray rejects the connection outright and the
+		// probe just sits at "no data yet" forever. All four of these
+		// come straight from the same query params the subscription's
+		// own URI already carries (fp/pbk/sid/spx).
+		realitySettings := map[string]any{}
+		if effectiveSNI != "" {
+			realitySettings["serverName"] = effectiveSNI
+		}
+		if o.fingerprint != "" {
+			realitySettings["fingerprint"] = o.fingerprint
+		}
+		if o.publicKey != "" {
+			realitySettings["publicKey"] = o.publicKey
+		}
+		if o.shortID != "" {
+			realitySettings["shortId"] = o.shortID
+		}
+		if o.spiderX != "" {
+			realitySettings["spiderX"] = o.spiderX
+		}
 		stream["security"] = "reality"
+		stream["realitySettings"] = realitySettings
 	}
-	switch network {
+	switch o.network {
 	case "ws":
 		stream["wsSettings"] = map[string]any{
-			"path":    defaultStr(path, "/"),
-			"headers": map[string]any{"Host": firstNonEmpty(host, effectiveSNI)},
+			"path":    defaultStr(o.path, "/"),
+			"headers": map[string]any{"Host": firstNonEmpty(o.host, effectiveSNI)},
 		}
 	case "grpc":
-		stream["grpcSettings"] = map[string]any{"serviceName": path}
+		stream["grpcSettings"] = map[string]any{"serviceName": o.path}
 	}
 	return stream
 }

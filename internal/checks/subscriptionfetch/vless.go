@@ -35,7 +35,10 @@ func parseVless(line string) (DiscoveredProxy, error) {
 				}},
 			}},
 		},
-		"streamSettings": streamSettingsFor(q.Get("type"), q.Get("security"), q.Get("host"), q.Get("path"), q.Get("sni")),
+		"streamSettings": streamSettingsFor(streamSettingsOpts{
+			network: q.Get("type"), security: q.Get("security"), host: q.Get("host"), path: q.Get("path"), sni: q.Get("sni"),
+			fingerprint: q.Get("fp"), publicKey: q.Get("pbk"), shortID: q.Get("sid"), spiderX: q.Get("spx"),
+		}),
 	}
 
 	return DiscoveredProxy{

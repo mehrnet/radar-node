@@ -57,7 +57,7 @@ func parseVmess(line string) (DiscoveredProxy, error) {
 				}},
 			}},
 		},
-		"streamSettings": streamSettingsFor(v.Net, tlsToSecurity(v.TLS), v.Host, v.Path, v.SNI),
+		"streamSettings": streamSettingsFor(streamSettingsOpts{network: v.Net, security: tlsToSecurity(v.TLS), host: v.Host, path: v.Path, sni: v.SNI}),
 	}
 
 	return DiscoveredProxy{

@@ -37,7 +37,10 @@ func parseTrojan(line string) (DiscoveredProxy, error) {
 				"password": password,
 			}},
 		},
-		"streamSettings": streamSettingsFor(q.Get("type"), security, q.Get("host"), q.Get("path"), q.Get("sni")),
+		"streamSettings": streamSettingsFor(streamSettingsOpts{
+			network: q.Get("type"), security: security, host: q.Get("host"), path: q.Get("path"), sni: q.Get("sni"),
+			fingerprint: q.Get("fp"), publicKey: q.Get("pbk"), shortID: q.Get("sid"), spiderX: q.Get("spx"),
+		}),
 	}
 
 	return DiscoveredProxy{
