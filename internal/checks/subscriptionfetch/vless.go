@@ -42,9 +42,10 @@ func parseVless(line string) (DiscoveredProxy, error) {
 	}
 
 	return DiscoveredProxy{
-		Name:   defaultStr(u.Fragment, host),
-		Prober: "xray",
-		Target: connectivityTestTarget,
-		Params: xrayParams(outbound),
+		Name:     defaultStr(u.Fragment, host),
+		Prober:   "xray",
+		Target:   connectivityTestTarget,
+		Params:   xrayParams(outbound),
+		Identity: xrayIdentity("vless", host, port, uuid, q.Get("type"), q.Get("security"), q.Get("host"), q.Get("path"), q.Get("pbk")),
 	}, nil
 }

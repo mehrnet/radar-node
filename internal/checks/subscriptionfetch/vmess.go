@@ -61,10 +61,11 @@ func parseVmess(line string) (DiscoveredProxy, error) {
 	}
 
 	return DiscoveredProxy{
-		Name:   defaultStr(v.Ps, v.Add),
-		Prober: "xray",
-		Target: connectivityTestTarget,
-		Params: xrayParams(outbound),
+		Name:     defaultStr(v.Ps, v.Add),
+		Prober:   "xray",
+		Target:   connectivityTestTarget,
+		Params:   xrayParams(outbound),
+		Identity: xrayIdentity("vmess", v.Add, port, v.ID, v.Net, tlsToSecurity(v.TLS), v.Host, v.Path, ""),
 	}, nil
 }
 

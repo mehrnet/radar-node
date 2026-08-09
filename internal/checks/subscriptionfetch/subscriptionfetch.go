@@ -23,13 +23,22 @@ import (
 // DiscoveredProxy is one entry in the unified list -- enough to
 // construct an ordinary probe from directly: Prober/Target/Params are
 // exactly a probe's own fields of the same name. radar-api computes
-// each entry's own content hash from Params (and Prober/Target) once
-// it receives this list; nothing here is content-hash-aware.
+// each entry's own content hash from Identity (falling back to Params
+// when empty) and Prober/Target once it receives this list; nothing
+// here is content-hash-aware.
+//
+// Identity, when set, is a stable "same server" key deliberately
+// narrower than Params -- see xrayIdentity's own comment for exactly
+// why this exists and what it excludes. Left empty for every parser
+// whose own Params never rotate on their own to begin with (plain tcp,
+// shadowsocks), in which case radar-api falls back to hashing Params
+// directly, same as before this field existed.
 type DiscoveredProxy struct {
-	Name   string         `json:"name"`
-	Prober string         `json:"prober"`
-	Target string         `json:"target"`
-	Params map[string]any `json:"params"`
+	Name     string         `json:"name"`
+	Prober   string         `json:"prober"`
+	Target   string         `json:"target"`
+	Params   map[string]any `json:"params"`
+	Identity string         `json:"identity,omitempty"`
 }
 
 type Checker struct{}

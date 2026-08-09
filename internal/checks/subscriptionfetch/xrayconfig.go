@@ -1,5 +1,7 @@
 package subscriptionfetch
 
+import "fmt"
+
 // socksInboundPort is a fixed placeholder, not a real port anyone
 // binds to -- xray-prepare.sh only ever uses a config's own declared
 // socks_port as a *label* to find which inbound to rewrite onto
@@ -96,6 +98,24 @@ func streamSettingsFor(o streamSettingsOpts) map[string]any {
 		stream["grpcSettings"] = map[string]any{"serviceName": o.path}
 	}
 	return stream
+}
+
+// xrayIdentity builds the stable "same server" key radar-api's own
+// computeContentHash prefers over hashing the raw params blob -- see
+// its comment for the production report this fixes: a Reality-secured
+// config's serverName/shortId/spiderX/fingerprint (exactly the four
+// fields deliberately left out of this function's own parameters)
+// rotate every few minutes as normal camouflage, with the underlying
+// server completely unchanged. Hashing the full params treated every
+// rotation as a brand new proxy -- archiving the "old" probe and
+// creating a fresh one, losing all its check history -- on every
+// single subscription re-fetch. publicKey is kept (it's the server's
+// own Reality keypair, not something that rotates per-connection the
+// way the other four do) since it's still a meaningful part of "is
+// this actually the same server" for two configs that otherwise
+// collide on host/port/credential alone.
+func xrayIdentity(protocol, address string, port int, credential, network, security, host, path, publicKey string) string {
+	return fmt.Sprintf("%s|%s|%d|%s|%s|%s|%s|%s|%s", protocol, address, port, credential, network, security, host, path, publicKey)
 }
 
 func defaultStr(v, def string) string {

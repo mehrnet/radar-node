@@ -2,6 +2,7 @@ package subscriptionfetch_test
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"github.com/mehrnet/radar-node/internal/checks/subscriptionfetch"
@@ -119,6 +120,46 @@ func TestParse_VlessReality(t *testing.T) {
 	}
 	if realitySettings["serverName"] != "play.google.com" {
 		t.Fatalf("unexpected serverName: %+v", realitySettings)
+	}
+}
+
+// Regression for a real production report: a Reality-secured config's
+// own serverName/shortId/spiderX/fingerprint rotate every few minutes
+// as normal camouflage, with the actual server completely unchanged.
+// radar-api hashes Identity (when set) instead of the raw params
+// precisely so that rotation doesn't read as a brand new proxy -- see
+// subscriptionMaterialize.ts's own computeContentHash comment. This
+// locks in the two properties that matter: identical except for those
+// four fields -> identical Identity; a genuinely different server
+// (even sharing everything else) -> a different one.
+func TestParse_VlessRealityIdentityStableAcrossRotation(t *testing.T) {
+	base := "vless://1ae04638-e104-4981-8dde-08f24a1014a5@movies2.kovira3.ir:8090?encryption=none&security=reality&type=tcp#kovira"
+	rotated := base + "&fp=qq&pbk=SAMEKEY&sid=1b&sni=play.google.com&spx=%2Fone"
+	rotatedAgain := base + "&fp=chrome&pbk=SAMEKEY&sid=9f&sni=www.example.com&spx=%2Ftwo"
+
+	p1, err := subscriptionfetch.Parse([]byte(rotated), subscriptionfetch.XrayURIList)
+	if err != nil || len(p1) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, p1)
+	}
+	p2, err := subscriptionfetch.Parse([]byte(rotatedAgain), subscriptionfetch.XrayURIList)
+	if err != nil || len(p2) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, p2)
+	}
+	if p1[0].Identity == "" {
+		t.Fatalf("expected a non-empty identity")
+	}
+	if p1[0].Identity != p2[0].Identity {
+		t.Fatalf("expected identity to survive fp/sid/sni/spx rotation, got %q vs %q", p1[0].Identity, p2[0].Identity)
+	}
+
+	// A genuinely different server (different host) must not collide.
+	differentServer := strings.Replace(rotated, "movies2.kovira3.ir", "movies3.kovira3.ir", 1)
+	p3, err := subscriptionfetch.Parse([]byte(differentServer), subscriptionfetch.XrayURIList)
+	if err != nil || len(p3) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, p3)
+	}
+	if p3[0].Identity == p1[0].Identity {
+		t.Fatalf("expected a different host to produce a different identity")
 	}
 }
 
