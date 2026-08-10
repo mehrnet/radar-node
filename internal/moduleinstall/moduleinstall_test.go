@@ -459,3 +459,147 @@ collect:
 		t.Errorf("installed binary content = %q, want %q", binData, binContent)
 	}
 }
+
+// Regression/feature for a real production report: install.sh re-runs
+// Install for every already-opted-in module on every single bare
+// re-run, by design (see this package's own doc comment) -- without a
+// skip when nothing's actually changed, that meant re-downloading the
+// full binary (xray alone is ~14MB) every time regardless, which over
+// a slow/proxied connection turned a "nothing to do" re-install into
+// several minutes of silent, seemingly-hung work.
+func TestInstall_SkipsReDownloadWhenAlreadyUpToDate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := moduleinstall.Config{ModulesDir: filepath.Join(dir, "modules.d"), ToolsDir: filepath.Join(dir, "tools")}
+
+	binContent := []byte("fake binary content")
+	archive := buildTarGz(t, "thing-bin", binContent)
+	checksum := sha256Hex(archive)
+	assetPath := fmt.Sprintf("/releases/thing_latest_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	var assetRequests, checksumRequests int
+	mux := http.NewServeMux()
+	var moduleYAML string
+	mux.HandleFunc("/modules/thing.yaml", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, moduleYAML) })
+	mux.HandleFunc(assetPath, func(w http.ResponseWriter, r *http.Request) {
+		assetRequests++
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Write(archive)
+	})
+	mux.HandleFunc(assetPath+".checksum.txt", func(w http.ResponseWriter, r *http.Request) {
+		checksumRequests++
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, checksum)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	moduleYAML = fmt.Sprintf(`
+name: thing
+version: "1.0-1"
+url: %s/modules/thing.yaml
+os: [%s]
+arch: [%s]
+install:
+  - name: thing-bin
+    kind: binary
+    url: %s/releases/thing_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/thing-bin
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`, srv.URL, runtime.GOOS, runtime.GOARCH, srv.URL)
+
+	if err := moduleinstall.Fetch(context.Background(), cfg, srv.URL+"/modules/thing.yaml"); err != nil {
+		t.Fatal(err)
+	}
+	if assetRequests != 1 {
+		t.Fatalf("expected exactly 1 asset request for the first install, got %d", assetRequests)
+	}
+	firstChecksumRequests := checksumRequests
+
+	// A bare re-run, same as install.sh's own "keep it updated"
+	// behavior -- nothing about the module changed server-side.
+	if err := moduleinstall.Install(context.Background(), cfg, "thing"); err != nil {
+		t.Fatal(err)
+	}
+	if assetRequests != 1 {
+		t.Errorf("expected the asset to NOT be re-downloaded when already up to date, but it was fetched %d times", assetRequests)
+	}
+	if checksumRequests <= firstChecksumRequests {
+		t.Errorf("expected the checksum sidecar to still be re-checked (that's how freshness is verified at all), but it wasn't")
+	}
+	binData, err := os.ReadFile(filepath.Join(cfg.ToolsDir, "thing-bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(binData) != string(binContent) {
+		t.Errorf("installed binary content = %q, want %q", binData, binContent)
+	}
+}
+
+// The mirror image of the above: a real change server-side (a new
+// version published under the same mutable "_latest_"-style URL)
+// must still be picked up, not permanently skipped just because
+// something with the same name was already installed once before.
+func TestInstall_ReDownloadsWhenChecksumChanged(t *testing.T) {
+	dir := t.TempDir()
+	cfg := moduleinstall.Config{ModulesDir: filepath.Join(dir, "modules.d"), ToolsDir: filepath.Join(dir, "tools")}
+
+	v1 := buildTarGz(t, "thing-bin", []byte("v1 content"))
+	v2 := buildTarGz(t, "thing-bin", []byte("v2 content"))
+	current := v1
+	assetPath := fmt.Sprintf("/releases/thing_latest_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	var assetRequests int
+	mux := http.NewServeMux()
+	var moduleYAML string
+	mux.HandleFunc("/modules/thing.yaml", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, moduleYAML) })
+	mux.HandleFunc(assetPath, func(w http.ResponseWriter, r *http.Request) {
+		assetRequests++
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Write(current)
+	})
+	mux.HandleFunc(assetPath+".checksum.txt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, sha256Hex(current))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	moduleYAML = fmt.Sprintf(`
+name: thing
+version: "1.0-1"
+url: %s/modules/thing.yaml
+os: [%s]
+arch: [%s]
+install:
+  - name: thing-bin
+    kind: binary
+    url: %s/releases/thing_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/thing-bin
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`, srv.URL, runtime.GOOS, runtime.GOARCH, srv.URL)
+
+	if err := moduleinstall.Fetch(context.Background(), cfg, srv.URL+"/modules/thing.yaml"); err != nil {
+		t.Fatal(err)
+	}
+
+	current = v2 // the mirror published a real update
+	if err := moduleinstall.Install(context.Background(), cfg, "thing"); err != nil {
+		t.Fatal(err)
+	}
+	if assetRequests != 2 {
+		t.Errorf("expected the changed asset to be re-downloaded (2 total requests), got %d", assetRequests)
+	}
+	binData, err := os.ReadFile(filepath.Join(cfg.ToolsDir, "thing-bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(binData) != "v2 content" {
+		t.Errorf("expected the binary to be updated to v2, got %q", binData)
+	}
+}

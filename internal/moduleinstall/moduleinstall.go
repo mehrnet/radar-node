@@ -3,10 +3,13 @@
 // remote binaries its install: list declares) and placing everything
 // this node's agent needs to load it, all driven by the module's own
 // already-parsed schema (internal/module) -- no separate shell
-// script, and no separate local state beside the module's own YAML
-// once it's installed. That YAML's own recorded url field is exactly
-// what a later --install-module <name> re-fetches from; there is
-// nothing else to keep in sync.
+// script. That YAML's own recorded url field is exactly what a later
+// --install-module <name> re-fetches from; there is nothing else to
+// keep in sync, beside one small sidecar per installed binary
+// dependency (see installDependency's own comment) recording which
+// archive checksum it was last verified against, purely so a bare
+// re-run that finds nothing has actually changed can skip re-
+// downloading it entirely.
 package moduleinstall
 
 import (
@@ -76,8 +79,56 @@ func fetchURLWithType(ctx context.Context, client *http.Client, u string) ([]byt
 	// 200MB safety cap -- comfortably over any real release asset
 	// (the largest today, xray, is ~14MB), just a backstop against a
 	// misbehaving/malicious server never closing the connection.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	body := io.Reader(resp.Body)
+	// Only for a response actually worth reporting on -- the module
+	// YAML and .checksum.txt sidecars fetchURL/fetchURLWithType also
+	// serve are a few hundred bytes at most and complete before a
+	// human could ever notice, unlike the real binaries (xray alone
+	// is ~14MB) this same function fetches too. A slow or heavily
+	// proxied connection could otherwise sit here, silently, for
+	// minutes -- observed in production as a genuinely alarming
+	// "did this hang?" with zero output the whole time.
+	if resp.ContentLength >= progressMinBytes {
+		body = &progressReader{Reader: resp.Body, label: filepath.Base(u), total: resp.ContentLength, lastReport: time.Now()}
+	}
+	data, err := io.ReadAll(io.LimitReader(body, 200<<20))
 	return data, resp.Header.Get("Content-Type"), err
+}
+
+const progressMinBytes = 1 << 20 // 1MB
+
+// progressReader wraps a response body, printing a periodic "label:
+// NN.N%" line to stderr (in place, via \r, matching install.sh's own
+// curl --progress-bar convention) as bytes actually come in -- see
+// fetchURLWithType's own comment on why this matters. Throttled to
+// twice a second rather than on every Read: a fast local connection
+// can call Read many times a second, and flushing a terminal line
+// that often adds real overhead for no visible benefit.
+type progressReader struct {
+	io.Reader
+	label      string
+	total      int64
+	read       int64
+	lastReport time.Time
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.Reader.Read(b)
+	p.read += int64(n)
+	now := time.Now()
+	done := err != nil
+	if done || now.Sub(p.lastReport) >= 500*time.Millisecond {
+		p.lastReport = now
+		pct := float64(p.read) / float64(p.total) * 100
+		if pct > 100 {
+			pct = 100
+		}
+		fmt.Fprintf(os.Stderr, "\r  %s: %.1f%%", p.label, pct)
+		if done {
+			fmt.Fprintln(os.Stderr)
+		}
+	}
+	return n, err
 }
 
 // fetchImmutableAsset retries fetchURLWithType a handful of times when
@@ -213,6 +264,7 @@ func Remove(cfg Config, name string) error {
 	for _, dep := range m.Install {
 		if destPath, err := resolveExistingPath(dep.Path, cfg); err == nil {
 			_ = os.Remove(destPath)
+			_ = os.Remove(destPath + ".checksum") // see installDependency's own comment; harmless no-op for a file-kind dep, which never has one
 		}
 	}
 	return os.Remove(yamlPath)
@@ -280,16 +332,42 @@ func installDependency(ctx context.Context, client *http.Client, cfg Config, dep
 		return nil
 	}
 
+	// The checksum sidecar first, on its own -- a few dozen bytes,
+	// negligible even on a bad connection -- before ever touching the
+	// real asset (often 10s of MB). install.sh re-runs Install for
+	// every already-opted-in module on every single bare re-run, by
+	// design, to catch a real update (see this package's own doc
+	// comment); without this short-circuit, that meant re-downloading
+	// xray/wireguard/openvpn's full binaries from scratch every time
+	// regardless of whether anything had actually changed, which is
+	// most of the time in practice -- and painfully slow to boot,
+	// silently so, over exactly the kind of degraded/proxied
+	// connection this node might be stuck behind.
+	checksumURL := assetURL + ".checksum.txt"
+	checksumData, err := fetch(ctx, client, checksumURL)
+	if err != nil {
+		return fmt.Errorf("install %q: fetch checksum %s: %w", dep.Name, checksumURL, err)
+	}
+	expected := strings.TrimSpace(string(checksumData))
+
+	// markerPath records which archive checksum destPath was last
+	// verified against -- not destPath's own hash, which can't be
+	// compared against expected directly (expected is the *archive*'s
+	// checksum, destPath holds the binary *extracted* from it, never
+	// byte-identical to its own container). A match here, with the
+	// binary still actually present, means this exact version is
+	// already correctly installed: nothing left to do.
+	markerPath := destPath + ".checksum"
+	if existing, err := os.ReadFile(markerPath); err == nil && strings.TrimSpace(string(existing)) == expected {
+		if _, err := os.Stat(destPath); err == nil {
+			return nil
+		}
+	}
+
 	assetData, err := fetch(ctx, client, assetURL)
 	if err != nil {
 		return fmt.Errorf("install %q: fetch %s: %w", dep.Name, assetURL, err)
 	}
-
-	checksumData, err := fetch(ctx, client, assetURL+".checksum.txt")
-	if err != nil {
-		return fmt.Errorf("install %q: fetch checksum %s: %w", dep.Name, assetURL+".checksum.txt", err)
-	}
-	expected := strings.TrimSpace(string(checksumData))
 	sum := sha256.Sum256(assetData)
 	actual := hex.EncodeToString(sum[:])
 	if expected != actual {
@@ -302,6 +380,9 @@ func installDependency(ctx context.Context, client *http.Client, cfg Config, dep
 	}
 	if err := os.WriteFile(destPath, binData, 0o755); err != nil {
 		return fmt.Errorf("write %s: %w", destPath, err)
+	}
+	if err := os.WriteFile(markerPath, []byte(expected), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", markerPath, err)
 	}
 	return nil
 }
