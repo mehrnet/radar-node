@@ -460,6 +460,36 @@ fetch_with_retry() {
   done
 }
 
+# Same backoff shape as fetch_with_retry above, generalized to retry
+# an arbitrary command rather than one specific curl_get_with_type call
+# -- used for module fetch/install (see fetch_or_update_module further
+# down), which delegates its own HTTP work to the just-installed
+# radar-node binary rather than curl directly, so there's no shared
+# content-type check to gate on here; any nonzero exit just retries.
+# Observed in production: a module refresh's own single request
+# failing (a transient proxy/network hiccup, same kind fetch_with_retry
+# above already tolerates) used to abort this *entire* script under
+# set -e -- even once the actual agent binary a few steps earlier had
+# already installed successfully, "install failed" was a genuinely
+# misleading thing to report over one flaky request for an optional
+# module refresh.
+run_with_retry() {
+  # $1 = human-readable label for logging, $2.. = the command to run
+  _label="$1"
+  shift
+  _attempt=1
+  _max_attempts=5
+  while :; do
+    if "$@"; then return 0; fi
+    if [ "$_attempt" -ge "$_max_attempts" ]; then
+      return 1
+    fi
+    log "  ${_label} failed (attempt ${_attempt}/${_max_attempts}) -- retrying in $((_attempt * 2))s..."
+    sleep $((_attempt * 2))
+    _attempt=$((_attempt + 1))
+  done
+}
+
 log "downloading ${ASSET}..."
 if [ -n "$NODE_VERSION" ]; then
   fetch_with_retry "${BASE_URL}/${ASSET}" "${WORKDIR}/${ASSET}" "${ASSET}" || err "failed to download ${ASSET} after retries"
@@ -630,9 +660,9 @@ fetch_or_update_module() {
   # $1 = module name (matches its own install/modules/<name>.yaml)
   name="$1"
   if [ -f "${MODULES_DIR}/${name}.yaml" ]; then
-    "${INSTALL_BIN_DIR}/${BIN_NAME}" install-module "$name" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR" ${PROXY:+--proxy "$PROXY"}
+    run_with_retry "install-module ${name}" "${INSTALL_BIN_DIR}/${BIN_NAME}" install-module "$name" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR" ${PROXY:+--proxy "$PROXY"}
   else
-    "${INSTALL_BIN_DIR}/${BIN_NAME}" fetch-module "${MODULES_BASE}/${name}.yaml" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR" ${PROXY:+--proxy "$PROXY"}
+    run_with_retry "fetch-module ${name}" "${INSTALL_BIN_DIR}/${BIN_NAME}" fetch-module "${MODULES_BASE}/${name}.yaml" --modules-dir "$MODULES_DIR" --tools-dir "$TOOLS_DIR" ${PROXY:+--proxy "$PROXY"}
   fi
 }
 
