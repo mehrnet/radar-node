@@ -603,3 +603,96 @@ collect:
 		t.Errorf("expected the binary to be updated to v2, got %q", binData)
 	}
 }
+
+// Regression for a real production report: a dropped connection mid-
+// download used to only retry for a version-pinned dependency
+// (fetchImmutableAsset, now generalized into fetchAssetWithRetry) --
+// a mutable "_latest_"-style one (no `version:` on its own install:
+// entry) had zero retry tolerance at all inside the Go binary itself,
+// relying entirely on install.sh's own outer whole-command retry to
+// paper over it. This locks in that a genuine network failure now
+// retries the big binary fetch directly, regardless of version-pinning.
+func TestInstall_RetriesBigBinaryFetchOnNetworkErrorEvenWhenNotVersionPinned(t *testing.T) {
+	dir := t.TempDir()
+	cfg := moduleinstall.Config{ModulesDir: filepath.Join(dir, "modules.d"), ToolsDir: filepath.Join(dir, "tools")}
+
+	binContent := []byte("fake binary content")
+	archive := buildTarGz(t, "thing-bin", binContent)
+	checksum := sha256Hex(archive)
+	assetPath := fmt.Sprintf("/releases/thing_latest_%s_%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+
+	var assetRequests int
+	mux := http.NewServeMux()
+	var moduleYAML string
+	mux.HandleFunc("/modules/thing.yaml", func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, moduleYAML) })
+	mux.HandleFunc(assetPath, func(w http.ResponseWriter, r *http.Request) {
+		assetRequests++
+		if assetRequests <= 2 {
+			// Simulate a dropped connection mid-response -- the exact
+			// shape observed in production (curl: (56) OpenSSL
+			// SSL_read: ... unexpected eof while reading) -- by
+			// hijacking the raw connection and closing it without ever
+			// writing a valid HTTP response at all. Twice, deliberately
+			// -- not once: net/http's own Transport silently retries
+			// once on its own whenever it's reusing an already-
+			// successful pooled connection (exactly what happens here,
+			// since the checksum request right before this one already
+			// primed that same connection), regardless of any retry
+			// logic of this package's own -- a single failure wouldn't
+			// actually exercise fetchAssetWithRetry at all, old code or
+			// new. The 2nd failure is what a real assertion needs.
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("ResponseWriter doesn't support hijacking")
+			}
+			conn, _, err := hj.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Write(archive)
+	})
+	mux.HandleFunc(assetPath+".checksum.txt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, checksum)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Deliberately no `version:` on the install: entry -- a mutable
+	// "_latest_"-style dependency, exactly the case that had zero
+	// retry tolerance before fetchAssetWithRetry unified this.
+	moduleYAML = fmt.Sprintf(`
+name: thing
+version: "1.0-1"
+url: %s/modules/thing.yaml
+os: [%s]
+arch: [%s]
+install:
+  - name: thing-bin
+    kind: binary
+    url: %s/releases/thing_latest_{os}_{arch}.{ext}
+    path: __TOOLS_DIR__/thing-bin
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+`, srv.URL, runtime.GOOS, runtime.GOARCH, srv.URL)
+
+	if err := moduleinstall.Fetch(context.Background(), cfg, srv.URL+"/modules/thing.yaml"); err != nil {
+		t.Fatalf("expected Fetch to retry past the dropped connection and succeed, got: %v", err)
+	}
+	if assetRequests < 3 {
+		t.Errorf("expected at least 3 requests for the asset (two dropped, one real), got %d", assetRequests)
+	}
+	binData, err := os.ReadFile(filepath.Join(cfg.ToolsDir, "thing-bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(binData) != string(binContent) {
+		t.Errorf("installed binary content = %q, want %q", binData, binContent)
+	}
+}

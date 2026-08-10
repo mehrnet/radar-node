@@ -131,24 +131,28 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// fetchImmutableAsset retries fetchURLWithType a handful of times when
-// the response looks like radar.mehrnet.com's own SPA fallback page
-// (text/html) rather than a real asset. Can't tell them apart by HTTP
-// status: that origin serves a 200 (its own index.html) for any
-// unmatched path rather than a real 404, so a not-yet-published
-// version-pinned asset (see module.InstallDependency's own doc
-// comment on {version}) looks identical to a broken URL at the
-// status-code level -- Content-Type still tells them apart (a real
-// asset is application/gzip/zip or text/plain for the checksum
-// sidecar; the fallback is always text/html). Only used for version-
-// pinned dependencies (installDependency below); anything still on a
-// mutable "_latest_"-style URL keeps the original single-attempt
-// fetchURL, unchanged.
-func fetchImmutableAsset(ctx context.Context, client *http.Client, u string) ([]byte, error) {
+// fetchAssetWithRetry retries fetchURLWithType up to 5 times, same
+// backoff shape as install.sh's own shell-side fetch_with_retry/
+// run_with_retry, on *any* failure -- a genuine network error (a
+// dropped connection, the exact shape observed in production on a
+// node behind a flaky proxy) for every dependency this is used for,
+// version-pinned or not. When versioned is true, a text/html response
+// is treated as one more reason to retry too: that specifically means
+// radar.mehrnet.com's own SPA fallback page (its origin serves a 200,
+// its own index.html, for any unmatched path rather than a real 404),
+// which for a permanently-immutable version-pinned asset (see
+// module.InstallDependency's own doc comment on {version}) means "not
+// published yet," worth waiting out rather than surfacing as a
+// failure immediately. A mutable "_latest_"-style URL has no such
+// "not published yet" state to wait out -- it's either there or
+// genuinely broken -- so that specific check is skipped when
+// versioned is false; a real network error still retries either way.
+func fetchAssetWithRetry(ctx context.Context, client *http.Client, u string, versioned bool) ([]byte, error) {
 	const maxAttempts = 5
 	for attempt := 1; ; attempt++ {
 		data, ctype, err := fetchURLWithType(ctx, client, u)
-		if err == nil && !strings.HasPrefix(ctype, "text/html") {
+		notPublishedYet := versioned && err == nil && strings.HasPrefix(ctype, "text/html")
+		if err == nil && !notPublishedYet {
 			return data, nil
 		}
 		if attempt >= maxAttempts {
@@ -305,15 +309,15 @@ func installDependency(ctx context.Context, client *http.Client, cfg Config, dep
 	}
 
 	assetURL := dep.ResolveURL(runtime.GOOS, runtime.GOARCH)
-	// A version-pinned dependency points at a permanently-immutable
-	// asset -- worth retrying past a not-yet-published response. One
-	// still on a mutable "_latest_"-style URL isn't (there's no
-	// "not published yet" state to wait out on a target that's always
-	// "published," just possibly stale), so it keeps the original
-	// single-attempt fetch.
-	fetch := fetchURL
-	if dep.Version != "" {
-		fetch = fetchImmutableAsset
+	// Every fetch below retries on a real network failure regardless
+	// of version-pinning (see fetchAssetWithRetry's own comment) --
+	// versioned only changes whether a text/html response also counts
+	// as "worth retrying" (a not-yet-published version-pinned asset)
+	// or not (a mutable "_latest_"-style URL is never "not published
+	// yet," just possibly stale).
+	versioned := dep.Version != ""
+	fetch := func(ctx context.Context, client *http.Client, u string) ([]byte, error) {
+		return fetchAssetWithRetry(ctx, client, u, versioned)
 	}
 
 	if dep.IsFile() {
