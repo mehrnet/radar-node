@@ -1,13 +1,16 @@
 package module_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mehrnet/radar-node/internal/module"
+	"github.com/mehrnet/radar-node/internal/probe"
 )
 
 func writeFile(t *testing.T, dir, name, content string) {
@@ -403,6 +406,39 @@ collect:
 `)
 	if _, err := module.LoadDir(dir); err != nil {
 		t.Fatalf("expected all fixed + param.* placeholders to be accepted, got %v", err)
+	}
+}
+
+func TestLoadDir_AcceptsModePlaceholder(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", `
+name: mode-mod
+run:
+  command: ["echo", "{{mode}}"]
+collect:
+  format: writeout_json
+`)
+	if _, err := module.LoadDir(dir); err != nil {
+		t.Fatalf("expected {{mode}} to be accepted, got %v", err)
+	}
+}
+
+func TestChecker_ResolvesModePlaceholder(t *testing.T) {
+	m := loadOne(t, `
+name: mode-echo
+run:
+  command: ["echo", "latency_ms=1", "{{mode}}"]
+collect:
+  format: regex
+  pattern: "latency_ms=(?P<latency_ms>[0-9.]+) (?P<mode>\\w+)"
+`)
+	c := module.NewChecker(m)
+	res := c.Check(context.Background(), probe.Options{Target: "x", Timeout: time.Second, Mode: probe.ModeHard, Seq: 1})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	if res.Extra["mode"] != "hard" {
+		t.Fatalf("expected {{mode}} to resolve to \"hard\", got %v", res.Extra["mode"])
 	}
 }
 

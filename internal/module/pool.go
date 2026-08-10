@@ -99,6 +99,7 @@ type jobJSON struct {
 	Target    string         `json:"target"`
 	AllocPort int            `json:"alloc_port"`
 	TimeoutMs int64          `json:"timeout_ms"`
+	Mode      string         `json:"mode,omitempty"`
 	Params    map[string]any `json:"params,omitempty"`
 }
 
@@ -211,6 +212,7 @@ func (c PoolChecker) testJob(ctx context.Context, j poolJob) probe.Result {
 	ec := execContext{
 		Target:         opts.Target,
 		TimeoutMs:      opts.Timeout.Milliseconds(),
+		Mode:           string(opts.Mode),
 		Params:         opts.Params,
 		ParamsJSONPath: paramsPath,
 		AllocPort:      j.port,
@@ -252,6 +254,7 @@ func writeJobsJSON(jobs []poolJob) (string, func(), error) {
 			Target:    j.opts.Target,
 			AllocPort: j.port,
 			TimeoutMs: j.opts.Timeout.Milliseconds(),
+			Mode:      string(j.opts.Mode),
 			Params:    j.opts.Params,
 		}
 	}

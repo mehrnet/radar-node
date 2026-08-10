@@ -32,6 +32,16 @@ var fixedPlaceholders = map[string]bool{
 	"timeout_ms":  true,
 	"params_json": true,
 	"alloc_port":  true,
+	// mode is the probe's own probe.Mode ("warm" or "hard"), passed
+	// through verbatim -- a generic escape hatch for any module whose
+	// engine can meaningfully behave differently for "realistic
+	// steady-state" vs. "cold path from nothing" (see probe.Mode's own
+	// doc comment), the same way xray's run step uses it to warm up a
+	// muxed connection before the timed request rather than measuring
+	// a fresh handshake every single check. Left for the module to
+	// interpret or ignore entirely -- nothing here enforces any
+	// particular behavior per mode.
+	"mode": true,
 	// jobs_json/config_path are pool-only (see PoolSpec in module.go):
 	// jobs_json is the path to this instance's whole job batch, given
 	// to build_config; config_path is where build_config writes the
@@ -70,6 +80,7 @@ func validatePlaceholders(arg string) error {
 type execContext struct {
 	Target         string
 	TimeoutMs      int64
+	Mode           string
 	Params         map[string]any
 	ParamsJSONPath string
 	AllocPort      int
@@ -101,6 +112,8 @@ func (ec execContext) resolve(argv []string) []string {
 				return ec.ParamsJSONPath
 			case name == "alloc_port":
 				return strconv.Itoa(ec.AllocPort)
+			case name == "mode":
+				return ec.Mode
 			case name == "jobs_json":
 				return ec.JobsJSONPath
 			case name == "config_path":

@@ -80,6 +80,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	ec := execContext{
 		Target:         opts.Target,
 		TimeoutMs:      opts.Timeout.Milliseconds(),
+		Mode:           string(opts.Mode),
 		Params:         opts.Params,
 		ParamsJSONPath: paramsPath,
 		AllocPort:      port,
