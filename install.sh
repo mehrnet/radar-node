@@ -282,14 +282,43 @@ check_clock_skew() {
   [ "$skew" -gt 10 ] || return 0
 
   warn "this machine's clock looks ~${skew}s off from ${API_URL}'s own -- Reality/TLS-secured proxy checks (xray) fail outright on skew this size, usually with no error that points at the clock at all"
-  if [ "$OS" = "linux" ] && [ "$IS_ROOT" = "1" ] && command -v timedatectl >/dev/null 2>&1; then
-    log "enabling NTP time sync (timedatectl set-ntp true) -- convergence can take a few minutes, this doesn't step the clock instantly"
-    timedatectl set-ntp true 2>/dev/null || warn "timedatectl set-ntp true failed -- fix the clock manually (chrony/systemd-timesyncd/ntpd)"
-  elif [ "$OS" = "darwin" ] && [ "$IS_ROOT" = "1" ] && command -v sntp >/dev/null 2>&1; then
-    log "correcting the clock now (sntp -sS time.apple.com)"
-    sntp -sS time.apple.com 2>/dev/null || warn "sntp failed -- correct the clock manually (System Settings > General > Date & Time > Set automatically)"
-  else
-    warn "fix this manually: enable NTP (chrony/systemd-timesyncd/ntpd on Linux; System Settings > Date & Time > Set automatically on macOS), or re-run this installer as root to have it attempt the fix automatically"
+
+  if [ "$IS_ROOT" != "1" ]; then
+    warn "re-run this installer as root to have it correct the clock automatically"
+    return 0
+  fi
+
+  # Set straight from the same HTTPS response that just diagnosed the
+  # skew, before even trying real NTP -- deliberately, not just as a
+  # fallback. Real NTP (UDP/123, to whatever pool a distro defaults to)
+  # is routinely one of the first things blocked in exactly the
+  # network environments this node tends to get deployed into --
+  # nothing about enabling it (timedatectl/sntp below) fails loudly
+  # when that's the case, it just silently never converges, clock
+  # still wrong, no error, no warning, the same mystery all over again.
+  # This has no such dependency: if $API_URL was reachable enough to
+  # get this far at all, this fix path is too, no matter what happens
+  # to be blocking NTP specifically -- accurate to roughly the HTTPS
+  # round trip (a couple seconds at most), comfortably inside the
+  # threshold that actually matters.
+  if [ "$OS" = "linux" ]; then
+    log "setting the clock directly from ${API_URL}'s own Date header (works even when real NTP is itself blocked)"
+    date -s "@${server_epoch}" >/dev/null 2>&1 || date -s "$server_date" >/dev/null 2>&1 || warn "couldn't set the clock directly -- fix it manually"
+  elif [ "$OS" = "darwin" ]; then
+    log "setting the clock directly from ${API_URL}'s own Date header (works even when real NTP is itself blocked)"
+    date -f '%a, %d %b %Y %T %Z' "$server_date" >/dev/null 2>&1 || warn "couldn't set the clock directly -- fix it manually"
+  fi
+
+  # Also enable real NTP, best-effort, for ongoing accuracy going
+  # forward -- the fix above is a one-shot snapshot; NTP is what keeps
+  # the clock from just drifting right back out over the following
+  # days or weeks. Silently left unconverged if it can't reach out --
+  # that's fine, the one-shot fix above already solved the actual
+  # problem, this is purely a nice-to-have on top of it.
+  if [ "$OS" = "linux" ] && command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-ntp true >/dev/null 2>&1 || true
+  elif [ "$OS" = "darwin" ] && command -v sntp >/dev/null 2>&1; then
+    sntp -sS time.apple.com >/dev/null 2>&1 || true
   fi
 }
 # Subshelled so a strict-mode failure inside -- this function inherits
