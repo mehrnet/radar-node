@@ -328,12 +328,22 @@ check_clock_skew() {
 # effort check -- can never take the real installation down with it.
 ( check_clock_skew ) || true
 
+# --progress-bar (a compact single-line meter) instead of -s -- these
+# two are only ever used for the real downloads (the radar-node
+# tarball itself, its checksum sidecar), so there's real, sometimes
+# multi-second-plus transfer time worth showing progress for, unlike
+# every other curl call in this script (health checks, credential
+# verification, ...) which stay silent on purpose. Goes to stderr, same
+# as this script's own log()/warn() output and curl's own error text,
+# so it interleaves with those rather than corrupting curl_get_with_
+# type's own stdout capture (its -w output, read via command
+# substitution) or fetch_with_retry's per-attempt log lines.
 curl_get() {
   # $1 = url, $2 = output path
   if [ -n "$PROXY" ]; then
-    curl -fsSL --proxy "$PROXY" "$1" -o "$2"
+    curl -fL --progress-bar --proxy "$PROXY" "$1" -o "$2"
   else
-    curl -fsSL "$1" -o "$2"
+    curl -fL --progress-bar "$1" -o "$2"
   fi
 }
 
@@ -344,9 +354,9 @@ curl_get() {
 curl_get_with_type() {
   # $1 = url, $2 = output path
   if [ -n "$PROXY" ]; then
-    curl -fsSL --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
+    curl -fL --progress-bar --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
   else
-    curl -fsSL -w '%{content_type}' "$1" -o "$2"
+    curl -fL --progress-bar -w '%{content_type}' "$1" -o "$2"
   fi
 }
 
