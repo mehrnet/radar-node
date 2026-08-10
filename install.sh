@@ -88,6 +88,7 @@ EOF
 }
 
 log() { printf '==> %s\n' "$*" >&2; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
 err() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 for arg in "$@"; do
@@ -245,6 +246,58 @@ fi
 
 command -v curl >/dev/null 2>&1 || err "curl is required"
 command -v tar >/dev/null 2>&1 || err "tar is required"
+
+# ---------------------------------------------------------------------
+# A wildly wrong system clock breaks far more than this installer --
+# xray's own Reality handshake carries a timestamp-based anti-replay
+# check tight enough that even a one-minute clock skew makes *every*
+# Reality-secured proxy check fail outright, with an error that never
+# points anywhere near "clock" (observed in production: a node running
+# ~49s fast failed 99%+ of its xray checks while otherwise-identical
+# sibling nodes with a correct clock succeeded normally on the exact
+# same probes). Checked here, once, up front: cheap (one response's
+# own Date header, off a request this installer sends to $API_URL
+# regardless) and long before that failure mode would otherwise show
+# up as a mystery days or weeks later. Never fatal either way -- a
+# skewed clock doesn't stop the install, it just gets a loud warning
+# (and, where it's safe to, a fix attempt) so it isn't the next
+# person's multi-hour debugging session.
+# ---------------------------------------------------------------------
+check_clock_skew() {
+  headers="$(curl -s -D - -o /dev/null --max-time 5 ${PROXY:+--proxy "$PROXY"} "$API_URL/v1/health" 2>/dev/null)"
+  server_date="$(printf '%s' "$headers" | tr -d '\r' | awk -F': ' 'tolower($1)=="date"{print $2; exit}')"
+  [ -n "$server_date" ] || return 0 # couldn't determine the server's own clock -- not worth guessing further
+
+  # GNU date (-d, most Linux) and BSD/macOS date (-j -f) parse an RFC
+  # 7231 Date header differently -- try both, silently, since which
+  # one this host has is exactly what OS/ARCH detection above already
+  # had to figure out once, but redoing that here isn't worth it for
+  # a two-command try.
+  server_epoch="$(date -d "$server_date" +%s 2>/dev/null || date -j -f '%a, %d %b %Y %T %Z' "$server_date" +%s 2>/dev/null || true)"
+  [ -n "$server_epoch" ] || return 0
+
+  local_epoch="$(date +%s)"
+  skew=$((local_epoch - server_epoch))
+  [ "$skew" -lt 0 ] && skew=$((0 - skew))
+  [ "$skew" -gt 10 ] || return 0
+
+  warn "this machine's clock looks ~${skew}s off from ${API_URL}'s own -- Reality/TLS-secured proxy checks (xray) fail outright on skew this size, usually with no error that points at the clock at all"
+  if [ "$OS" = "linux" ] && [ "$IS_ROOT" = "1" ] && command -v timedatectl >/dev/null 2>&1; then
+    log "enabling NTP time sync (timedatectl set-ntp true) -- convergence can take a few minutes, this doesn't step the clock instantly"
+    timedatectl set-ntp true 2>/dev/null || warn "timedatectl set-ntp true failed -- fix the clock manually (chrony/systemd-timesyncd/ntpd)"
+  elif [ "$OS" = "darwin" ] && [ "$IS_ROOT" = "1" ] && command -v sntp >/dev/null 2>&1; then
+    log "correcting the clock now (sntp -sS time.apple.com)"
+    sntp -sS time.apple.com 2>/dev/null || warn "sntp failed -- correct the clock manually (System Settings > General > Date & Time > Set automatically)"
+  else
+    warn "fix this manually: enable NTP (chrony/systemd-timesyncd/ntpd on Linux; System Settings > Date & Time > Set automatically on macOS), or re-run this installer as root to have it attempt the fix automatically"
+  fi
+}
+# Subshelled so a strict-mode failure inside -- this function inherits
+# the parent script's own `set -e`, and something as ordinary as curl
+# timing out or `date -j` not existing on this platform would
+# otherwise abort the *entire* install over what's meant to be a best-
+# effort check -- can never take the real installation down with it.
+( check_clock_skew ) || true
 
 curl_get() {
   # $1 = url, $2 = output path
