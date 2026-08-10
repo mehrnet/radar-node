@@ -32,6 +32,16 @@ var fixedPlaceholders = map[string]bool{
 	"timeout_ms":  true,
 	"params_json": true,
 	"alloc_port":  true,
+	// jobs_json/config_path are pool-only (see PoolSpec in module.go):
+	// jobs_json is the path to this instance's whole job batch, given
+	// to build_config; config_path is where build_config writes the
+	// engine config that start then reads. Both are validated here
+	// alongside the non-pool placeholders rather than restricted to
+	// only appear in pool steps -- the same looseness prepare/run/
+	// teardown already have with each other (e.g. alloc_port is valid
+	// in teardown even though no module actually uses it there).
+	"jobs_json":   true,
+	"config_path": true,
 }
 
 var paramPlaceholderRe = regexp.MustCompile(`^param\.[a-zA-Z0-9_-]+$`)
@@ -52,13 +62,22 @@ func validatePlaceholders(arg string) error {
 	return nil
 }
 
-// execContext carries the resolved values for one Check() call.
+// execContext carries the resolved values for one Check() call, or,
+// for a pooled module (see pool.go), one instance-level step
+// (JobsJSONPath/ConfigPath, Target/Params/AllocPort left zero) or one
+// per-job Run step (Target/Params/AllocPort, JobsJSONPath/ConfigPath
+// left empty) -- never a mix of both within the same execContext.
 type execContext struct {
 	Target         string
 	TimeoutMs      int64
 	Params         map[string]any
 	ParamsJSONPath string
 	AllocPort      int
+	// JobsJSONPath/ConfigPath back {{jobs_json}}/{{config_path}},
+	// pool-only placeholders (see PoolSpec in module.go) resolved only
+	// for a pool's build_config/start/stop steps.
+	JobsJSONPath string
+	ConfigPath   string
 }
 
 // resolve substitutes every {{...}} in argv against ec. Any
@@ -82,6 +101,10 @@ func (ec execContext) resolve(argv []string) []string {
 				return ec.ParamsJSONPath
 			case name == "alloc_port":
 				return strconv.Itoa(ec.AllocPort)
+			case name == "jobs_json":
+				return ec.JobsJSONPath
+			case name == "config_path":
+				return ec.ConfigPath
 			case paramPlaceholderRe.MatchString(name):
 				return stringifyParam(ec.Params[name[len("param."):]])
 			default:

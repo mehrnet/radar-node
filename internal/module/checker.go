@@ -25,7 +25,17 @@ type Checker struct {
 	m Module
 }
 
-func NewChecker(m Module) Checker { return Checker{m: m} }
+// NewChecker builds the probe.Checker for m: a PoolChecker when m.Pool
+// is set (see pool.go), a plain Checker otherwise. registry.go never
+// needs to know which -- both satisfy probe.Checker identically, and
+// only a PoolChecker additionally satisfies probe.BatchChecker, which
+// is all the scheduler needs to tell them apart.
+func NewChecker(m Module) probe.Checker {
+	if m.Pool != nil {
+		return newPoolChecker(m)
+	}
+	return Checker{m: m}
+}
 
 func (c Checker) Type() string { return c.m.Name }
 
@@ -81,25 +91,39 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		}
 	}
 
-	start := time.Now()
-	stdout, err := c.runStep(ctx, *c.m.Run, ec)
-	elapsed := time.Since(start)
-	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("run: %w", err))
-	}
-
-	result, err := c.m.collect(stdout)
-	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("collect: %w", err))
+	result := c.m.runAndCollect(ctx, *c.m.Run, ec, opts)
+	if !result.Ok {
+		return result
 	}
 
 	if c.m.Teardown != nil {
-		if _, err := c.runStep(ctx, *c.m.Teardown, ec); err != nil {
+		if _, err := runStep(ctx, *c.m.Teardown, ec); err != nil {
 			// Teardown failing doesn't invalidate a result we already
 			// collected; the process is getting killed by ctx
 			// cancellation regardless once Check() returns.
 			result.Extra["teardown_error"] = err.Error()
 		}
+	}
+	return result
+}
+
+// runAndCollect runs step, feeds its stdout through m.collect, and
+// turns either failure into a probe.Fail -- the run+collect half of
+// both Checker.Check (run once per check) and PoolChecker.testJob
+// (run once per job, against an already-running pooled instance; see
+// pool.go), factored out so the two never drift on latency
+// calculation or error wrapping.
+func (m Module) runAndCollect(ctx context.Context, step Step, ec execContext, opts probe.Options) probe.Result {
+	start := time.Now()
+	stdout, err := runStep(ctx, step, ec)
+	elapsed := time.Since(start)
+	if err != nil {
+		return probe.Fail(m.Name, opts.Target, opts.Mode, opts.Seq, fmt.Errorf("run: %w", err))
+	}
+
+	result, err := m.collect(stdout)
+	if err != nil {
+		return probe.Fail(m.Name, opts.Target, opts.Mode, opts.Seq, fmt.Errorf("collect: %w", err))
 	}
 
 	latencyMs := result.LatencyMs
@@ -112,7 +136,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	// that rounding error by 1e6, e.g. silently turning 12.5ms into
 	// 12ms.
 	elapsedForResult := time.Duration(latencyMs * float64(time.Millisecond))
-	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, elapsedForResult, result.Extra)
+	return probe.Ok(m.Name, opts.Target, opts.Mode, opts.Seq, elapsedForResult, result.Extra)
 }
 
 // startPrepare launches the prepare command detached from run's
@@ -134,20 +158,33 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 // once the real path-resolution bug was fixed -- raising timeout_ms
 // alone did nothing, since 3s < any of the timeout_ms values in use.)
 func (c Checker) startPrepare(ctx context.Context, ec execContext, port int) error {
-	argv := ec.resolve(c.m.Prepare.Command)
+	readinessTimeout := time.Duration(ec.TimeoutMs) * time.Millisecond / 2
+	return startLongLived(ctx, *c.m.Prepare, ec, readinessTimeout, port)
+}
+
+// startLongLived launches step detached from its own output, bound to
+// ctx so it's killed once ctx is done, and waits until port is
+// accepting connections or readinessTimeout elapses -- the shared
+// shape behind both Checker's Prepare step (one process per check) and
+// PoolChecker's Start step (one process per instance, serving many
+// jobs; see pool.go). The caller decides what "done" means for ctx
+// (Check()'s own timeout_ms-bounded ctx for Prepare; an instance-
+// scoped ctx the caller cancels itself once every job in the instance
+// has been tested, for Start).
+func startLongLived(ctx context.Context, step Step, ec execContext, readinessTimeout time.Duration, port int) error {
+	argv := ec.resolve(step.Command)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	go func() { _ = cmd.Wait() }() // reap; ctx cancellation ends the process
 
-	readinessTimeout := time.Duration(ec.TimeoutMs) * time.Millisecond / 2
 	readinessCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
 	defer cancel()
 	return portalloc.WaitForPort(readinessCtx, port)
 }
 
-func (c Checker) runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {
+func runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {
 	runCtx := ctx
 	if step.Timeout > 0 {
 		var cancel context.CancelFunc

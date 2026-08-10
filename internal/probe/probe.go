@@ -96,6 +96,23 @@ type Checker interface {
 	Check(ctx context.Context, opts Options) Result
 }
 
+// BatchChecker is implemented by a Checker that can test many Options
+// as one batch more efficiently than len(opts) independent Check()
+// calls -- currently only a pooled module (internal/module's
+// PoolChecker), which runs one engine process (build_config+start)
+// per up-to-N-job batch instead of one process per job. The scheduler
+// type-asserts for this per prober and, when present, groups a tick's
+// due checks for that prober into CheckBatch calls instead of firing
+// one goroutine per check; a Checker that doesn't implement it is
+// handled exactly as before. Every BatchChecker must still implement
+// plain Check() too (e.g. for the single-probe `probe` CLI, or a
+// single triggered check) -- it may just call CheckBatch with a
+// slice of one.
+type BatchChecker interface {
+	Checker
+	CheckBatch(ctx context.Context, opts []Options) []Result
+}
+
 func latency(d time.Duration) *float64 {
 	ms := float64(d) / float64(time.Millisecond)
 	return &ms

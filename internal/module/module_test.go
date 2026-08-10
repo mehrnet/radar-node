@@ -406,6 +406,249 @@ collect:
 	}
 }
 
+func validPoolYAML(extra string) string {
+	return `
+name: pool-mod
+run:
+  command: ["echo", "{{target}}", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 100
+  test_concurrency: 20
+  build_config:
+    command: ["build-config", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["engine", "{{config_path}}"]
+` + extra
+}
+
+func TestLoadDir_AcceptsValidPoolModule(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", validPoolYAML(""))
+	modules, err := module.LoadDir(dir)
+	if err != nil {
+		t.Fatalf("expected a valid pool module to load, got %v", err)
+	}
+	if len(modules) != 1 || modules[0].Pool == nil {
+		t.Fatalf("unexpected modules: %+v", modules)
+	}
+	p := modules[0].Pool
+	if p.MaxJobsPerInstance != 100 || p.TestConcurrency != 20 {
+		t.Fatalf("unexpected pool spec: %+v", p)
+	}
+}
+
+func TestLoadDir_AcceptsPoolModuleWithStop(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", validPoolYAML(`
+  stop:
+    command: ["engine-stop"]
+`))
+	modules, err := module.LoadDir(dir)
+	if err != nil {
+		t.Fatalf("expected a pool module with stop to load, got %v", err)
+	}
+	if modules[0].Pool.Stop == nil {
+		t.Fatal("expected pool.stop to be set")
+	}
+}
+
+func TestLoadDir_RejectsPoolOnActionModule(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-pool-action
+action: tcp_connect
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 5
+  build_config:
+    command: ["build-config"]
+  start:
+    command: ["engine"]
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an action module also setting pool")
+	}
+}
+
+func TestLoadDir_RejectsPoolWithPrepare(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", strings.Replace(validPoolYAML(""), "run:", `prepare:
+  command: ["echo", "hi"]
+run:`, 1))
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a pool module also setting prepare")
+	}
+}
+
+func TestLoadDir_RejectsPoolWithTeardown(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", validPoolYAML(`
+teardown:
+  command: ["echo", "bye"]
+`))
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a pool module also setting teardown")
+	}
+}
+
+func TestLoadDir_RejectsPoolWithoutRun(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-pool-no-run
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 5
+  build_config:
+    command: ["build-config"]
+  start:
+    command: ["engine"]
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a pool module without run.command")
+	}
+}
+
+func TestLoadDir_RejectsPoolMissingBuildConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-pool-no-build-config
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 5
+  start:
+    command: ["engine"]
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a pool module missing build_config")
+	}
+}
+
+func TestLoadDir_RejectsPoolMissingStart(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-pool-no-start
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 5
+  build_config:
+    command: ["build-config"]
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for a pool module missing start")
+	}
+}
+
+func TestLoadDir_RejectsPoolZeroMaxJobsPerInstance(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-pool-zero-max
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 0
+  test_concurrency: 5
+  build_config:
+    command: ["build-config"]
+  start:
+    command: ["engine"]
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for pool.max_jobs_per_instance <= 0")
+	}
+}
+
+func TestLoadDir_RejectsPoolZeroTestConcurrency(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", `
+name: bad-pool-zero-concurrency
+run:
+  command: ["echo", "{{target}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 0
+  build_config:
+    command: ["build-config"]
+  start:
+    command: ["engine"]
+`)
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for pool.test_concurrency <= 0")
+	}
+}
+
+func TestLoadDir_RejectsUnknownPlaceholderInPoolSteps(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "bad.yaml", strings.Replace(validPoolYAML(""), "{{jobs_json}}", "{{not_a_real_placeholder}}", 1))
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected an error for an unrecognized placeholder in pool.build_config")
+	}
+}
+
+func TestLoadDir_AcceptsJobsJSONAndConfigPathPlaceholders(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", validPoolYAML(""))
+	if _, err := module.LoadDir(dir); err != nil {
+		t.Fatalf("expected jobs_json/config_path placeholders to be accepted in pool steps, got %v", err)
+	}
+}
+
+func TestResolveDirPlaceholders_SubstitutesPoolStepArgv(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "ok.yaml", `
+name: pool-dirs
+run:
+  command: ["__TOOLS_DIR__/engine-run"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 5
+  build_config:
+    command: ["__TOOLS_DIR__/build-config", "__MODULES_DIR__/out.json"]
+  start:
+    command: ["__TOOLS_DIR__/engine-start"]
+  stop:
+    command: ["__TOOLS_DIR__/engine-stop"]
+`)
+	modules, err := module.LoadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := modules[0].ResolveDirPlaceholders("/modules", "/tools")
+	if resolved.Pool.BuildConfig.Command[0] != "/tools/build-config" {
+		t.Fatalf("build_config not resolved: %+v", resolved.Pool.BuildConfig.Command)
+	}
+	if resolved.Pool.BuildConfig.Command[1] != "/modules/out.json" {
+		t.Fatalf("build_config not resolved: %+v", resolved.Pool.BuildConfig.Command)
+	}
+	if resolved.Pool.Start.Command[0] != "/tools/engine-start" {
+		t.Fatalf("start not resolved: %+v", resolved.Pool.Start.Command)
+	}
+	if resolved.Pool.Stop.Command[0] != "/tools/engine-stop" {
+		t.Fatalf("stop not resolved: %+v", resolved.Pool.Stop.Command)
+	}
+	// The original module (pre-resolution) must be untouched -- same
+	// invariant ResolveDirPlaceholders already guarantees for prepare/
+	// run/teardown.
+	if modules[0].Pool.BuildConfig.Command[0] != "__TOOLS_DIR__/build-config" {
+		t.Fatalf("original module's pool steps were mutated: %+v", modules[0].Pool.BuildConfig.Command)
+	}
+}
+
 func TestParseBytes_ParsesOSArchAndInstall(t *testing.T) {
 	m, err := module.ParseBytes([]byte(`
 name: xray

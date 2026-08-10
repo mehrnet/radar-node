@@ -42,6 +42,52 @@ type Step struct {
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 }
 
+// PoolSpec turns a module into a pooled/batched prober instead of one
+// subprocess per check: BuildConfig/Start/Stop replace Prepare/
+// Teardown as the *instance*-level lifecycle (one engine process
+// serving up to MaxJobsPerInstance jobs at once), while Run is
+// reinterpreted to mean "test one already-running job" instead of
+// "run the whole check" -- it's invoked once per job, TestConcurrency
+// at a time, against the single shared instance BuildConfig/Start
+// produced. This is deliberately generic (no mention of xray or any
+// other engine anywhere in this package): any module can opt in by
+// setting Pool, and PoolChecker (see pool.go) is the only thing that
+// ever reads it.
+//
+// There is no state carried between scheduler ticks -- every tick
+// rebuilds BuildConfig's config fresh from whatever jobs are due right
+// then and tears the instance back down once every job in it has been
+// tested, rather than trying to keep a long-lived instance in sync
+// with a changing job set.
+type PoolSpec struct {
+	// MaxJobsPerInstance caps how many jobs one engine process is
+	// asked to serve at once -- bounded in practice by how many local
+	// ports/inbounds a single VM can hold open, not by the engine
+	// itself. A tick with more due jobs than this splits into multiple
+	// sequential instances (see pool.go), never a bigger one.
+	MaxJobsPerInstance int `yaml:"max_jobs_per_instance"`
+	// TestConcurrency is how many of one instance's jobs are tested
+	// (Run invoked) at once, in waves, until every job in that
+	// instance has a result -- independent of MaxJobsPerInstance,
+	// which only bounds how many jobs *one instance* is built for.
+	TestConcurrency int `yaml:"test_concurrency"`
+	// BuildConfig writes the engine's config file for this instance's
+	// whole job batch at once -- given {{jobs_json}} (the batch) and
+	// {{config_path}} (where to write it), both new pool-only
+	// placeholders. Required: a pooled module has no other way to
+	// describe its jobs to the engine.
+	BuildConfig *Step `yaml:"build_config"`
+	// Start launches the long-lived engine process for this instance,
+	// normally reading {{config_path}} BuildConfig just wrote. Required:
+	// without it there's no process for Run to test against.
+	Start *Step `yaml:"start"`
+	// Stop optionally shuts the instance down cleanly once every job
+	// in it has been tested; if unset the process is simply killed via
+	// context cancellation once the instance's batch is done, the same
+	// way a Prepare process with no Teardown already works today.
+	Stop *Step `yaml:"stop,omitempty"`
+}
+
 // Collect describes how to turn the run step's stdout into a
 // probe.Result.
 type Collect struct {
@@ -100,6 +146,13 @@ type Module struct {
 	Run      *Step   `yaml:"run,omitempty"`
 	Collect  Collect `yaml:"collect,omitempty"`
 	Teardown *Step   `yaml:"teardown,omitempty"`
+	// Pool opts this module into batched/pooled execution -- see
+	// PoolSpec. Mutually exclusive with Prepare/Teardown (Pool's own
+	// BuildConfig/Start/Stop replace them) and with Action (pooling
+	// only applies to run.command modules); Run is still required and
+	// keeps its normal meaning of "the run.command step", just invoked
+	// once per job instead of once per check.
+	Pool *PoolSpec `yaml:"pool,omitempty"`
 	// Request/Response declare this module's data form: which params
 	// a probe must/may supply, and what a successful result's Extra
 	// carries. Request is enforced before every run (see
@@ -240,10 +293,23 @@ func (m *Module) validate() error {
 		if m.Prepare != nil || m.Teardown != nil {
 			return fmt.Errorf("module %q: prepare/teardown only apply to run.command modules, not action", m.Name)
 		}
+		if m.Pool != nil {
+			return fmt.Errorf("module %q: pool only applies to run.command modules, not action", m.Name)
+		}
 		return nil
 	}
 
-	for stepName, step := range map[string]*Step{"prepare": m.Prepare, "run": m.Run, "teardown": m.Teardown} {
+	if err := validatePool(m); err != nil {
+		return err
+	}
+
+	steps := map[string]*Step{"prepare": m.Prepare, "run": m.Run, "teardown": m.Teardown}
+	if m.Pool != nil {
+		steps["pool.build_config"] = m.Pool.BuildConfig
+		steps["pool.start"] = m.Pool.Start
+		steps["pool.stop"] = m.Pool.Stop
+	}
+	for stepName, step := range steps {
 		if step == nil {
 			continue
 		}
@@ -270,6 +336,37 @@ func (m *Module) validate() error {
 		m.compiledPattern = re
 	default:
 		return fmt.Errorf("module %q: collect.format must be \"writeout_json\" or \"regex\", got %q", m.Name, m.Collect.Format)
+	}
+	return nil
+}
+
+// validatePool checks m.Pool's own fields, called only once hasAction/
+// hasRun has already established this is a run.command module.
+// Prepare/Teardown are rejected here rather than folded into the
+// hasAction-style switch above because they're valid to check against
+// m.Pool specifically (not "any run.command module"), and the error
+// message benefits from naming Pool's own replacements.
+func validatePool(m *Module) error {
+	if m.Pool == nil {
+		return nil
+	}
+	if m.Prepare != nil || m.Teardown != nil {
+		return fmt.Errorf("module %q: pool.build_config/start/stop replace prepare/teardown, set only one pair", m.Name)
+	}
+	if m.Run == nil || len(m.Run.Command) == 0 {
+		return fmt.Errorf("module %q: pool requires run.command as the per-job test step", m.Name)
+	}
+	if m.Pool.MaxJobsPerInstance <= 0 {
+		return fmt.Errorf("module %q: pool.max_jobs_per_instance must be > 0", m.Name)
+	}
+	if m.Pool.TestConcurrency <= 0 {
+		return fmt.Errorf("module %q: pool.test_concurrency must be > 0", m.Name)
+	}
+	if m.Pool.BuildConfig == nil || len(m.Pool.BuildConfig.Command) == 0 {
+		return fmt.Errorf("module %q: pool.build_config.command is required", m.Name)
+	}
+	if m.Pool.Start == nil || len(m.Pool.Start.Command) == 0 {
+		return fmt.Errorf("module %q: pool.start.command is required", m.Name)
 	}
 	return nil
 }
@@ -430,5 +527,12 @@ func (m Module) ResolveDirPlaceholders(modulesDir, toolsDir string) Module {
 	m.Prepare = resolveStep(m.Prepare)
 	m.Run = resolveStep(m.Run)
 	m.Teardown = resolveStep(m.Teardown)
+	if m.Pool != nil {
+		pool := *m.Pool
+		pool.BuildConfig = resolveStep(m.Pool.BuildConfig)
+		pool.Start = resolveStep(m.Pool.Start)
+		pool.Stop = resolveStep(m.Pool.Stop)
+		m.Pool = &pool
+	}
 	return m
 }

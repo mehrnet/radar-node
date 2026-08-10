@@ -576,6 +576,17 @@ func (a *agent) runDueProbes(ctx context.Context) {
 		len(due), len(triggers), len(results), resp.Accepted, resp.Rejected)
 }
 
+// checkJob is one (probe, seq) check due to run this tick, before
+// runChecks has split it between per-check (Checker) and batched
+// (BatchChecker) dispatch -- the common shape executeProbes and
+// executeTriggers both reduce down to, since batching only cares
+// about which prober each check belongs to, not why it's due.
+type checkJob struct {
+	pr    wire.ProbeSnapshot
+	runID string
+	seq   int
+}
+
 // executeTriggers runs each drained pendingTrigger's probe immediately,
 // under the server-issued RunID it carries (not a freshly minted one --
 // see wire.Event's own comment on RunID) so every node acting on the
@@ -586,11 +597,7 @@ func (a *agent) executeTriggers(ctx context.Context, triggers []pendingTrigger) 
 	if len(triggers) == 0 {
 		return nil
 	}
-	sem := make(chan struct{}, a.concurrency)
-	var mu sync.Mutex
-	var results []wire.Result
-	var wg sync.WaitGroup
-
+	var jobs []checkJob
 	for _, t := range triggers {
 		pr, ok := a.cache.get(t.ProbeID)
 		if !ok {
@@ -601,33 +608,18 @@ func (a *agent) executeTriggers(ctx context.Context, triggers []pendingTrigger) 
 			count = 1
 		}
 		for seq := 1; seq <= count; seq++ {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(pr wire.ProbeSnapshot, runID string, seq int) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				r := a.runCheck(ctx, pr, runID, seq)
-				mu.Lock()
-				results = append(results, r)
-				mu.Unlock()
-			}(pr, t.RunID, seq)
+			jobs = append(jobs, checkJob{pr: pr, runID: t.RunID, seq: seq})
 		}
 	}
-	wg.Wait()
-	return results
+	return a.runChecks(ctx, jobs)
 }
 
-// executeProbes runs every check of every due probe concurrently,
-// bounded by a semaphore sized to a.concurrency. Deliberately a single
-// flat pool, no split between I/O-wait and CPU-bound stages -- see
-// README.md's scheduler notes for the two-tier semaphore this
-// should grow into once real load numbers justify it.
+// executeProbes runs every check of every due probe, bounded by a
+// semaphore sized to a.concurrency -- see runChecks for how a prober
+// backed by a pooled module (probe.BatchChecker) is grouped into
+// CheckBatch calls instead of one goroutine per check.
 func (a *agent) executeProbes(ctx context.Context, due []wire.ProbeSnapshot) []wire.Result {
-	sem := make(chan struct{}, a.concurrency)
-	var mu sync.Mutex
-	var results []wire.Result
-	var wg sync.WaitGroup
-
+	var jobs []checkJob
 	for _, pr := range due {
 		runID := newRunID()
 		count := pr.ProbeCount
@@ -635,44 +627,90 @@ func (a *agent) executeProbes(ctx context.Context, due []wire.ProbeSnapshot) []w
 			count = 1
 		}
 		for seq := 1; seq <= count; seq++ {
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(pr wire.ProbeSnapshot, runID string, seq int) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				r := a.runCheck(ctx, pr, runID, seq)
-				mu.Lock()
-				results = append(results, r)
-				mu.Unlock()
-			}(pr, runID, seq)
+			jobs = append(jobs, checkJob{pr: pr, runID: runID, seq: seq})
 		}
+	}
+	return a.runChecks(ctx, jobs)
+}
+
+// runChecks dispatches jobs, bounded by a semaphore sized to
+// a.concurrency. Deliberately a single flat pool, no split between
+// I/O-wait and CPU-bound stages -- see README.md's scheduler notes for
+// the two-tier semaphore this should grow into once real load numbers
+// justify it.
+//
+// Jobs are first grouped by prober name wherever that prober's Checker
+// implements probe.BatchChecker (a pooled module, see internal/module's
+// PoolChecker) -- each such group becomes a single CheckBatch call,
+// occupying one semaphore slot for however many jobs it covers, rather
+// than one slot (and one subprocess) per job. This is the only place
+// pooling changes anything for the scheduler: everything else about a
+// batched prober's jobs (how they got marked due, how their results
+// get reported) is identical to any other check. A prober whose
+// Checker doesn't implement it -- every native/action module, and any
+// run.command module without a pool: block -- still gets exactly one
+// goroutine per job, unchanged from before pooling existed.
+func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
+	if len(jobs) == 0 {
+		return nil
+	}
+	sem := make(chan struct{}, a.concurrency)
+	var mu sync.Mutex
+	var results []wire.Result
+	var wg sync.WaitGroup
+
+	batches := map[string][]checkJob{}
+	var singles []checkJob
+	for _, j := range jobs {
+		if checker, ok := a.reg.Get(j.pr.Prober); ok {
+			if _, ok := checker.(probe.BatchChecker); ok {
+				batches[j.pr.Prober] = append(batches[j.pr.Prober], j)
+				continue
+			}
+		}
+		singles = append(singles, j)
+	}
+
+	for prober, batchJobs := range batches {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(prober string, batchJobs []checkJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			r := a.runCheckBatch(ctx, prober, batchJobs)
+			mu.Lock()
+			results = append(results, r...)
+			mu.Unlock()
+		}(prober, batchJobs)
+	}
+
+	for _, j := range singles {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(j checkJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			r := a.runCheck(ctx, j.pr, j.runID, j.seq)
+			mu.Lock()
+			results = append(results, r)
+			mu.Unlock()
+		}(j)
 	}
 	wg.Wait()
 	return results
 }
 
 func (a *agent) runCheck(ctx context.Context, pr wire.ProbeSnapshot, runID string, seq int) wire.Result {
-	mode := probe.Mode(pr.Mode)
-	if mode == "" {
-		mode = probe.ModeWarm
-	}
-
 	checker, ok := a.reg.Get(pr.Prober)
 	var r probe.Result
 	if !ok {
+		mode := probe.Mode(pr.Mode)
+		if mode == "" {
+			mode = probe.ModeWarm
+		}
 		r = probe.Fail(pr.Prober, pr.Target, mode, seq, fmt.Errorf("unknown prober %q", pr.Prober))
 	} else {
-		timeout := time.Duration(pr.TimeoutMs) * time.Millisecond
-		if timeout <= 0 {
-			timeout = 5 * time.Second
-		}
-		r = checker.Check(ctx, probe.Options{
-			Target:  pr.Target,
-			Timeout: timeout,
-			Mode:    mode,
-			Seq:     seq,
-			Params:  pr.Params,
-		})
+		r = checker.Check(ctx, optionsFor(pr, seq))
 	}
 
 	return wire.Result{
@@ -680,6 +718,57 @@ func (a *agent) runCheck(ctx context.Context, pr wire.ProbeSnapshot, runID strin
 		ProbeID:    pr.ID,
 		Result:     r,
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// runCheckBatch is runCheck's batched counterpart: every job in
+// batchJobs shares prober (guaranteed by runChecks' own grouping), so
+// they're built into one probe.Options slice and run through a single
+// CheckBatch call rather than one Check call apiece. a.reg.Get is
+// guaranteed to succeed and to implement probe.BatchChecker here --
+// runChecks only ever forms a group after confirming both.
+func (a *agent) runCheckBatch(ctx context.Context, prober string, batchJobs []checkJob) []wire.Result {
+	checker, _ := a.reg.Get(prober)
+	batchChecker := checker.(probe.BatchChecker)
+
+	opts := make([]probe.Options, len(batchJobs))
+	for i, j := range batchJobs {
+		opts[i] = optionsFor(j.pr, j.seq)
+	}
+	checkResults := batchChecker.CheckBatch(ctx, opts)
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	out := make([]wire.Result, len(batchJobs))
+	for i, j := range batchJobs {
+		out[i] = wire.Result{
+			RunID:      j.runID,
+			ProbeID:    j.pr.ID,
+			Result:     checkResults[i],
+			ObservedAt: now,
+		}
+	}
+	return out
+}
+
+// optionsFor builds the probe.Options a due probe's seq'th check runs
+// with -- shared by runCheck and runCheckBatch so a batched and
+// unbatched check of the same prober can never see different
+// mode/timeout defaults.
+func optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
+	mode := probe.Mode(pr.Mode)
+	if mode == "" {
+		mode = probe.ModeWarm
+	}
+	timeout := time.Duration(pr.TimeoutMs) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return probe.Options{
+		Target:  pr.Target,
+		Timeout: timeout,
+		Mode:    mode,
+		Seq:     seq,
+		Params:  pr.Params,
 	}
 }
 
