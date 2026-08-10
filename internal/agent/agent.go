@@ -351,6 +351,11 @@ func (a *agent) applyModuleActions(actions []string) {
 	a.reinstall(flags...)
 }
 
+// installFetchMaxAttempts/installFetchBackoff mirror node.sh's own
+// fetch_with_retry convention (5 attempts, sleep attempt*2s) -- see
+// buildInstallCommand's own doc comment for why this exists at all.
+const installFetchMaxAttempts = 5
+
 // buildInstallCommand is reinstall's own command-string logic, pulled
 // out into a pure function so the proxy handling is unit-testable
 // without spawning a real subprocess. proxyURL, if set, is threaded
@@ -362,6 +367,24 @@ func (a *agent) applyModuleActions(actions []string) {
 // install.sh itself only gets to see -- and act on, for its own
 // internal downloads and to thread --api-proxy into the agent's own
 // systemd service -- after it's already running.
+//
+// The outer fetch is downloaded to a real temp file and retried up to
+// installFetchMaxAttempts times before install.sh ever runs, instead
+// of the original "curl | sh" straight pipe -- piping a failed curl
+// (e.g. the TLS EOF observed in production on a node with a flaky
+// proxied path) fed `sh` an *empty* script, which is not an error to
+// sh at all: it exits 0 having done nothing, so the whole self-update
+// silently no-ops with zero indication anywhere that it didn't happen.
+// This process has already committed to exiting (see reinstall) by
+// the time that would be discovered, so there's no later point to
+// detect and report it from -- the fetch has to succeed, retry, or
+// fail loudly *before* control ever reaches "hand off and exit".
+// Failing loudly here means the wrapping systemd unit (or plain child
+// on non-systemd hosts) exits non-zero and is visible as failed in
+// journalctl, and radar-api's own reconcile loop -- seeing this node's
+// reported version never changed on a later heartbeat -- re-issues the
+// update as a fresh pending action up to its own retry limit, the same
+// way it would for any other kind of update failure.
 func buildInstallCommand(nodeID, apiKey, apiURL, proxyURL string, extraFlags []string) string {
 	args := []string{"--node_id=" + nodeID, "--api_key=" + apiKey, "--api_url=" + apiURL}
 	curlProxyFlag := ""
@@ -370,7 +393,26 @@ func buildInstallCommand(nodeID, apiKey, apiURL, proxyURL string, extraFlags []s
 		args = append(args, "--proxy="+proxyURL)
 	}
 	args = append(args, extraFlags...)
-	return fmt.Sprintf("curl -fsSL %s%s | sh -s -- %s", curlProxyFlag, installScriptURL, strings.Join(args, " "))
+	return fmt.Sprintf(`set -e
+_script=$(mktemp)
+_attempt=1
+while :; do
+  if curl -fsSL %s%s -o "$_script"; then
+    break
+  fi
+  if [ "$_attempt" -ge %d ]; then
+    echo "radar-node: failed to fetch install.sh after %d attempts" >&2
+    rm -f "$_script"
+    exit 1
+  fi
+  echo "radar-node: install.sh fetch failed (attempt $_attempt/%d) -- retrying in $((_attempt * 2))s..." >&2
+  sleep $((_attempt * 2))
+  _attempt=$((_attempt + 1))
+done
+sh "$_script" -- %s
+_status=$?
+rm -f "$_script"
+exit $_status`, curlProxyFlag, installScriptURL, installFetchMaxAttempts, installFetchMaxAttempts, installFetchMaxAttempts, strings.Join(args, " "))
 }
 
 // reinstall re-execs install.sh with this node's own existing
