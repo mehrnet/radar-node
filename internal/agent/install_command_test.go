@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,7 +35,7 @@ func TestBuildInstallCommand_WithProxy_AppliesToBothTheOuterCurlAndTheScriptArg(
 
 func TestBuildInstallCommand_IncludesExtraFlags(t *testing.T) {
 	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", []string{"--install-module=xray", "--remove-module=wireguard"})
-	if !strings.Contains(cmd, `sh "$_script" -- --node_id=node_x --api_key=secret --api_url=https://radar-api.example.com --install-module=xray --remove-module=wireguard`) {
+	if !strings.Contains(cmd, `sh "$_script" --node_id=node_x --api_key=secret --api_url=https://radar-api.example.com --install-module=xray --remove-module=wireguard`) {
 		t.Fatalf("expected extra flags appended to the script invocation, got %q", cmd)
 	}
 }
@@ -60,6 +62,48 @@ func TestBuildInstallCommand_RetriesTheOuterFetchAndFailsLoudlyIfExhausted(t *te
 	}
 	if !strings.HasSuffix(cmd, "exit $_status") {
 		t.Fatalf("expected the script's own exit status to propagate out, got %q", cmd)
+	}
+}
+
+// Regression test for a real production incident: switching from
+// "curl | sh -s -- ARGS" to "sh $_script ARGS" (see the retry-loop
+// change above) dropped the now-meaningless "--" in between, but it
+// wasn't actually meaningless -- "-s --" is sh's own idiom for "read
+// the script from stdin, then -- ends *sh's own* option parsing" (sh
+// consumes and discards that "--" itself), whereas "sh $_script --
+// ARGS" hands a real script *file*, and a literal "--" after the
+// filename is no longer sh's own option to consume -- it's just
+// $1, passed straight through to the script. node.sh's own arg parser
+// doesn't understand a bare "--" and rejected it outright
+// ("error: unknown argument: -- (see --help)"), breaking every node's
+// self-update the moment it tried to upgrade past the version that
+// introduced this retry loop -- caught only because a real node's
+// self-update got stuck in exactly the "old process already exited,
+// nothing brings the service back" state this whole retry loop was
+// built to prevent. `sh -n` (see the syntax test below) can't catch
+// this -- "--" is syntactically valid shell, just semantically wrong --
+// so this actually executes the generated command against a stub
+// "install.sh" and inspects the argv it received.
+func TestBuildInstallCommand_ScriptReceivesArgsWithoutAStrayDoubleDash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "#!/bin/sh\necho \"count=$#\"\nfor a in \"$@\"; do echo \"arg:[$a]\"; done\n")
+	}))
+	defer srv.Close()
+
+	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", []string{"--install-module=xray"})
+	cmd = strings.Replace(cmd, installScriptURL, srv.URL, 1)
+
+	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated command failed: %v\n%s", err, out)
+	}
+	if strings.Contains(string(out), "arg:[--]") {
+		t.Fatalf("expected no stray \"--\" argument reaching the script, got:\n%s", out)
+	}
+	for _, want := range []string{"arg:[--node_id=node_x]", "arg:[--api_key=secret]", "arg:[--install-module=xray]"} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("expected %q in the script's own received args, got:\n%s", want, out)
+		}
 	}
 }
 

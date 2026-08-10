@@ -409,7 +409,7 @@ while :; do
   sleep $((_attempt * 2))
   _attempt=$((_attempt + 1))
 done
-sh "$_script" -- %s
+sh "$_script" %s
 _status=$?
 rm -f "$_script"
 exit $_status`, curlProxyFlag, installScriptURL, installFetchMaxAttempts, installFetchMaxAttempts, installFetchMaxAttempts, strings.Join(args, " "))
@@ -430,7 +430,13 @@ func (a *agent) reinstall(extraFlags ...string) {
 	if len(extraFlags) > 0 {
 		reason = strings.Join(extraFlags, " ") + " requested"
 	}
-	log.Printf("agent: %s -- re-running install script: %s", reason, installCmd)
+	// Logs the reason only, not installCmd itself -- installCmd is now a
+	// multi-line generated shell script (see buildInstallCommand's own
+	// retry loop), and log.Printf-ing it wholesale used to flood
+	// journalctl with one entry per line of the script's own source
+	// (journald splits a single write on newlines), making the actual
+	// per-attempt fetch/run output below harder to find, not easier.
+	log.Printf("agent: %s -- re-running install script", reason)
 
 	cmd := selfUpdateCommand(installCmd)
 	logFile, err := os.OpenFile(selfUpdateLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
