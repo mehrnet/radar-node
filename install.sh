@@ -350,13 +350,20 @@ curl_get() {
 # Same as curl_get, but prints the response's Content-Type to stdout --
 # see fetch_with_retry's own comment on why that, not the HTTP status,
 # is what actually distinguishes a real asset from this origin's own
-# SPA fallback page.
+# SPA fallback page. $3, when given, is extra curl args inserted
+# unquoted (word-split, same convention as this script's own
+# ${PROXY:+--proxy "$PROXY"} elsewhere) -- fetch_with_retry's own only
+# use is "-C -" (two tokens: resume-from, auto-detect-offset), to
+# continue a download a prior attempt left partial rather than
+# re-fetching a multi-MB file over again from byte 0 on a connection
+# that's already proven flaky.
 curl_get_with_type() {
-  # $1 = url, $2 = output path
+  # $1 = url, $2 = output path, $3 = optional extra curl args
+  # shellcheck disable=SC2086
   if [ -n "$PROXY" ]; then
-    curl -fL --progress-bar --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
+    curl -fL --progress-bar ${3:-} --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
   else
-    curl -fL --progress-bar -w '%{content_type}' "$1" -o "$2"
+    curl -fL --progress-bar ${3:-} -w '%{content_type}' "$1" -o "$2"
   fi
 }
 
@@ -455,16 +462,55 @@ fetch_with_retry() {
   # $1 = url, $2 = output path, $3 = human-readable label for logging
   _attempt=1
   _max_attempts=5
+  _resume_flag=""
   while :; do
-    _ctype="$(curl_get_with_type "$1" "$2")" || _ctype=""
-    case "$_ctype" in
-      text/html*|"") : ;; # SPA fallback (not yet published), or the request itself failed -- either way, not a real file
-      *) return 0 ;;
-    esac
+    _ctype="$(curl_get_with_type "$1" "$2" "$_resume_flag")"
+    _curl_status=$?
+    if [ "$_curl_status" -eq 0 ]; then
+      case "$_ctype" in
+        text/html*|"")
+          # A real, *complete* response -- just the wrong one (the SPA
+          # fallback page: this asset genuinely isn't published yet).
+          # "$2" now holds that small HTML page, not a partial real
+          # download -- drop it and start clean next attempt, or a
+          # later "-C -" would try to resume from partway through
+          # *that* instead of the real asset from byte 0.
+          rm -f "$2"
+          _resume_flag=""
+          _reason="not available yet"
+          ;;
+        *) return 0 ;;
+      esac
+    elif [ -n "$_resume_flag" ]; then
+      # The resume attempt itself is what just failed -- verified in
+      # practice against this exact mirror: Cloudflare Workers Assets
+      # doesn't honor Range requests at all (always 200, never 206),
+      # so "-C -" here reliably exits 33 ("HTTP server does not seem
+      # to support byte ranges"), immediately, without transferring
+      # anything -- not a second dropped connection. Falling back to a
+      # fresh download rather than repeating a resume that's now
+      # proven to never work against this origin: without this, one
+      # dropped connection would burn every remaining retry on a
+      # guaranteed-failing resume instead of ever attempting a real
+      # download again.
+      rm -f "$2"
+      _resume_flag=""
+      _reason="couldn't resume (server doesn't support it) -- starting over"
+    else
+      # curl itself failed mid-transfer (dropped connection, TLS EOF,
+      # the exact shape observed in production on a node behind a
+      # flaky proxy) -- "$2" likely holds a genuine partial download
+      # of the real asset, worth continuing from rather than re-
+      # fetching a multi-MB file over again on a connection that's
+      # already proven unreliable. Tried once; if the resume itself
+      # fails, the branch above stops repeating it.
+      _resume_flag="-C -"
+      _reason="connection dropped mid-transfer, resuming"
+    fi
     if [ "$_attempt" -ge "$_max_attempts" ]; then
       return 1
     fi
-    log "  ${3} not available yet (attempt ${_attempt}/${_max_attempts}) -- retrying in $((_attempt * 2))s..."
+    log "  ${3} ${_reason} (attempt ${_attempt}/${_max_attempts}) -- retrying in $((_attempt * 2))s..."
     sleep $((_attempt * 2))
     _attempt=$((_attempt + 1))
   done
