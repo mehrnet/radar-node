@@ -23,14 +23,18 @@ import (
 )
 
 // Checker is stateful, unlike every other probe.Checker in this
-// package -- network throughput is a rate, not a point-in-time
-// reading, so it needs the previous sample to diff against. The zero
-// value isn't meant to be used directly; always construct via New().
-// A single instance is shared across every probe that uses the "system"
-// prober (see action.Registry) -- there is only one machine to report
-// on, so sharing counters across concurrent callers is correct, not
-// just convenient. The mutex serializes the read-diff-write, it
-// doesn't segment state per caller.
+// package -- network throughput (and, via gopsutil's own global
+// sample, CPU percent too) is a rate, not a point-in-time reading, so
+// it needs the previous sample to diff against. The zero value isn't
+// meant to be used directly; always construct via New(). A single
+// instance is shared across every probe that uses the "system" prober
+// (see action.Registry) -- there is only one machine to report on, so
+// sharing counters across concurrent callers is correct, not just
+// convenient. The mutex serializes the read-diff-write for both --
+// net throughput's own explicit sampledAt/bytesSent/bytesRecv state
+// below, and gopsutil's own package-level cpu.Percent sample, which
+// isn't safe against concurrent callers on its own (see Check's own
+// comment on that call).
 type Checker struct {
 	mu        sync.Mutex
 	sampledAt time.Time
@@ -92,13 +96,31 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 
 	// gopsutil's own non-blocking mode (interval<=0) keeps its own
-	// package-level "last sample" state and diffs against it for us --
-	// unlike net.IOCounters, there's no cumulative-counter API to do
-	// this ourselves from, and no reason to duplicate gopsutil's
-	// bookkeeping when it already does this exact check. Same shape as
-	// net throughput either way: nothing to diff against on the very
-	// first call, so it's omitted rather than reported as 0.
-	if pct, err := cpu.PercentWithContext(ctx, 0, false); err == nil && len(pct) > 0 {
+	// "last sample" state and diffs against it for us -- unlike
+	// net.IOCounters, there's no cumulative-counter API to do this
+	// ourselves from, and no reason to duplicate gopsutil's bookkeeping
+	// when it already does this exact check. Same shape as net
+	// throughput either way: nothing to diff against on the very first
+	// call, so it's omitted rather than reported as 0.
+	//
+	// That "last sample" state is gopsutil's own package-level global,
+	// not scoped to this Checker -- fine as long as calls are
+	// serialized, but two Check() calls racing on it concurrently (a
+	// real production case: a node with two separate "system" probes
+	// on the same ~60s interval occasionally has both land in the same
+	// scheduler tick) each see a near-zero elapsed window since the
+	// *other* call's just-written sample. Any real CPU busy-time
+	// accumulated in that near-zero window divides out to a spurious,
+	// momentary 100% that isn't real load at all -- confirmed in
+	// production by load1 staying flat through every observed spike,
+	// and by no process ever actually showing elevated CPU at the time.
+	// c.mu serializes this the same way netThroughputMbps's own state
+	// is already protected, so two concurrent Check() calls from this
+	// process can never race on gopsutil's shared sample here either.
+	c.mu.Lock()
+	pct, err := cpu.PercentWithContext(ctx, 0, false)
+	c.mu.Unlock()
+	if err == nil && len(pct) > 0 {
 		result["cpu_percent"] = pct[0]
 	}
 

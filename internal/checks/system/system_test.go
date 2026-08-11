@@ -2,6 +2,7 @@ package system_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,5 +78,54 @@ func TestCheck_CPUPercentEventuallyAppears(t *testing.T) {
 	}
 	if _, ok := res.Extra["cpu_percent"]; !ok {
 		t.Errorf("expected cpu_percent once gopsutil has a previous sample to diff against, got %+v", res.Extra)
+	}
+}
+
+// Regression test for a real production incident: gopsutil's own
+// cpu.Percent keeps its "last sample" state at the package level, not
+// per-Checker, and Check used to call it with no locking of its own --
+// fine for one caller at a time, but two Check() calls racing on it
+// concurrently (a real production case: a node with two separate
+// "system" probes on the same ~60s interval occasionally landed both
+// in the same scheduler tick) each saw a near-zero elapsed window
+// since the *other* call's just-written sample, and any real CPU
+// busy-time in that near-zero window divides out to a spurious,
+// momentary 100% that isn't real load. c.mu now serializes this the
+// same way it already protects net throughput's own state. This can't
+// deterministically force gopsutil's own internal race window, but a
+// heavy concurrent hammering run under `go test -race` at minimum
+// proves this Checker's own state is race-free, and asserts every
+// cpu_percent that does come back is a sane percentage (0-100) rather
+// than a wild divide-by-near-zero artifact.
+func TestCheck_ConcurrentCallsNeverProduceAnInsaneCPUPercent(t *testing.T) {
+	c := system.New()
+	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second, Mode: probe.ModeWarm}
+
+	const n = 50
+	results := make([]probe.Result, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			o := opts
+			o.Seq = i + 1
+			results[i] = c.Check(context.Background(), o)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, res := range results {
+		if !res.Ok {
+			t.Fatalf("call %d: expected ok, got error %q", i, res.Error)
+		}
+		pct, ok := res.Extra["cpu_percent"]
+		if !ok {
+			continue // gopsutil had no prior sample yet for this particular call -- fine, same as the sequential test above
+		}
+		v, isFloat := pct.(float64)
+		if !isFloat || v < 0 || v > 100 {
+			t.Errorf("call %d: expected cpu_percent in [0, 100], got %v", i, pct)
+		}
 	}
 }
