@@ -15,8 +15,8 @@ func sampleEnvelope() probe.Envelope {
 	return probe.Envelope{
 		Ok: false,
 		Results: []probe.Result{
-			{Ok: true, Type: "tcp", Target: "1.2.3.4:443", Mode: probe.ModeWarm, Seq: 1, LatencyMs: &latency},
-			{Ok: false, Type: "tcp", Target: "1.2.3.4:444", Mode: probe.ModeWarm, Seq: 1, Error: "connection refused"},
+			{Ok: true, Type: "tcp", Target: "1.2.3.4:443", Seq: 1, LatencyMs: &latency},
+			{Ok: false, Type: "tcp", Target: "1.2.3.4:444", Seq: 1, Error: "connection refused"},
 		},
 	}
 }

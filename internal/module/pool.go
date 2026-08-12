@@ -46,7 +46,7 @@ func (c PoolChecker) Check(ctx context.Context, opts probe.Options) probe.Result
 	results := c.CheckBatch(ctx, []probe.Options{opts})
 	if len(results) == 0 {
 		// Unreachable: CheckBatch always returns len(opts) results.
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("pool: no result produced"))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("pool: no result produced"))
 	}
 	return results[0]
 }
@@ -65,7 +65,7 @@ func (c PoolChecker) CheckBatch(ctx context.Context, opts []probe.Options) []pro
 
 	for i, o := range opts {
 		if err := validateRequest(c.m.Request, o.Params); err != nil {
-			results[i] = probe.Invalid(c.Type(), o.Target, o.Mode, o.Seq, err.Error())
+			results[i] = probe.Invalid(c.Type(), o.Target, o.Seq, err.Error())
 		}
 	}
 
@@ -99,7 +99,6 @@ type jobJSON struct {
 	Target    string         `json:"target"`
 	AllocPort int            `json:"alloc_port"`
 	TimeoutMs int64          `json:"timeout_ms"`
-	Mode      string         `json:"mode,omitempty"`
 	Params    map[string]any `json:"params,omitempty"`
 }
 
@@ -120,7 +119,7 @@ func (c PoolChecker) runInstance(ctx context.Context, batch []probe.Options, out
 		}
 		port, err := portalloc.Alloc()
 		if err != nil {
-			out[i] = probe.Fail(c.Type(), o.Target, o.Mode, o.Seq, fmt.Errorf("allocate port: %w", err))
+			out[i] = probe.Fail(c.Type(), o.Target, o.Seq, fmt.Errorf("allocate port: %w", err))
 			continue
 		}
 		jobs = append(jobs, poolJob{idx: i, opts: o, port: port})
@@ -205,14 +204,13 @@ func (c PoolChecker) testJob(ctx context.Context, j poolJob) probe.Result {
 
 	paramsPath, cleanup, err := writeParamsJSON(opts.Params)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("write params_json: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("write params_json: %w", err))
 	}
 	defer cleanup()
 
 	ec := execContext{
 		Target:         opts.Target,
 		TimeoutMs:      opts.Timeout.Milliseconds(),
-		Mode:           string(opts.Mode),
 		Params:         opts.Params,
 		ParamsJSONPath: paramsPath,
 		AllocPort:      j.port,
@@ -225,7 +223,7 @@ func (c PoolChecker) testJob(ctx context.Context, j poolJob) probe.Result {
 // individual job to be meaningfully attempted.
 func failJobs(out []probe.Result, jobs []poolJob, checkType string, err error) {
 	for _, j := range jobs {
-		out[j.idx] = probe.Fail(checkType, j.opts.Target, j.opts.Mode, j.opts.Seq, err)
+		out[j.idx] = probe.Fail(checkType, j.opts.Target, j.opts.Seq, err)
 	}
 }
 
@@ -254,7 +252,6 @@ func writeJobsJSON(jobs []poolJob) (string, func(), error) {
 			Target:    j.opts.Target,
 			AllocPort: j.port,
 			TimeoutMs: j.opts.Timeout.Milliseconds(),
-			Mode:      string(j.opts.Mode),
 			Params:    j.opts.Params,
 		}
 	}

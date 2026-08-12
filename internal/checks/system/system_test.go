@@ -15,7 +15,6 @@ func TestCheck_IgnoresTargetAndReturnsStats(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "this-is-never-dialed",
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -36,7 +35,7 @@ func TestCheck_IgnoresTargetAndReturnsStats(t *testing.T) {
 
 func TestCheck_NetThroughputAppearsOnlyOnceAPreviousSampleExists(t *testing.T) {
 	c := system.New()
-	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second, Mode: probe.ModeWarm}
+	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second}
 
 	first := c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 1; return o }())
 	if !first.Ok {
@@ -69,7 +68,7 @@ func TestCheck_CPUPercentEventuallyAppears(t *testing.T) {
 	// always true regardless of ordering is that it shows up once
 	// there's been a real previous sample to diff against.
 	c := system.New()
-	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second, Mode: probe.ModeWarm}
+	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second}
 	c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 1; return o }())
 	time.Sleep(10 * time.Millisecond)
 	res := c.Check(context.Background(), func() probe.Options { o := opts; o.Seq = 2; return o }())
@@ -99,7 +98,7 @@ func TestCheck_CPUPercentEventuallyAppears(t *testing.T) {
 // than a wild divide-by-near-zero artifact.
 func TestCheck_ConcurrentCallsNeverProduceAnInsaneCPUPercent(t *testing.T) {
 	c := system.New()
-	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second, Mode: probe.ModeWarm}
+	opts := probe.Options{Target: "this-is-never-dialed", Timeout: time.Second}
 
 	const n = 50
 	results := make([]probe.Result, n)

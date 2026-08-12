@@ -57,7 +57,6 @@ collect:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  srv.URL,
 		Timeout: 5 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -85,7 +84,6 @@ collect:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "irrelevant",
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -118,7 +116,6 @@ collect:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "x",
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok {
@@ -158,7 +155,6 @@ action: tcp_connect
 	res := c.Check(context.Background(), probe.Options{
 		Target:  ln.Addr().String(),
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -182,7 +178,6 @@ request:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "127.0.0.1:1",
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok {
@@ -205,7 +200,6 @@ request:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "127.0.0.1:1",
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 		Params:  map[string]any{"tls": "not-a-bool"},
 	})
@@ -239,7 +233,6 @@ request:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  ln.Addr().String(),
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 		Params:  map[string]any{"tls": false},
 	})
@@ -300,7 +293,6 @@ collect:
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "unused",
 		Timeout: 5 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -369,14 +361,14 @@ collect:
 
 	// Half of 10s (5s) comfortably covers the listener's 4s startup
 	// delay -- would have failed under the old flat 3s cap.
-	res := c.Check(context.Background(), probe.Options{Target: "unused", Timeout: 10 * time.Second, Mode: probe.ModeWarm, Seq: 1})
+	res := c.Check(context.Background(), probe.Options{Target: "unused", Timeout: 10 * time.Second, Seq: 1})
 	if !res.Ok {
 		t.Fatalf("expected a generous timeout_ms to give prepare enough room for a 4s startup, got error %q", res.Error)
 	}
 
 	// Half of 2s (1s) does not cover it -- proves this is actually
 	// proportional, not just "now always generous".
-	res = c.Check(context.Background(), probe.Options{Target: "unused", Timeout: 2 * time.Second, Mode: probe.ModeWarm, Seq: 1})
+	res = c.Check(context.Background(), probe.Options{Target: "unused", Timeout: 2 * time.Second, Seq: 1})
 	if res.Ok {
 		t.Fatal("expected a short timeout_ms to still not give a 4s startup enough room")
 	}

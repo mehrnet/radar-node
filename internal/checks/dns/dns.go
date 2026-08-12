@@ -46,10 +46,10 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	addrs, err := resolver.LookupNetIP(ctx, network, opts.Target)
 	elapsed := time.Since(start)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 	if len(addrs) == 0 {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("no %s records found", record))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("no %s records found", record))
 	}
 
 	records := make([]string, len(addrs))
@@ -57,7 +57,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		records[i] = a.Unmap().String()
 	}
 
-	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, elapsed, map[string]any{
+	return probe.Ok(c.Type(), opts.Target, opts.Seq, elapsed, map[string]any{
 		"record":  record,
 		"answers": records,
 	})

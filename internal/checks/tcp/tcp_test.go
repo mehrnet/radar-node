@@ -31,7 +31,6 @@ func TestCheck_Success(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  ln.Addr().String(),
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -54,7 +53,6 @@ func TestCheck_ConnectionRefused(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  addr,
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok {
@@ -71,7 +69,6 @@ func TestCheck_TLS(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  target,
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 		Params: map[string]any{
 			"tls":      "true",
@@ -94,7 +91,6 @@ func TestCheck_TLS_CertVerifyFailsWithoutInsecure(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  srv.Listener.Addr().String(),
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 		Params:  map[string]any{"tls": "true"},
 	})

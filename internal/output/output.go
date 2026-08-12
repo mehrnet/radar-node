@@ -20,7 +20,7 @@ const (
 	FormatTable Format = "table"
 )
 
-var columns = []string{"ok", "type", "target", "mode", "seq", "latency_ms", "error", "extra"}
+var columns = []string{"ok", "type", "target", "seq", "latency_ms", "error", "extra"}
 
 func Write(format Format, w io.Writer, env probe.Envelope) error {
 	switch format {
@@ -96,7 +96,6 @@ func row(r probe.Result) []string {
 		strconv.FormatBool(r.Ok),
 		r.Type,
 		r.Target,
-		string(r.Mode),
 		strconv.Itoa(r.Seq),
 		latency,
 		r.Error,

@@ -33,12 +33,12 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	start := time.Now()
 	conn, err := dialer.DialContext(ctx, "udp", opts.Target)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 	defer conn.Close()
 
 	if _, err := conn.Write([]byte{}); err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -53,12 +53,12 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	switch {
 	case err == nil:
-		return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, elapsed, map[string]any{
+		return probe.Ok(c.Type(), opts.Target, opts.Seq, elapsed, map[string]any{
 			"responded":  true,
 			"bytes_read": n,
 		})
 	case errors.Is(err, syscall.ECONNREFUSED):
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, errors.New("connection refused (icmp port unreachable)"))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, errors.New("connection refused (icmp port unreachable)"))
 	case isTimeout(err):
 		// No response and no ICMP unreachable: inconclusive, not a
 		// failure. The send succeeded and nothing told us otherwise.
@@ -66,7 +66,6 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 			Ok:     true,
 			Type:   c.Type(),
 			Target: opts.Target,
-			Mode:   opts.Mode,
 			Seq:    opts.Seq,
 			Extra: map[string]any{
 				"responded": false,
@@ -74,7 +73,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 			},
 		}
 	default:
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 }
 

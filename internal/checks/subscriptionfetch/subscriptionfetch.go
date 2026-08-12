@@ -51,13 +51,13 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	start := time.Now()
 	body, _, err := fetch.Do(ctx, opts)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	subType := SubscriptionType(opts.Param("type", string(Base64Xray)))
 	proxies, err := Parse(body, subType)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 	elapsed := time.Since(start)
 
@@ -70,5 +70,5 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		"proxies":    proxies,
 		"discovered": len(proxies),
 	}
-	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, elapsed, extra)
+	return probe.Ok(c.Type(), opts.Target, opts.Seq, elapsed, extra)
 }

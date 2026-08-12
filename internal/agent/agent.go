@@ -752,11 +752,7 @@ func (a *agent) runCheck(ctx context.Context, pr wire.ProbeSnapshot, runID strin
 	checker, ok := a.reg.Get(pr.Prober)
 	var r probe.Result
 	if !ok {
-		mode := probe.Mode(pr.Mode)
-		if mode == "" {
-			mode = probe.ModeWarm
-		}
-		r = probe.Fail(pr.Prober, pr.Target, mode, seq, fmt.Errorf("unknown prober %q", pr.Prober))
+		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("unknown prober %q", pr.Prober))
 	} else {
 		r = checker.Check(ctx, optionsFor(pr, seq))
 	}
@@ -800,13 +796,9 @@ func (a *agent) runCheckBatch(ctx context.Context, prober string, batchJobs []ch
 
 // optionsFor builds the probe.Options a due probe's seq'th check runs
 // with -- shared by runCheck and runCheckBatch so a batched and
-// unbatched check of the same prober can never see different
-// mode/timeout defaults.
+// unbatched check of the same prober can never see a different
+// timeout default.
 func optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
-	mode := probe.Mode(pr.Mode)
-	if mode == "" {
-		mode = probe.ModeWarm
-	}
 	timeout := time.Duration(pr.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -814,7 +806,6 @@ func optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
 	return probe.Options{
 		Target:  pr.Target,
 		Timeout: timeout,
-		Mode:    mode,
 		Seq:     seq,
 		Params:  pr.Params,
 	}

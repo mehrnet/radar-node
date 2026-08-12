@@ -58,19 +58,19 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	loadAvg, err := load.AvgWithContext(ctx)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("read load average: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("read load average: %w", err))
 	}
 	vmem, err := mem.VirtualMemoryWithContext(ctx)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("read memory: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("read memory: %w", err))
 	}
 	uptime, err := host.UptimeWithContext(ctx)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("read uptime: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("read uptime: %w", err))
 	}
 	usage, err := disk.UsageWithContext(ctx, diskRoot())
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("read disk usage: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("read disk usage: %w", err))
 	}
 
 	result := map[string]any{
@@ -124,7 +124,7 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		result["cpu_percent"] = pct[0]
 	}
 
-	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, time.Since(start), result)
+	return probe.Ok(c.Type(), opts.Target, opts.Seq, time.Since(start), result)
 }
 
 // netThroughputMbps aggregates bytes sent/received across every non-

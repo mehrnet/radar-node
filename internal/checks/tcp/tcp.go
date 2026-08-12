@@ -19,10 +19,7 @@ func New() Checker { return Checker{} }
 
 func (Checker) Type() string { return "tcp" }
 
-// Check dials target (host:port) and measures connect time. TCP has
-// no meaningful warm/hard distinction at the level of a single
-// connect -- every dial is a fresh handshake regardless of mode, so
-// Mode is recorded on the result but does not change behavior here.
+// Check dials target (host:port) and measures connect time.
 //
 // Supported params:
 //
@@ -38,12 +35,12 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	conn, err := dialer.DialContext(ctx, "tcp", opts.Target)
 	connectElapsed := time.Since(start)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 	defer conn.Close()
 
 	if opts.Param("tls", "") != "true" {
-		return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, connectElapsed, nil)
+		return probe.Ok(c.Type(), opts.Target, opts.Seq, connectElapsed, nil)
 	}
 
 	sni := opts.Param("sni", hostOnly(opts.Target))
@@ -57,7 +54,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	tlsStart := time.Now()
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 	tlsElapsed := time.Since(tlsStart)
 	state := tlsConn.ConnectionState()
@@ -72,7 +69,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		extra["cert_not_after"] = state.PeerCertificates[0].NotAfter.UTC().Format(time.RFC3339)
 	}
 
-	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, connectElapsed+tlsElapsed, extra)
+	return probe.Ok(c.Type(), opts.Target, opts.Seq, connectElapsed+tlsElapsed, extra)
 }
 
 func hostOnly(target string) string {

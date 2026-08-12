@@ -2,7 +2,6 @@ package module_test
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -100,7 +99,7 @@ func mustWrite(t *testing.T, path, content string) {
 }
 
 func jobOpts(target string, seq int) probe.Options {
-	return probe.Options{Target: target, Timeout: 5 * time.Second, Mode: probe.ModeWarm, Seq: seq}
+	return probe.Options{Target: target, Timeout: 5 * time.Second, Seq: seq}
 }
 
 func TestPoolChecker_ImplementsBatchChecker(t *testing.T) {
@@ -172,68 +171,6 @@ pool:
 	}
 	if !strings.HasSuffix(string(got), ".json") {
 		t.Fatalf("expected config_path to end in .json (engines like xray infer format from it), got %q", got)
-	}
-}
-
-// Regression test for xray's own warm-mode fix: build_config needs to
-// see each job's own mode (to decide, per job, whether to enable
-// connection reuse for that job's outbound) -- this proves jobs_json
-// actually carries it through, not just Checker's own {{mode}}
-// placeholder (already covered by TestChecker_ResolvesModePlaceholder
-// in module_test.go).
-func TestPoolChecker_CheckBatch_JobsJSONCarriesEachJobsOwnMode(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available")
-	}
-	dir := t.TempDir()
-	capturedPath := filepath.Join(dir, "captured-jobs.json")
-	captureScript := filepath.Join(dir, "capture.py")
-	mustWrite(t, captureScript, `
-import shutil, sys
-shutil.copy(sys.argv[1], sys.argv[2])
-`)
-
-	m := loadOne(t, `
-name: pool-mode-mod
-run:
-  command: ["true"]
-collect:
-  format: writeout_json
-pool:
-  max_jobs_per_instance: 10
-  test_concurrency: 2
-  build_config:
-    command: ["python3", "`+captureScript+`", "{{jobs_json}}", "`+capturedPath+`"]
-  start:
-    command: ["true"]
-`)
-	checker := module.NewChecker(m).(probe.BatchChecker)
-	opts := []probe.Options{
-		{Target: "a", Timeout: time.Second, Mode: probe.ModeWarm, Seq: 1},
-		{Target: "b", Timeout: time.Second, Mode: probe.ModeHard, Seq: 2},
-	}
-	checker.CheckBatch(context.Background(), opts)
-
-	raw, err := os.ReadFile(capturedPath)
-	if err != nil {
-		t.Fatalf("expected build_config to have run and captured jobs_json, got %v", err)
-	}
-	var jobs []struct {
-		Target string `json:"target"`
-		Mode   string `json:"mode"`
-	}
-	if err := json.Unmarshal(raw, &jobs); err != nil {
-		t.Fatalf("jobs_json didn't parse: %v (%s)", err, raw)
-	}
-	if len(jobs) != 2 {
-		t.Fatalf("expected 2 jobs in jobs_json, got %d (%s)", len(jobs), raw)
-	}
-	got := map[string]string{}
-	for _, j := range jobs {
-		got[j.Target] = j.Mode
-	}
-	if got["a"] != "warm" || got["b"] != "hard" {
-		t.Fatalf("expected each job's own mode to carry through (a=warm, b=hard), got %+v", got)
 	}
 }
 
@@ -347,8 +284,8 @@ func TestPoolChecker_CheckBatch_RequestSchemaValidatesEachJobIndependently(t *te
 	checker := module.NewChecker(schemaModule).(probe.BatchChecker)
 
 	opts := []probe.Options{
-		{Target: "a", Timeout: 5 * time.Second, Mode: probe.ModeWarm, Seq: 1, Params: map[string]any{"uuid": "x"}},
-		{Target: "b", Timeout: 5 * time.Second, Mode: probe.ModeWarm, Seq: 2}, // missing required uuid
+		{Target: "a", Timeout: 5 * time.Second, Seq: 1, Params: map[string]any{"uuid": "x"}},
+		{Target: "b", Timeout: 5 * time.Second, Seq: 2}, // missing required uuid
 	}
 	results := checker.CheckBatch(context.Background(), opts)
 

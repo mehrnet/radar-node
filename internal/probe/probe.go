@@ -7,22 +7,11 @@ import (
 	"time"
 )
 
-// Mode selects how a check should be performed when the underlying
-// protocol supports it. Warm favors realistic steady-state numbers
-// (e.g. reused connections); Hard measures a cold path from nothing.
-type Mode string
-
-const (
-	ModeWarm Mode = "warm"
-	ModeHard Mode = "hard"
-)
-
 // Options carries everything a Checker needs to run a single probe
 // against a single target.
 type Options struct {
 	Target  string
 	Timeout time.Duration
-	Mode    Mode
 	// Seq is the 1-indexed attempt number when Count > 1, so results
 	// stay identifiable once flattened into a single output array.
 	Seq int
@@ -60,7 +49,6 @@ type Result struct {
 	Ok        bool     `json:"ok"`
 	Type      string   `json:"type"`
 	Target    string   `json:"target"`
-	Mode      Mode     `json:"mode,omitempty"`
 	Seq       int      `json:"seq,omitempty"`
 	LatencyMs *float64 `json:"latency_ms,omitempty"`
 	Error     string   `json:"error,omitempty"`
@@ -119,12 +107,11 @@ func latency(d time.Duration) *float64 {
 }
 
 // Ok builds a successful Result with a measured latency.
-func Ok(checkType, target string, mode Mode, seq int, elapsed time.Duration, extra map[string]any) Result {
+func Ok(checkType, target string, seq int, elapsed time.Duration, extra map[string]any) Result {
 	return Result{
 		Ok:        true,
 		Type:      checkType,
 		Target:    target,
-		Mode:      mode,
 		Seq:       seq,
 		LatencyMs: latency(elapsed),
 		Extra:     extra,
@@ -133,12 +120,11 @@ func Ok(checkType, target string, mode Mode, seq int, elapsed time.Duration, ext
 
 // Fail builds a failed Result. elapsed may be zero if the failure
 // happened before any timing was meaningful to report.
-func Fail(checkType, target string, mode Mode, seq int, err error) Result {
+func Fail(checkType, target string, seq int, err error) Result {
 	return Result{
 		Ok:     false,
 		Type:   checkType,
 		Target: target,
-		Mode:   mode,
 		Seq:    seq,
 		Error:  err.Error(),
 	}
@@ -148,12 +134,11 @@ func Fail(checkType, target string, mode Mode, seq int, err error) Result {
 // its module's declared request schema -- no probe/action was ever
 // attempted, unlike Fail which always represents a real attempt that
 // didn't succeed.
-func Invalid(checkType, target string, mode Mode, seq int, msg string) Result {
+func Invalid(checkType, target string, seq int, msg string) Result {
 	return Result{
 		Ok:        false,
 		Type:      checkType,
 		Target:    target,
-		Mode:      mode,
 		Seq:       seq,
 		Error:     msg,
 		ErrorCode: ErrorCodeInvalidParams,

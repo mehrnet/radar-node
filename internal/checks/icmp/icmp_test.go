@@ -21,7 +21,6 @@ func TestCheck_Loopback(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "127.0.0.1",
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -40,7 +39,6 @@ func TestCheck_UnresolvableHost(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "this-host-should-not-resolve.invalid",
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok {

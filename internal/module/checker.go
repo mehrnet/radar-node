@@ -47,7 +47,7 @@ func (c Checker) Type() string { return c.m.Name }
 // rest of this method is the subprocess (`run:`) path.
 func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	if err := validateRequest(c.m.Request, opts.Params); err != nil {
-		return probe.Invalid(c.Type(), opts.Target, opts.Mode, opts.Seq, err.Error())
+		return probe.Invalid(c.Type(), opts.Target, opts.Seq, err.Error())
 	}
 
 	if c.m.Action != "" {
@@ -56,7 +56,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 			// Unreachable for a Module that passed validate(), which
 			// every loaded Module has -- kept as a safe fallback
 			// rather than a panic.
-			return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("unknown action %q", c.m.Action))
+			return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("unknown action %q", c.m.Action))
 		}
 		r := checker.Check(ctx, opts)
 		r.Type = c.Type() // report under the module's own name, not the action's
@@ -68,19 +68,18 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	port, err := portalloc.Alloc()
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("allocate port: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("allocate port: %w", err))
 	}
 
 	paramsPath, cleanupParams, err := writeParamsJSON(opts.Params)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("write params_json: %w", err))
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("write params_json: %w", err))
 	}
 	defer cleanupParams()
 
 	ec := execContext{
 		Target:         opts.Target,
 		TimeoutMs:      opts.Timeout.Milliseconds(),
-		Mode:           string(opts.Mode),
 		Params:         opts.Params,
 		ParamsJSONPath: paramsPath,
 		AllocPort:      port,
@@ -88,7 +87,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	if c.m.Prepare != nil {
 		if err := c.startPrepare(ctx, ec, port); err != nil {
-			return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, fmt.Errorf("prepare: %w", err))
+			return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("prepare: %w", err))
 		}
 	}
 
@@ -119,12 +118,12 @@ func (m Module) runAndCollect(ctx context.Context, step Step, ec execContext, op
 	stdout, err := runStep(ctx, step, ec)
 	elapsed := time.Since(start)
 	if err != nil {
-		return probe.Fail(m.Name, opts.Target, opts.Mode, opts.Seq, fmt.Errorf("run: %w", err))
+		return probe.Fail(m.Name, opts.Target, opts.Seq, fmt.Errorf("run: %w", err))
 	}
 
 	result, err := m.collect(stdout)
 	if err != nil {
-		return probe.Fail(m.Name, opts.Target, opts.Mode, opts.Seq, fmt.Errorf("collect: %w", err))
+		return probe.Fail(m.Name, opts.Target, opts.Seq, fmt.Errorf("collect: %w", err))
 	}
 
 	latencyMs := result.LatencyMs
@@ -137,7 +136,7 @@ func (m Module) runAndCollect(ctx context.Context, step Step, ec execContext, op
 	// that rounding error by 1e6, e.g. silently turning 12.5ms into
 	// 12ms.
 	elapsedForResult := time.Duration(latencyMs * float64(time.Millisecond))
-	return probe.Ok(m.Name, opts.Target, opts.Mode, opts.Seq, elapsedForResult, result.Extra)
+	return probe.Ok(m.Name, opts.Target, opts.Seq, elapsedForResult, result.Extra)
 }
 
 // startPrepare launches the prepare command detached from run's

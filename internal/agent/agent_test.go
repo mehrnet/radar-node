@@ -94,7 +94,6 @@ func (f *fakeAPI) handler() http.Handler {
 				ID:           "probe_test",
 				Target:       f.target,
 				Prober:       prober,
-				Mode:         "warm",
 				ProbeCount:   probeCount,
 				TimeoutMs:    timeoutMs,
 				ScheduleType: "manual",

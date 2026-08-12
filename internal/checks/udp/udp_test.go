@@ -30,7 +30,6 @@ func TestCheck_Responds(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  conn.LocalAddr().String(),
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -54,7 +53,6 @@ func TestCheck_NoResponseIsInconclusiveNotFailure(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  conn.LocalAddr().String(),
 		Timeout: 300 * time.Millisecond,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -77,7 +75,6 @@ func TestCheck_ConnectionRefused(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  addr,
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok {

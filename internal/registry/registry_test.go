@@ -58,7 +58,6 @@ func TestDefault_TCPActionRunsForReal(t *testing.T) {
 	res := checker.Check(context.Background(), probe.Options{
 		Target:  ln.Addr().String(),
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -103,7 +102,7 @@ collect:
 	if !ok {
 		t.Fatal("expected echo-dirs to be registered")
 	}
-	res := checker.Check(context.Background(), probe.Options{Target: "x", Timeout: 2 * time.Second, Mode: probe.ModeWarm, Seq: 1})
+	res := checker.Check(context.Background(), probe.Options{Target: "x", Timeout: 2 * time.Second, Seq: 1})
 	if !res.Ok {
 		t.Fatalf("expected the resolved command to actually run, got error %q", res.Error)
 	}
@@ -139,7 +138,6 @@ request:
 	res := checker.Check(context.Background(), probe.Options{
 		Target:  "127.0.0.1:1",
 		Timeout: time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok || res.ErrorCode != probe.ErrorCodeInvalidParams {

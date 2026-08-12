@@ -84,7 +84,6 @@ Usage:
 
 probe flags:
   --type string       tcp | udp | dns | icmp | http | system | <module name> (default "tcp")
-  --probe string       warm | hard (default "warm")
   --count int          number of probes to run (default 1)
   --timeout duration    per-probe timeout (default "5s")
   --format string       json | csv | table (default "json")
@@ -148,7 +147,6 @@ Examples:
 func runProbe(args []string) error {
 	var (
 		checkType  string
-		mode       string
 		count      int
 		timeout    time.Duration
 		format     string
@@ -159,7 +157,6 @@ func runProbe(args []string) error {
 
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	fs.StringVar(&checkType, "type", "tcp", "")
-	fs.StringVar(&mode, "probe", "warm", "")
 	fs.IntVar(&count, "count", 1, "")
 	fs.DurationVar(&timeout, "timeout", 5*time.Second, "")
 	fs.StringVar(&format, "format", "json", "")
@@ -190,10 +187,6 @@ func runProbe(args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown --type %q (not a built-in prober or a module in --modules-dir)", checkType)
 	}
-	probeMode := probe.Mode(mode)
-	if probeMode != probe.ModeWarm && probeMode != probe.ModeHard {
-		return fmt.Errorf("--probe must be %q or %q, got %q", probe.ModeWarm, probe.ModeHard, mode)
-	}
 	if count < 1 {
 		return errors.New("--count must be >= 1")
 	}
@@ -203,7 +196,6 @@ func runProbe(args []string) error {
 		result := checker.Check(context.Background(), probe.Options{
 			Target:  target,
 			Timeout: timeout,
-			Mode:    probeMode,
 			Seq:     i,
 			Params:  params.toParams(),
 		})

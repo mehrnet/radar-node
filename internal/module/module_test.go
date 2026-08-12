@@ -1,16 +1,13 @@
 package module_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mehrnet/radar-node/internal/module"
-	"github.com/mehrnet/radar-node/internal/probe"
 )
 
 func writeFile(t *testing.T, dir, name, content string) {
@@ -409,36 +406,24 @@ collect:
 	}
 }
 
-func TestLoadDir_AcceptsModePlaceholder(t *testing.T) {
+// Regression guard for the Mode removal: {{mode}} used to be a fixed
+// placeholder (probe.Mode passed through verbatim to any module whose
+// engine wanted to branch on warm/hard), but now that probe.Mode
+// itself is gone there's nothing left for it to resolve to -- a
+// module still referencing it must fail to load with the same
+// unrecognized-placeholder error any other unknown token gets, not
+// silently resolve to an empty string.
+func TestLoadDir_RejectsModePlaceholder(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "ok.yaml", `
+	writeFile(t, dir, "bad.yaml", `
 name: mode-mod
 run:
   command: ["echo", "{{mode}}"]
 collect:
   format: writeout_json
 `)
-	if _, err := module.LoadDir(dir); err != nil {
-		t.Fatalf("expected {{mode}} to be accepted, got %v", err)
-	}
-}
-
-func TestChecker_ResolvesModePlaceholder(t *testing.T) {
-	m := loadOne(t, `
-name: mode-echo
-run:
-  command: ["echo", "latency_ms=1", "{{mode}}"]
-collect:
-  format: regex
-  pattern: "latency_ms=(?P<latency_ms>[0-9.]+) (?P<mode>\\w+)"
-`)
-	c := module.NewChecker(m)
-	res := c.Check(context.Background(), probe.Options{Target: "x", Timeout: time.Second, Mode: probe.ModeHard, Seq: 1})
-	if !res.Ok {
-		t.Fatalf("expected ok, got error %q", res.Error)
-	}
-	if res.Extra["mode"] != "hard" {
-		t.Fatalf("expected {{mode}} to resolve to \"hard\", got %v", res.Extra["mode"])
+	if _, err := module.LoadDir(dir); err == nil {
+		t.Fatal("expected {{mode}} to be rejected as an unrecognized placeholder now that Mode is gone")
 	}
 }
 

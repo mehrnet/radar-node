@@ -81,12 +81,12 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	body, statusCode, err := Do(ctx, opts)
 	elapsed := time.Since(start)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	extra := map[string]any{
 		"http_code": statusCode,
 		"bytes":     len(body),
 	}
-	return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, elapsed, extra)
+	return probe.Ok(c.Type(), opts.Target, opts.Seq, elapsed, extra)
 }

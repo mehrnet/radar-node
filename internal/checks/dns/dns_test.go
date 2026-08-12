@@ -67,7 +67,6 @@ func TestCheck_ResolvesAgainstCustomServer(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "example.radar.test.",
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 		Params:  map[string]any{"server": server},
 	})
@@ -111,7 +110,6 @@ func TestCheck_NoAnswerIsFailure(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  "nowhere.radar.test.",
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 		Params:  map[string]any{"server": conn.LocalAddr().String()},
 	})

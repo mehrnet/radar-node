@@ -53,10 +53,8 @@ type roundTripResult struct {
 // shared keep-alive transport (a realistic steady-state path, warmed
 // further by every previous tick's own request) -- and reports both
 // sets of numbers in a single result, rather than a single number
-// whose meaning silently depended on the probe's own Mode. Mode is
-// still accepted (opts.Mode) and stamped onto the result like every
-// other prober does, but no longer changes what this check actually
-// does.
+// whose meaning used to silently depend on the probe's own (now
+// removed) Mode setting.
 //
 // Supported params:
 //
@@ -73,11 +71,11 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	cold, err := c.roundTrip(ctx, baseTransport(true), method, url)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 	warm, err := c.roundTrip(ctx, c.warm, method, url)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	extra := map[string]any{
@@ -95,11 +93,11 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 
 	// latency_ms (the universal default headline every prober reports)
-	// stays the warm figure -- the "realistic steady-state" number
-	// warm mode always favored by default (see probe.Mode's own doc
-	// comment), so existing history/alerting built on it keeps meaning
-	// what it always meant rather than silently doubling in scope.
-	result := probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, warm.elapsed, extra)
+	// stays the warm figure -- the "realistic steady-state" number the
+	// old warm mode always favored by default, so existing history/
+	// alerting built on it keeps meaning what it always meant rather
+	// than silently doubling in scope.
+	result := probe.Ok(c.Type(), opts.Target, opts.Seq, warm.elapsed, extra)
 	if bad := badStatusCode(cold.httpCode, warm.httpCode); bad != 0 {
 		result.Ok = false
 		result.Error = fmt.Sprintf("http %d", bad)

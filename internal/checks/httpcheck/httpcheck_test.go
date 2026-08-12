@@ -21,7 +21,6 @@ func TestCheck_Success(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  srv.URL,
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -42,7 +41,6 @@ func TestCheck_ServerErrorIsNotOk(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  srv.URL,
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeWarm,
 		Seq:     1,
 	})
 	if res.Ok {
@@ -51,9 +49,8 @@ func TestCheck_ServerErrorIsNotOk(t *testing.T) {
 }
 
 // Regression guard for the dual cold/warm redesign: a single Check()
-// call now always reports both figures, regardless of opts.Mode --
-// there is no longer a mode-dependent branch that could silently
-// report only one.
+// call always reports both figures -- there is no longer a mode-
+// dependent branch that could silently report only one.
 func TestCheck_ReportsBothColdAndWarmFigures(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -64,7 +61,6 @@ func TestCheck_ReportsBothColdAndWarmFigures(t *testing.T) {
 	res := c.Check(context.Background(), probe.Options{
 		Target:  srv.URL,
 		Timeout: 2 * time.Second,
-		Mode:    probe.ModeHard, // deliberately not warm -- must make no difference, see below
 		Seq:     1,
 	})
 	if !res.Ok {
@@ -83,9 +79,7 @@ func TestCheck_ReportsBothColdAndWarmFigures(t *testing.T) {
 // Each Check() call makes two requests -- one on a throwaway,
 // non-pooled transport (the cold half) and one on the Checker's own
 // shared transport (the warm half, see New()) -- and the warm half is
-// what actually benefits from connection reuse *across* calls, the
-// same way the old warm-mode behavior did. opts.Mode no longer
-// selects between these; both always happen.
+// what actually benefits from connection reuse *across* calls.
 func TestCheck_WarmRequestReusesConnectionAcrossCalls(t *testing.T) {
 	var remoteAddrs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +93,6 @@ func TestCheck_WarmRequestReusesConnectionAcrossCalls(t *testing.T) {
 		res := c.Check(context.Background(), probe.Options{
 			Target:  srv.URL,
 			Timeout: 2 * time.Second,
-			Mode:    probe.ModeWarm,
 			Seq:     i + 1,
 		})
 		if !res.Ok {

@@ -34,12 +34,12 @@ func (Checker) Type() string { return "icmp" }
 func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	dst, err := net.ResolveIPAddr("ip4", opts.Target)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq,
+		return probe.Fail(c.Type(), opts.Target, opts.Seq,
 			fmt.Errorf("open icmp socket (is net.ipv4.ping_group_range configured?): %w", err))
 	}
 	defer conn.Close()
@@ -59,7 +59,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 	wb, err := msg.Marshal(nil)
 	if err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	deadline := time.Now().Add(opts.Timeout)
@@ -70,20 +70,20 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	start := time.Now()
 	if _, err := conn.WriteTo(wb, &net.UDPAddr{IP: dst.IP}); err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
 	rb := make([]byte, 1500)
 	for {
 		n, _, err := conn.ReadFrom(rb)
 		if err != nil {
-			return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+			return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 		}
 		elapsed := time.Since(start)
 
 		reply, err := icmp.ParseMessage(1, rb[:n])
 		if err != nil {
-			return probe.Fail(c.Type(), opts.Target, opts.Mode, opts.Seq, err)
+			return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 		}
 
 		echo, ok := reply.Body.(*icmp.Echo)
@@ -93,7 +93,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 			continue
 		}
 
-		return probe.Ok(c.Type(), opts.Target, opts.Mode, opts.Seq, elapsed, map[string]any{
+		return probe.Ok(c.Type(), opts.Target, opts.Seq, elapsed, map[string]any{
 			"resolved_ip": dst.IP.String(),
 		})
 	}

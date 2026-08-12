@@ -118,7 +118,6 @@ radar-node probe self --type system
 | Flag | Meaning |
 |---|---|
 | `--type` | `tcp` \| `udp` \| `dns` \| `icmp` \| `http` \| `system` \| any module name (default `tcp`) |
-| `--probe` | `warm` \| `hard` (default `warm`) |
 | `--count` | number of probes to run (default `1`) |
 | `--timeout` | per-probe timeout (default `5s`) |
 | `--format` | `json` \| `csv` \| `table` (default `json`) |
@@ -403,7 +402,6 @@ flattened, self-contained view of the same probe.
   "account_id": "acct_01J8Z2Q1N9R4F0T3X8Y6Z1WXYZ",
   "target": "1.2.3.4:443",
   "prober": "tcp",                 // native check name or a custom module name
-  "mode": "warm",                  // "warm" | "hard" -- ignored by probers that don't use it
   "probe_count": 5,
   "timeout_ms": 5000,
   "schedule": {
@@ -454,7 +452,6 @@ directly to its local cache with no follow-up lookup of any kind.
   "id": "probe_01J8Z3K7QK6H1S8YB6WQXQABCD",
   "target": "1.2.3.4:443",
   "prober": "tcp",
-  "mode": "warm",
   "probe_count": 5,
   "timeout_ms": 5000,
   "schedule_type": "interval",        // "once" | "interval"
@@ -514,7 +511,6 @@ issue one from anymore.
   "ok": true,
   "type": "tcp",
   "target": "1.2.3.4:443",
-  "mode": "warm",
   "latency_ms": 12.4,
   "extra": { "tls_version": "1.3" },
   "observed_at": "2026-07-12T10:00:05.001Z"
@@ -532,7 +528,6 @@ instead:
   "ok": false,
   "type": "tcp",
   "target": "1.2.3.4:443",
-  "mode": "warm",
   "error": "dial tcp 1.2.3.4:443: connect: connection refused",
   "observed_at": "2026-07-12T10:00:05.812Z"
 }
@@ -551,7 +546,6 @@ attempt that failed -- no probe/action was ever attempted in this case:
   "ok": false,
   "type": "xray-vless",
   "target": "1.2.3.4:6300",
-  "mode": "warm",
   "error": "missing required param \"uuid\"",
   "error_code": "invalid_params",
   "observed_at": "2026-07-12T10:00:05.812Z"
