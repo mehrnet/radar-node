@@ -50,12 +50,46 @@ func TestCheck_ServerErrorIsNotOk(t *testing.T) {
 	}
 }
 
-func TestCheck_WarmModeReusesConnection(t *testing.T) {
-	var remoteAddrs [2]string
-	var reqCount int
+// Regression guard for the dual cold/warm redesign: a single Check()
+// call now always reports both figures, regardless of opts.Mode --
+// there is no longer a mode-dependent branch that could silently
+// report only one.
+func TestCheck_ReportsBothColdAndWarmFigures(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		remoteAddrs[reqCount] = r.RemoteAddr
-		reqCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := httpcheck.New()
+	res := c.Check(context.Background(), probe.Options{
+		Target:  srv.URL,
+		Timeout: 2 * time.Second,
+		Mode:    probe.ModeHard, // deliberately not warm -- must make no difference, see below
+		Seq:     1,
+	})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	for _, key := range []string{"cold_ttfb_ms", "warm_ttfb_ms", "dns_ms", "connect_ms", "tls_ms", "bytes"} {
+		if _, ok := res.Extra[key]; !ok {
+			t.Errorf("expected Extra to contain %q, got %+v", key, res.Extra)
+		}
+	}
+	if res.LatencyMs == nil {
+		t.Fatal("expected latency_ms to be set")
+	}
+}
+
+// Each Check() call makes two requests -- one on a throwaway,
+// non-pooled transport (the cold half) and one on the Checker's own
+// shared transport (the warm half, see New()) -- and the warm half is
+// what actually benefits from connection reuse *across* calls, the
+// same way the old warm-mode behavior did. opts.Mode no longer
+// selects between these; both always happen.
+func TestCheck_WarmRequestReusesConnectionAcrossCalls(t *testing.T) {
+	var remoteAddrs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteAddrs = append(remoteAddrs, r.RemoteAddr)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -73,28 +107,16 @@ func TestCheck_WarmModeReusesConnection(t *testing.T) {
 		}
 	}
 
-	// Same client-side RemoteAddr (as seen by the server) on both
-	// requests means the second probe reused the first's connection
-	// instead of dialing fresh -- the whole point of warm mode.
-	if remoteAddrs[0] != remoteAddrs[1] {
-		t.Fatalf("expected connection reuse, got different source ports: %q vs %q", remoteAddrs[0], remoteAddrs[1])
+	// Request order within and across calls is deterministic (cold,
+	// then warm, sequentially -- see Check's own comment): [0]=call1
+	// cold, [1]=call1 warm, [2]=call2 cold, [3]=call2 warm.
+	if len(remoteAddrs) != 4 {
+		t.Fatalf("expected 4 requests total (cold+warm per call), got %d: %v", len(remoteAddrs), remoteAddrs)
 	}
-}
-
-func TestCheck_HardModeForcesFreshConnection(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := httpcheck.New()
-	res := c.Check(context.Background(), probe.Options{
-		Target:  srv.URL,
-		Timeout: 2 * time.Second,
-		Mode:    probe.ModeHard,
-		Seq:     1,
-	})
-	if !res.Ok {
-		t.Fatalf("expected ok, got error %q", res.Error)
+	if remoteAddrs[1] != remoteAddrs[3] {
+		t.Fatalf("expected the warm requests to reuse one connection across calls, got %q vs %q", remoteAddrs[1], remoteAddrs[3])
+	}
+	if remoteAddrs[0] == remoteAddrs[2] {
+		t.Fatalf("expected each call's own cold request to dial fresh, got the same source port twice: %q", remoteAddrs[0])
 	}
 }

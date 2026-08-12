@@ -4,9 +4,24 @@ request:
   - name: method
     type: string
     required: false
+# Every check now measures both a cold (fresh connection) and a warm
+# (Checker's own reused, keep-alive connection) round trip and reports
+# both -- replacing the old mode-dependent single ttfb_ms, which meant
+# a different thing depending on whether the probe happened to be
+# configured warm or hard. latency_ms (every prober's own universal
+# default) stays the warm figure, matching what warm mode always
+# favored by default. dns_ms/connect_ms/tls_ms are only ever measured
+# on the cold request -- a reused warm connection skips all three, so
+# they'd read as a meaningless near-zero there.
 response:
   - name: http_code
     type: number
+  - name: cold_ttfb_ms
+    type: number
+    unit: ms
+  - name: warm_ttfb_ms
+    type: number
+    unit: ms
   - name: dns_ms
     type: number
     unit: ms
@@ -14,9 +29,6 @@ response:
     type: number
     unit: ms
   - name: tls_ms
-    type: number
-    unit: ms
-  - name: ttfb_ms
     type: number
     unit: ms
   - name: bytes

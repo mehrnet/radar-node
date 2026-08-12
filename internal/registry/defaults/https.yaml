@@ -4,9 +4,16 @@ request:
   - name: method
     type: string
     required: false
+# See http.yaml's own comment -- same action, same schema change.
 response:
   - name: http_code
     type: number
+  - name: cold_ttfb_ms
+    type: number
+    unit: ms
+  - name: warm_ttfb_ms
+    type: number
+    unit: ms
   - name: dns_ms
     type: number
     unit: ms
@@ -14,9 +21,6 @@ response:
     type: number
     unit: ms
   - name: tls_ms
-    type: number
-    unit: ms
-  - name: ttfb_ms
     type: number
     unit: ms
   - name: bytes
