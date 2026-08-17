@@ -108,7 +108,6 @@ type ResultsResponse struct {
 // kind/engine/engine_version here anymore -- that metadata now lives
 // server-side, attached to the hash itself, populated once via
 // POST /v1/nodes/modules rather than repeated on every heartbeat.
-//
 type HeartbeatRequest struct {
 	SpecVersion  int    `json:"spec_version"`
 	NodeID       string `json:"node_id"`
