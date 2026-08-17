@@ -1,6 +1,9 @@
 package subscriptionfetch
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // socksInboundPort is a fixed placeholder, not a real port anyone
 // binds to -- xray-prepare.sh only ever uses a config's own declared
@@ -48,6 +51,17 @@ func xrayParams(outbound map[string]any) map[string]any {
 type streamSettingsOpts struct {
 	network, security, host, path, sni       string
 	fingerprint, publicKey, shortID, spiderX string
+	// headerType is tcp's own obfuscation mode (the only value in real
+	// use is "http", camouflaging the stream as plaintext HTTP -- an
+	// empty/absent value means no obfuscation, xray-core's own default,
+	// so the tcp case below only adds anything when it's set). mode/
+	// extra are xhttp-specific: mode picks which of xhttp's transfer
+	// modes to use ("auto" lets the client and server negotiate one --
+	// see the xhttp case below for why that's the fallback rather than
+	// leaving it unset), extra is a server-tuned opaque JSON object
+	// (buffer sizes, padding, etc.) passed through verbatim, never
+	// interpreted here.
+	headerType, mode, extra string
 }
 
 func streamSettingsFor(o streamSettingsOpts) map[string]any {
@@ -89,6 +103,22 @@ func streamSettingsFor(o streamSettingsOpts) map[string]any {
 		stream["realitySettings"] = realitySettings
 	}
 	switch o.network {
+	case "tcp":
+		// Only real xray-core value for this is "http" -- plaintext TCP
+		// dressed up as an ordinary HTTP request so it doesn't stand out
+		// on the wire. Left alone (no tcpSettings at all) when unset,
+		// matching xray-core's own "no camouflage" default.
+		if o.headerType == "http" {
+			stream["tcpSettings"] = map[string]any{
+				"header": map[string]any{
+					"type": "http",
+					"request": map[string]any{
+						"path":    []string{defaultStr(o.path, "/")},
+						"headers": map[string]any{"Host": []string{firstNonEmpty(o.host, effectiveSNI)}},
+					},
+				},
+			}
+		}
 	case "ws":
 		stream["wsSettings"] = map[string]any{
 			"path":    defaultStr(o.path, "/"),
@@ -96,6 +126,39 @@ func streamSettingsFor(o streamSettingsOpts) map[string]any {
 		}
 	case "grpc":
 		stream["grpcSettings"] = map[string]any{"serviceName": o.path}
+	case "xhttp":
+		// Previously completely unhandled -- a subscription's xhttp
+		// entries all fell through this switch with none of path/host/
+		// mode/extra ever making it into the outbound at all, silently
+		// producing a structurally incomplete config (confirmed in
+		// production: 100% check failure across every xhttp entry, on
+		// every node, regardless of xray-core version -- xhttp genuinely
+		// can't negotiate without at least a matching path).
+		xhttpSettings := map[string]any{
+			"path": defaultStr(o.path, "/"),
+			"host": firstNonEmpty(o.host, effectiveSNI),
+			// "auto" (not xray-core's own unset-defaults-to-"auto"
+			// behavior left implicit) -- explicit here since this is the
+			// one xhttp field a URI's own mode= param might legitimately
+			// omit while still expecting auto-negotiation, not "packet-up"
+			// or "stream-up" specifically.
+			"mode": defaultStr(o.mode, "auto"),
+		}
+		// extra is server-tuned opaque JSON (buffer sizes, padding,
+		// etc.) -- passed through as-is rather than modeled field by
+		// field, since xray-core's own accepted shape here has changed
+		// across versions and isn't this parser's concern to track.
+		// Silently dropped (not a fatal error) if it fails to parse --
+		// a probe missing one server's own tuning hints degrades to
+		// xhttp's built-in defaults for those fields rather than never
+		// getting created at all.
+		if o.extra != "" {
+			var extra map[string]any
+			if err := json.Unmarshal([]byte(o.extra), &extra); err == nil {
+				xhttpSettings["extra"] = extra
+			}
+		}
+		stream["xhttpSettings"] = xhttpSettings
 	}
 	return stream
 }

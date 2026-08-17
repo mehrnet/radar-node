@@ -163,6 +163,133 @@ func TestParse_VlessRealityIdentityStableAcrossRotation(t *testing.T) {
 	}
 }
 
+// Regression for a real production report: every xhttp-transport entry
+// across an entire subscription failed 100% of the time, on every
+// node, regardless of xray-core version -- streamSettingsFor's switch
+// had no "xhttp" case at all, so path/host/mode/extra were silently
+// dropped and the resulting outbound had no xhttpSettings whatsoever.
+// xhttp genuinely can't negotiate without at least a matching path, so
+// this wasn't a version-compatibility issue, it was a structurally
+// incomplete generated config. Real URI from the report.
+func TestParse_VlessXhttp(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@tun1.momasvps.ir:8016?security=reality&type=xhttp&headerType=&path=%2Fpath&host=hostname&mode=auto&extra=%7B%22scMaxEachPostBytes%22%3A+1000000%2C+%22scMaxConcurrentPosts%22%3A+100%2C+%22scMinPostsIntervalMs%22%3A+30%2C+%22xPaddingBytes%22%3A+%22100-1000%22%2C+%22noGRPCHeader%22%3A+false%7D&sni=amp-api-edge.apps.apple.com&fp=firefox&pbk=-z6cgn79fnYFLbm9SEHlhE4ygL3vt-11xMpvLGMWyj8&sid=3bec2937ffa88b18#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("expected 1 proxy, got %d", len(proxies))
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	if streamSettings["network"] != "xhttp" {
+		t.Fatalf("expected xhttp network, got %+v", streamSettings)
+	}
+	xhttpSettings, ok := streamSettings["xhttpSettings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected xhttpSettings to be present, got %+v", streamSettings)
+	}
+	if xhttpSettings["path"] != "/path" {
+		t.Fatalf("unexpected path: %+v", xhttpSettings)
+	}
+	if xhttpSettings["host"] != "hostname" {
+		t.Fatalf("unexpected host: %+v", xhttpSettings)
+	}
+	if xhttpSettings["mode"] != "auto" {
+		t.Fatalf("unexpected mode: %+v", xhttpSettings)
+	}
+	extra, ok := xhttpSettings["extra"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected extra to be present and parsed, got %+v", xhttpSettings)
+	}
+	if extra["scMaxEachPostBytes"] != float64(1000000) {
+		t.Fatalf("unexpected scMaxEachPostBytes: %+v", extra)
+	}
+	if extra["xPaddingBytes"] != "100-1000" {
+		t.Fatalf("unexpected xPaddingBytes: %+v", extra)
+	}
+	if extra["noGRPCHeader"] != false {
+		t.Fatalf("unexpected noGRPCHeader: %+v", extra)
+	}
+	// realitySettings must still be built correctly alongside xhttp --
+	// this isn't an either/or with the tcp/xhttp-specific settings above.
+	realitySettings, ok := streamSettings["realitySettings"].(map[string]any)
+	if !ok || realitySettings["publicKey"] != "-z6cgn79fnYFLbm9SEHlhE4ygL3vt-11xMpvLGMWyj8" {
+		t.Fatalf("unexpected realitySettings: %+v", streamSettings)
+	}
+}
+
+// A missing/unparseable extra must never fail the whole probe -- it
+// degrades to xhttp's own built-in defaults for those fields rather
+// than the proxy never getting created at all.
+func TestParse_VlessXhttpNoExtra(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@tun1.momasvps.ir:8016?security=none&type=xhttp&path=%2Fpath#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	xhttpSettings := streamSettings["xhttpSettings"].(map[string]any)
+	if _, present := xhttpSettings["extra"]; present {
+		t.Fatalf("expected no extra key when the URI carries none, got %+v", xhttpSettings)
+	}
+	// mode defaults to "auto" when the URI doesn't specify one.
+	if xhttpSettings["mode"] != "auto" {
+		t.Fatalf("unexpected default mode: %+v", xhttpSettings)
+	}
+}
+
+// Regression for the other half of the same report: plain tcp with
+// http header obfuscation (headerType=http) also fell straight through
+// streamSettingsFor's switch with no tcpSettings at all. Real URI from
+// the report (security=none here -- no TLS/reality, http camouflage is
+// the only obfuscation this entry has).
+func TestParse_VlessTcpHttpHeaderObfuscation(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@tun5.momasvps.ir:6016?security=none&type=tcp&headerType=http&path=%2F&host=#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	tcpSettings, ok := streamSettings["tcpSettings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected tcpSettings to be present, got %+v", streamSettings)
+	}
+	header, ok := tcpSettings["header"].(map[string]any)
+	if !ok || header["type"] != "http" {
+		t.Fatalf("unexpected header: %+v", tcpSettings)
+	}
+	request, ok := header["request"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected header.request to be present, got %+v", header)
+	}
+	if paths, ok := request["path"].([]string); !ok || len(paths) != 1 || paths[0] != "/" {
+		t.Fatalf("unexpected request path: %+v", request)
+	}
+}
+
+// A "tcp" entry with no headerType at all (the overwhelmingly common
+// case -- plain TCP, no camouflage) must not gain a spurious tcpSettings
+// block just because the switch now has a "tcp" case.
+func TestParse_VlessTcpNoHeaderType(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=tcp#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	if _, present := streamSettings["tcpSettings"]; present {
+		t.Fatalf("expected no tcpSettings for a plain tcp entry, got %+v", streamSettings)
+	}
+}
+
 func TestParse_Trojan(t *testing.T) {
 	line := "trojan://s3cr3t@9.10.11.12:443?sni=trojan.example#my-trojan"
 	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
