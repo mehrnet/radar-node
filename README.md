@@ -349,13 +349,18 @@ two things about its own standing: whether the API accepted its results,
 and whether the API still wants it to keep working. Balances, prices, and
 plans are entirely `radar-api`'s concern.
 
-There is no server-computed dispatch. A node pulls an incremental,
-seq-ordered log of probe-definition changes and keeps its own local cache of
+There is no server-computed dispatch. A node syncs its own current probe
+assignment via content-hash comparison and keeps its own local cache of
 what to run and when; the server never computes per-tick "what's due"
-itself. This makes the API side stateless per request (append an event on
-write, hand back everything after a cursor on read) and pushes all
-scheduling compute to the node, where it's cheap and doesn't compete for D1
-write capacity.
+itself. A node sends its own last-known hash on every heartbeat; the server
+compares it against what it has compiled for that node and replies either
+"you're caught up" (match, nothing sent back) or the full current
+assignment (mismatch) -- never a delta to merge in. This pushes all
+scheduling compute to the node, where it's cheap and doesn't compete for
+central-database write capacity, the same reasoning the old incremental-log
+design had, just without that design's own unbounded-growth problem (every
+single probe-definition change used to leave a permanent row behind,
+regardless of whether any node still needed it).
 
 ### Conventions
 
@@ -376,16 +381,25 @@ write capacity.
   the `omitempty` json tags already on `probe.Result`. A field's absence
   and its zero value are always distinguishable this way (e.g. a missing
   `error` key means no error).
-- Every top-level request/response body carries `"spec_version": 1`. A
-  node or API build that doesn't understand a future version rejects the
-  call with `spec_version_unsupported` rather than guessing.
+- Every top-level request/response body carries `"spec_version": 2`.
+  `radar-api` deliberately never hard-rejects an older `spec_version` --
+  a BYO node can't be force-upgraded, and every other part of a heartbeat
+  (liveness, module sync, the pending-action/auto-update handshake) still
+  has to work regardless, since a stuck node's *only* path off an old
+  version is receiving an auto-update action on this same response. An
+  older agent (`spec_version` 1, `since_seq`-based) simply keeps getting
+  the old delta-log response shape it already understands; only a request
+  that actually carries `probe_hash` gets the new hash-compare shape back.
 - All node-facing endpoints require the node bearer token
   (`Authorization: Bearer <node_id>:<node_secret>`), issued once at node
   registration -- no JWT, no request signing.
-- `seq` (on both `Event` and `Result`) is a plain, not-necessarily-
-  contiguous monotonic cursor, never reused or reordered. A node never
-  interprets gaps -- it only ever asks for "everything after the highest
-  seq I've already applied."
+- `seq` (on `Result`, and on `Event` when it's a `"triggered"` entry) is a
+  plain, informational identifier -- not a sync cursor. A pre-2.0 agent's
+  `since_seq` was the one exception (a monotonic, not-necessarily-
+  contiguous cursor it never interpreted gaps in, only ever asking for
+  "everything after the highest seq I've already applied") -- spec_version
+  2 has no cursor at all, see [`probe_hash`/`probes`](#post-v1nodesheartbeat)
+  below.
 
 ### Entities
 
@@ -463,35 +477,68 @@ directly to its local cache with no follow-up lookup of any kind.
 }
 ```
 
+#### Probe assignment sync (`probe_hash`/`probes`)
+
+As of `spec_version` 2, a node's own probe assignment (which probes it
+should be running at all) syncs via content-hash comparison, folded into
+`POST /v1/nodes/heartbeat`'s `probe_hash` request field and `probe_hash`/
+`probes` response fields -- not an incremental event log. There is no
+cursor: a node sends its own last-known `probe_hash` (empty on its very
+first-ever heartbeat, since nothing's cached yet); the server compares it
+against what it has compiled for that node and replies with:
+
+- **A hash match** -- `probe_hash`/`probes` are both *absent* from the
+  response entirely (not empty). Nothing changed; the node's cache is
+  already correct, there's nothing to do.
+- **A hash mismatch** -- both fields are present. `probes` is this node's
+  **full current assignment** (every [ProbeSnapshot](#probesnapshot) it
+  should now be running), never a delta. The node replaces its whole local
+  cache with it and adopts the accompanying `probe_hash` as its own new
+  last-known value to send on the next heartbeat.
+
+Applying a full replacement is not a bare cache swap, though: a probe
+present in both the old and new assignment must keep this node's own
+memory of when it last ran it, or every probe on this node would look
+simultaneously overdue the instant any single mismatch resolves --
+causing a check-burst. Only a fresh `starts_at`/interval computation
+against that *preserved* history decides due-ness going forward, same as
+it always has. A probe absent from the new assignment (removed, paused,
+deactivated, ...) is simply dropped from the cache.
+
+A node that has never synced (or has gone stale enough that its own
+locally-cached probe set no longer matches anything) just sends an empty
+`probe_hash` -- that alone guarantees a mismatch against whatever the
+server has, so it always converges to the correct current state in one
+round trip, the same "no separate bootstrap path" guarantee `since_seq=0`
+used to give under the old protocol.
+
 #### Event
 
-One entry from the probe-definition change log a node syncs incrementally,
-folded into `POST /v1/nodes/heartbeat`'s `since_seq` request field and
-`events` response field (there is no longer a separate polling
-endpoint for this -- see [Local scheduling](#local-scheduling)).
+As of `spec_version` 2, the only entries a node still receives here are
+`"triggered"` ones (a manual/Quick Check run) -- probe-assignment changes
+are carried by `probe_hash`/`probes` (see "Probe assignment sync" above)
+instead. Still delivered inline on `POST /v1/nodes/heartbeat`'s own
+`events` response field, on every heartbeat, regardless of whether
+`probe_hash` also matched or mismatched that same request.
 
 ```jsonc
 {
   "seq": 42,
-  "event_type": "updated",          // "created" | "updated" | "removed"
-  "probe": { /* ProbeSnapshot, see above */ }
+  "event_type": "triggered",
+  "probe": { /* ProbeSnapshot, see above */ },
+  "run_id": "run_01J8Z4M5N6P7Q8R9S0T1U2V3WX"
 }
 ```
 
-- `created` -- a probe now applies to this node. The node adds it to its
-  local cache.
-- `updated` -- any field of a probe this node already has changed. The node
-  replaces its cached copy wholesale with the new snapshot, but must
-  never reset its own bookkeeping of when it last ran the probe -- only a
-  fresh `starts_at`/interval computation against that preserved history
-  decides due-ness going forward.
-- `removed` -- the probe no longer applies to this node. The node drops it
-  from its cache entirely.
-
-A node that has never synced (or is resyncing from scratch) requests from
-`since_seq=0` and applies every event in order; the log is a complete
-history, so replaying it from zero always converges on the correct
-current state.
+The node queues an immediate one-off run of `probe` under `run_id` --
+entirely independent of that probe's own normal schedule/due-ness
+bookkeeping (a triggered run never touches when the probe is next due on
+its own schedule), and every node executing the same trigger reports
+results back under that one shared `run_id` so they correlate into a
+single run server-side instead of each node minting its own independent
+one the way a normal scheduled execution still does. `seq` here is a
+plain informational identifier now, not a sync cursor -- there's nothing
+to resume from it.
 
 #### Result
 
@@ -580,16 +627,19 @@ There is no `window_seconds` fetch parameter and no server-side "due"
 computation. Instead, a node runs two independent loops:
 
 1. **Heartbeat** -- periodic (interval suggested by the server, see
-   below), and also where probe-definition sync happens: each call sends
-   `since_seq=<cursor>` and the response's `events` array is applied to
-   the local probe cache in order, advancing the cursor, same as a
-   separate polling endpoint used to do. This used to be two independent
-   loops on their own fixed timers (a heartbeat and an events poll),
-   each paying its own request/auth round trip for what's almost always
-   zero new information -- merged into one since there's no freshness
-   lost by piggybacking probe-sync on a call that already happens this
-   often. Also updates the clock offset from `server_time` on every
-   call.
+   below), and also where probe-assignment sync happens: each call sends
+   this node's own last-known `probe_hash`, and the response either
+   confirms it's still current (nothing to apply) or hands back the full
+   current assignment on a mismatch, which replaces the local probe
+   cache wholesale (see "Probe assignment sync" above) -- there's no
+   cursor to advance. A `"triggered"` entry in the response's `events`
+   array is applied separately, queuing an immediate one-off run. This
+   used to be two independent loops on their own fixed timers (a
+   heartbeat and an events poll), each paying its own request/auth round
+   trip for what's almost always zero new information -- merged into one
+   since there's no freshness lost by piggybacking probe-sync on a call
+   that already happens this often. Also updates the clock offset from
+   `server_time` on every call.
 2. **Scheduler tick** -- on a short, fixed local interval, scans the
    cached probes and executes whichever are due per `node_now()`. A probe is
    marked as run (its last-run timestamp updated) *before* the probes
@@ -618,13 +668,13 @@ yet), typically by whatever provisioning flow/UI adds the node.
 
 Request:
 ```jsonc
-{ "spec_version": 1, "name": "eu-west-3" }
+{ "spec_version": 2, "name": "eu-west-3" }
 ```
 
 Response:
 ```jsonc
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "node_id": "node_01J8Z1A2B3C4D5E6F7G8H9J0KL",
   "node_secret": "9f2c...redacted...a41d"   // shown once, never retrievable again
 }
@@ -638,7 +688,7 @@ than one call per probe.
 Request:
 ```jsonc
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "node_id": "node_01J8Z1A2B3C4D5E6F7G8H9J0KL",
   "batch_id": "batch_01J8Z5X6Y7Z8A9B0C1D2E3FGH",
   "sent_at": "2026-07-12T10:00:08.900Z",
@@ -656,7 +706,7 @@ Response -- per-result acceptance, since a batch can straddle a balance
 running out or a probe/account going `inactive_billing` mid-way:
 ```jsonc
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "accepted": 4,
   "rejected": 1,
   "results": [
@@ -678,16 +728,17 @@ already in flight when the status changed.
 #### `POST /v1/nodes/heartbeat`
 
 Periodic (interval suggested by the API, see response) -- the content-
-addressed module sync handshake, probe-definition sync, and clock
+addressed module sync handshake, probe-assignment sync, and clock
 calibration are all folded into this single call rather than three
 separate polls. `probers` is a compact inventory, one
 `"prober_id:file_hash"` entry per loaded module -- mirrors the
 `"node_id:secret"` token convention elsewhere in this protocol. There is
 no `kind`/`engine`/`engine_version` here anymore; that metadata is
 attached to the hash itself server-side (see `POST /v1/nodes/modules`),
-populated once rather than repeated on every heartbeat. `since_seq` is
-this node's probe-event cursor (0 for a full resync) -- see
-[Event](#event) and [Local scheduling](#local-scheduling).
+populated once rather than repeated on every heartbeat. `probe_hash` is
+this node's own last-known content hash for its compiled probe
+assignment (empty for a full resync) -- see "Probe assignment sync"
+above and [Local scheduling](#local-scheduling).
 
 `os`/`arch` are this process's own `runtime.GOOS`/`runtime.GOARCH` --
 how `radar-api` knows whether a given bundled module (not every engine
@@ -707,7 +758,7 @@ already-opted-into module in the same pass as the binary itself.
 Request:
 ```jsonc
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "node_id": "node_01J8Z1A2B3C4D5E6F7G8H9J0KL",
   "agent_version": "0.3.1",
   "os": "linux",
@@ -719,28 +770,43 @@ Request:
   "modules": {
     "xray-vless": { "version": "26.3.27-1", "url": "https://radar.mehrnet.com/install/modules/xray.yaml" }
   },
-  "since_seq": 42,
+  "probe_hash": "b17c...redacted...9f02",
   "sent_at": "2026-07-12T10:00:00.000Z"
 }
 ```
 
-Response (200 -- every reported hash is already known):
+Response (200 -- `probe_hash` still matches, nothing to sync):
 ```jsonc
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "node_status": "active",           // "active" | "suspended" | "deactivated" | "inactive_billing"
   "heartbeat_interval_seconds": 30,
+  "server_time": "2026-07-12T10:00:00.123Z"
+}
+```
+
+Response (200 -- `probe_hash` mismatched; full current assignment, plus an
+unrelated pending trigger):
+```jsonc
+{
+  "spec_version": 2,
+  "node_status": "active",
+  "heartbeat_interval_seconds": 30,
   "server_time": "2026-07-12T10:00:00.123Z",
+  "probe_hash": "a94e...redacted...c30b",
+  "probes": [ /* ProbeSnapshot, one per currently-assigned probe */ ],
   "events": [
-    { "seq": 43, "event_type": "created", "probe": { /* ProbeSnapshot */ } }
+    { "seq": 43, "event_type": "triggered", "probe": { /* ProbeSnapshot */ }, "run_id": "run_01J..." }
   ]
 }
 ```
 
-An empty (or omitted) `events` array is a normal, common response -- it
-just means nothing changed since `since_seq`. The node uses `server_time`
-from every response to refresh its clock offset regardless of whether
-`events` was empty.
+`probe_hash`/`probes` are both entirely absent (not empty) whenever this
+node's own reported hash already matched -- that's the normal, common
+case on most heartbeats. An absent (or empty) `events` array is equally
+normal -- it just means no trigger is currently pending for this node.
+The node uses `server_time` from every response to refresh its clock
+offset regardless of whether anything else changed.
 
 Response (409 -- one or more hashes aren't recognized yet):
 ```jsonc
@@ -833,7 +899,7 @@ trusting the claim.
 Request:
 ```jsonc
 {
-  "spec_version": 1,
+  "spec_version": 2,
   "node_id": "node_01J8Z1A2B3C4D5E6F7G8H9J0KL",
   "modules": [
     {
@@ -847,7 +913,7 @@ Request:
 
 Response:
 ```jsonc
-{ "spec_version": 1, "stored": 1 }
+{ "spec_version": 2, "stored": 1 }
 ```
 
 `stored` counts only genuinely new content -- radar-api is

@@ -13,7 +13,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/wire"
 )
 
-func TestHeartbeat_SendsSinceSeqAndParsesEvents(t *testing.T) {
+func TestHeartbeat_SendsProbeHashAndParsesFullSnapshotOnMismatch(t *testing.T) {
 	var gotAuth string
 	var gotReq wire.HeartbeatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -22,10 +22,14 @@ func TestHeartbeat_SendsSinceSeqAndParsesEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 		json.NewEncoder(w).Encode(wire.HeartbeatResponse{
-			SpecVersion: 1,
+			SpecVersion: 2,
 			NodeStatus:  "active",
 			ServerTime:  "2026-07-13T00:00:00Z",
-			Events:      []wire.Event{{Seq: 11, EventType: "created", Probe: wire.ProbeSnapshot{ID: "probe_1", Target: "1.2.3.4:443", Prober: "tcp"}}},
+			ProbeHash:   "new_hash",
+			Probes:      []wire.ProbeSnapshot{{ID: "probe_1", Target: "1.2.3.4:443", Prober: "tcp"}},
+			// A "triggered" event still rides the shared Events field,
+			// entirely independent of ProbeHash/Probes above.
+			Events: []wire.Event{{Seq: 11, EventType: "triggered", RunID: "run_abc", Probe: wire.ProbeSnapshot{ID: "probe_2", Target: "5.6.7.8:443", Prober: "tcp"}}},
 		})
 	}))
 	defer srv.Close()
@@ -34,18 +38,21 @@ func TestHeartbeat_SendsSinceSeqAndParsesEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := c.Heartbeat(context.Background(), wire.HeartbeatRequest{NodeID: "node_1", SinceSeq: 10})
+	resp, err := c.Heartbeat(context.Background(), wire.HeartbeatRequest{NodeID: "node_1", ProbeHash: "stale_hash"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotAuth != "Bearer node_1:secret" {
 		t.Fatalf("expected bearer auth, got %q", gotAuth)
 	}
-	if gotReq.SinceSeq != 10 {
-		t.Fatalf("expected since_seq=10 in the request body, got %d", gotReq.SinceSeq)
+	if gotReq.ProbeHash != "stale_hash" {
+		t.Fatalf("expected probe_hash=stale_hash in the request body, got %q", gotReq.ProbeHash)
 	}
-	if len(resp.Events) != 1 || resp.Events[0].Probe.ID != "probe_1" {
-		t.Fatalf("unexpected response: %+v", resp)
+	if resp.ProbeHash != "new_hash" || len(resp.Probes) != 1 || resp.Probes[0].ID != "probe_1" {
+		t.Fatalf("unexpected full-snapshot response: %+v", resp)
+	}
+	if len(resp.Events) != 1 || resp.Events[0].EventType != "triggered" || resp.Events[0].RunID != "run_abc" {
+		t.Fatalf("unexpected triggered event in response: %+v", resp)
 	}
 }
 

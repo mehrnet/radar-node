@@ -1,11 +1,11 @@
 // Package agent implements the `radar-node agent` loop. Unlike
 // the original design, the server never tells this agent what's due
-// -- it syncs probe *definitions* incrementally (folded into
-// POST /v1/nodes/heartbeat's since_seq/events, see heartbeatLoop)
-// into a local cache, decides for itself when something is due using
-// its own clock-corrected notion of "now" (see clock.go), runs it
-// through the same Checkers the `probe` subcommand uses, and reports
-// results back keyed by a locally-generated run id. See
+// -- it syncs its own probe *assignment* via content-hash comparison
+// (folded into POST /v1/nodes/heartbeat's probe_hash/probes, see
+// heartbeatLoop) into a local cache, decides for itself when something
+// is due using its own clock-corrected notion of "now" (see clock.go),
+// runs it through the same Checkers the `probe` subcommand uses, and
+// reports results back keyed by a locally-generated run id. See
 // README.md for the wire contract this package implements.
 package agent
 
@@ -157,13 +157,14 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-// heartbeatLoop also carries probe-definition sync and clock
+// heartbeatLoop also carries probe-assignment sync (content-hash
+// compared, see cache.go's own replaceAssignment) and clock
 // calibration -- folded in from what used to be a separate
 // eventsSyncLoop polling GET /v1/nodes/events on its own timer. Both
 // loops fired on a fixed interval regardless of activity and each
 // paid its own request/auth round trip; since a heartbeat already
 // happens this often, there's no freshness lost by piggybacking
-// since_seq/events on it instead, and it halves the number of always-
+// assignment sync on it instead, and it halves the number of always-
 // on polling requests this agent makes.
 func (a *agent) heartbeatLoop(ctx context.Context) {
 	interval := 30 * time.Second // sane default until the server tells us otherwise
@@ -180,7 +181,7 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			Arch:         runtime.GOARCH,
 			Probers:      proberHashes,
 			Modules:      a.reg.ModuleVersions(),
-			SinceSeq:     a.cache.lastKnownSeq(),
+			ProbeHash:    a.cache.lastKnownHash(),
 			SentAt:       sentAt.UTC().Format(time.RFC3339Nano),
 		})
 		return resp, sentAt, time.Now(), err
@@ -214,9 +215,18 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		if serverTime, parseErr := time.Parse(time.RFC3339Nano, resp.ServerTime); parseErr == nil {
 			a.clock.update(serverTime, sentAt, receivedAt)
 		}
+		// Present only on a hash mismatch (see radar-api's own
+		// node-protocol.ts) -- an empty ProbeHash means "nothing
+		// changed, you're already caught up", not "you have zero
+		// probes" (a genuinely empty assignment still carries a real,
+		// non-empty hash of its own).
+		if resp.ProbeHash != "" {
+			a.cache.replaceAssignment(resp.ProbeHash, resp.Probes)
+			log.Printf("agent: synced probe assignment (%d probe(s))", len(resp.Probes))
+		}
 		if len(resp.Events) > 0 {
-			a.cache.applyEvents(resp.Events)
-			log.Printf("agent: synced %d probe event(s)", len(resp.Events))
+			a.cache.applyTriggeredEvents(resp.Events)
+			log.Printf("agent: synced %d triggered event(s)", len(resp.Events))
 		}
 		switch resp.Command {
 		case "delete":
@@ -597,7 +607,7 @@ func (a *agent) runDueProbes(ctx context.Context) {
 	// simply lost (an interval probe is due again next interval); that
 	// is the accepted failure mode, not silent double-execution.
 	// Triggers don't touch lastRunAt at all -- they're independent of
-	// due-ness bookkeeping, see applyEvents.
+	// due-ness bookkeeping, see applyTriggeredEvents.
 	for _, pr := range due {
 		a.cache.markRun(pr.ID, now)
 	}

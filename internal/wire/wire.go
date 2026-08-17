@@ -2,12 +2,17 @@
 // and radar-api, per README.md. Changing a field here is a
 // breaking change to that spec and must be reflected in SpecVersion.
 //
-// There is no more server-computed dispatch. A node syncs probe
-// definitions incrementally (POST /v1/nodes/heartbeat's since_seq/
-// events) into its own local cache and decides for itself when
-// something is due -- see internal/agent's scheduler. Results are
-// keyed by a node-generated RunID instead of a server-issued
-// assignment id.
+// There is no more server-computed dispatch. A node syncs its own
+// probe assignment via content-hash comparison (POST /v1/nodes/
+// heartbeat's probe_hash/probes, spec_version 2+) rather than an
+// incremental delta stream -- it sends its own last-known hash, and
+// the server replies either "you're caught up" (hash matches, nothing
+// sent back) or the full current assignment (mismatch), which this
+// agent applies as a replace, not a merge. Events still carries
+// "triggered" entries only (manual/Quick Check runs), delivered
+// inline on every heartbeat regardless of hash match -- unaffected by
+// this protocol. Results are keyed by a node-generated RunID instead
+// of a server-issued assignment id.
 package wire
 
 import (
@@ -15,7 +20,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
-const SpecVersion = 1
+const SpecVersion = 2
 
 // ProbeSnapshot is the full current definition of a probe, as carried
 // by every Event -- a node applies this directly to its local cache
@@ -34,11 +39,12 @@ type ProbeSnapshot struct {
 	Status          string         `json:"status"` // "active" | "paused" | "archived" | "inactive_billing"
 }
 
-// Event is one entry from the probe-definition change log a node syncs
-// incrementally via POST /v1/nodes/heartbeat's since_seq/events
-// fields. Seq is a plain, not-necessarily-contiguous cursor: a node's
-// next heartbeat always sends since_seq = the highest one it has
-// already applied.
+// Event is one entry from HeartbeatResponse.Events -- as of
+// SpecVersion 2, only ever a "triggered" (manual/Quick Check run)
+// entry; probe-assignment changes are carried by ProbeHash/Probes
+// instead (see HeartbeatResponse). Seq is informational only now
+// (which probe_events row this came from), not a sync cursor -- there
+// is no more since_seq.
 type Event struct {
 	Seq       int           `json:"seq"`
 	EventType string        `json:"event_type"` // "created" | "updated" | "removed" | "triggered"
@@ -103,11 +109,6 @@ type ResultsResponse struct {
 // server-side, attached to the hash itself, populated once via
 // POST /v1/nodes/modules rather than repeated on every heartbeat.
 //
-// SinceSeq folds what used to be a separate GET /v1/nodes/events poll
-// into the heartbeat itself -- both fired on their own fixed timer
-// regardless of activity, each paying its own request/auth overhead
-// for (almost always) zero new information. 0 means a full resync,
-// same meaning the old standalone endpoint gave a fresh cache.
 type HeartbeatRequest struct {
 	SpecVersion  int    `json:"spec_version"`
 	NodeID       string `json:"node_id"`
@@ -128,9 +129,16 @@ type HeartbeatRequest struct {
 	// either (the embedded tcp/udp/dns/... defaults, or an
 	// unmigrated custom module) is simply absent from this map, not
 	// included with null fields.
-	Modules  map[string]ModuleVersion `json:"modules,omitempty"`
-	SinceSeq int                      `json:"since_seq"`
-	SentAt   string                   `json:"sent_at"`
+	Modules map[string]ModuleVersion `json:"modules,omitempty"`
+	// ProbeHash is this agent's own last-known content hash for its
+	// compiled probe assignment (see probeCache.contentHash) -- absent
+	// (empty string, omitted on the wire) on this node's very first-
+	// ever heartbeat, since there's nothing cached yet. An absent/
+	// empty hash naturally compares unequal to whatever the server has
+	// compiled and triggers a full snapshot in response, the same "no
+	// separate bootstrap path needed" shape SinceSeq=0 used to give.
+	ProbeHash string `json:"probe_hash,omitempty"`
+	SentAt    string `json:"sent_at"`
 }
 
 // ModuleVersion is one loaded module's own version/manifest-url, as
@@ -144,14 +152,27 @@ type ModuleVersion struct {
 }
 
 // HeartbeatResponse is the body returned by a successful
-// POST /v1/nodes/heartbeat. ServerTime/Events are what used to be
-// GET /v1/nodes/events's whole response -- see SinceSeq above.
+// POST /v1/nodes/heartbeat.
 type HeartbeatResponse struct {
-	SpecVersion           int     `json:"spec_version"`
-	NodeStatus            string  `json:"node_status"`
-	HeartbeatIntervalSecs int     `json:"heartbeat_interval_seconds"`
-	ServerTime            string  `json:"server_time"`
-	Events                []Event `json:"events,omitempty"`
+	SpecVersion           int    `json:"spec_version"`
+	NodeStatus            string `json:"node_status"`
+	HeartbeatIntervalSecs int    `json:"heartbeat_interval_seconds"`
+	ServerTime            string `json:"server_time"`
+	// ProbeHash/Probes are only present when this agent's own reported
+	// ProbeHash (in the request) didn't match the server's current
+	// compiled state -- absent entirely (not empty) whenever they
+	// already agreed, meaning "you're caught up, nothing to change".
+	// Probes, when present, is always this node's FULL current
+	// assignment, never a delta -- apply it as a replace (see
+	// probeCache.replaceAssignment), not a merge, though lastRunAt
+	// still has to be carried forward per probe ID across that
+	// replace, same as it always has been.
+	ProbeHash string          `json:"probe_hash,omitempty"`
+	Probes    []ProbeSnapshot `json:"probes,omitempty"`
+	// Only ever "triggered" entries as of SpecVersion 2 -- unaffected
+	// by ProbeHash/Probes above, still delivered inline on every
+	// heartbeat regardless of hash match.
+	Events []Event `json:"events,omitempty"`
 	// Owner-triggered from the radar UI (see radar-api's
 	// nodes.pending_command), delivered here rather than a separate
 	// channel because heartbeat is this node's only poll. Empty/absent

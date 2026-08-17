@@ -7,20 +7,27 @@ import (
 	"github.com/mehrnet/radar-node/internal/wire"
 )
 
-func TestProbeCache_ApplyEvents_CreatedThenDue(t *testing.T) {
+func TestProbeCache_LastKnownHash_EmptyOnFreshCache(t *testing.T) {
+	c := newProbeCache()
+	// The bootstrap case: an empty hash naturally compares unequal to
+	// whatever the server has compiled, so a fresh cache always
+	// triggers a full snapshot on its very first heartbeat -- no
+	// separate bootstrap path needed.
+	if got := c.lastKnownHash(); got != "" {
+		t.Fatalf("expected an empty hash on a fresh cache, got %q", got)
+	}
+}
+
+func TestProbeCache_ReplaceAssignment_ThenDue(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{
-		Seq:       1,
-		EventType: "created",
-		Probe: wire.ProbeSnapshot{
-			ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
-			StartsAt: now.Add(-time.Minute).UnixMilli(),
-		},
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
+		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
+		StartsAt: now.Add(-time.Minute).UnixMilli(),
 	}})
 
-	if c.lastKnownSeq() != 1 {
-		t.Fatalf("expected lastKnownSeq 1, got %d", c.lastKnownSeq())
+	if c.lastKnownHash() != "hash1" {
+		t.Fatalf("expected lastKnownHash 'hash1', got %q", c.lastKnownHash())
 	}
 	due := c.dueProbes(now)
 	if len(due) != 1 || due[0].ID != "probe_1" {
@@ -31,9 +38,9 @@ func TestProbeCache_ApplyEvents_CreatedThenDue(t *testing.T) {
 func TestProbeCache_ManualProbe_NeverDueViaScheduler(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
-	}}})
+	}})
 
 	// Never due on its own -- not even once, not even before any run has
 	// happened. Only an explicit "triggered" event (see
@@ -49,10 +56,10 @@ func TestProbeCache_ManualProbe_NeverDueViaScheduler(t *testing.T) {
 func TestProbeCache_TriggeredEvent_QueuesPendingTrigger(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
-	}}})
-	c.applyEvents([]wire.Event{{Seq: 2, EventType: "triggered", RunID: "run_abc", Probe: wire.ProbeSnapshot{
+	}})
+	c.applyTriggeredEvents([]wire.Event{{Seq: 1, EventType: "triggered", RunID: "run_abc", Probe: wire.ProbeSnapshot{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
 	}}})
 
@@ -72,13 +79,32 @@ func TestProbeCache_TriggeredEvent_QueuesPendingTrigger(t *testing.T) {
 	}
 }
 
+func TestProbeCache_TriggeredEvent_DoesNotChangeLastKnownHash(t *testing.T) {
+	c := newProbeCache()
+	now := time.Now()
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
+		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
+	}})
+	c.applyTriggeredEvents([]wire.Event{{Seq: 1, EventType: "triggered", RunID: "run_abc", Probe: wire.ProbeSnapshot{
+		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli(),
+	}}})
+
+	// Triggers are entirely independent of the hash-compare protocol --
+	// this agent's own reported ProbeHash on the next heartbeat must
+	// still be whatever replaceAssignment last set, not perturbed by a
+	// trigger's own snapshot payload.
+	if c.lastKnownHash() != "hash1" {
+		t.Fatalf("expected a triggered event to leave lastKnownHash unchanged at 'hash1', got %q", c.lastKnownHash())
+	}
+}
+
 func TestProbeCache_IntervalProbe_DueAgainAfterInterval(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
 		StartsAt: now.Add(-time.Hour).UnixMilli(),
-	}}})
+	}})
 
 	c.markRun("probe_1", now)
 	if due := c.dueProbes(now.Add(10 * time.Second)); len(due) != 0 {
@@ -92,58 +118,72 @@ func TestProbeCache_IntervalProbe_DueAgainAfterInterval(t *testing.T) {
 func TestProbeCache_InactiveStatus_NeverDue(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusInactiveBilling, ScheduleType: "interval", IntervalSeconds: 30,
 		StartsAt: now.Add(-time.Minute).UnixMilli(),
-	}}})
+	}})
 	if due := c.dueProbes(now); len(due) != 0 {
 		t.Fatalf("expected an inactive_billing probe to never be due, got %+v", due)
 	}
 }
 
-func TestProbeCache_UpdatedEvent_PreservesLastRunAt(t *testing.T) {
+// The core invariant the whole hash-compare redesign depends on: a
+// resync unrelated to a probe's own schedule must never reset this
+// node's memory of when it last ran it, or every probe on this node
+// would look simultaneously overdue the instant a hash mismatch
+// resolves, causing a check-burst.
+func TestProbeCache_ReplaceAssignment_PreservesLastRunAt(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
 		StartsAt: now.Add(-time.Hour).UnixMilli(),
-	}}})
+	}})
 	c.markRun("probe_1", now)
 
-	// An "updated" event (e.g. the billing cascade flipping status
-	// and back) must not reset this node's own memory of when it
-	// last ran the probe -- otherwise a routine status update would
-	// cause an immediate re-run regardless of the real interval.
-	c.applyEvents([]wire.Event{{Seq: 2, EventType: "updated", Probe: wire.ProbeSnapshot{
+	// A second full-snapshot replace (e.g. an unrelated probe on this
+	// same node changed, triggering a hash mismatch) for the exact
+	// same probe_1 content, under a new hash -- as a real recompile
+	// would produce.
+	c.replaceAssignment("hash2", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
 		StartsAt: now.Add(-time.Hour).UnixMilli(),
-	}}})
+	}})
 	if due := c.dueProbes(now.Add(5 * time.Second)); len(due) != 0 {
-		t.Fatalf("expected lastRunAt to survive an update event, got due=%+v", due)
+		t.Fatalf("expected lastRunAt to survive a replaceAssignment, got due=%+v", due)
+	}
+	if c.lastKnownHash() != "hash2" {
+		t.Fatalf("expected lastKnownHash to update to 'hash2', got %q", c.lastKnownHash())
 	}
 }
 
-func TestProbeCache_RemovedEvent_DeletesProbe(t *testing.T) {
+func TestProbeCache_ReplaceAssignment_DropsAbsentProbe(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
 		StartsAt: now.Add(-time.Minute).UnixMilli(),
-	}}})
-	c.applyEvents([]wire.Event{{Seq: 2, EventType: "removed", Probe: wire.ProbeSnapshot{ID: "probe_1"}}})
+	}})
+	// A snapshot that no longer includes probe_1 at all (removed,
+	// paused, deactivated, ...) -- the same outcome an explicit
+	// "removed" event used to produce under the old delta protocol.
+	c.replaceAssignment("hash2", []wire.ProbeSnapshot{})
 
 	if due := c.dueProbes(now); len(due) != 0 {
-		t.Fatalf("expected a removed probe to no longer be cached, got %+v", due)
+		t.Fatalf("expected a probe absent from the new snapshot to no longer be cached, got %+v", due)
+	}
+	if _, ok := c.get("probe_1"); ok {
+		t.Fatalf("expected probe_1 to be gone from the cache entirely")
 	}
 }
 
 func TestProbeCache_EndsAt_NotDueAfterEnd(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
-	c.applyEvents([]wire.Event{{Seq: 1, EventType: "created", Probe: wire.ProbeSnapshot{
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{{
 		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 10,
 		StartsAt: now.Add(-time.Hour).UnixMilli(), EndsAt: now.Add(-time.Minute).UnixMilli(),
-	}}})
+	}})
 	if due := c.dueProbes(now); len(due) != 0 {
 		t.Fatalf("expected a probe past its ends_at to never be due, got %+v", due)
 	}

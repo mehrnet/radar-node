@@ -16,27 +16,33 @@ type cachedProbe struct {
 }
 
 // pendingTrigger is one "run this probe right now" request, queued by
-// applyEvents (a "triggered" event) and drained by the scheduler tick
-// alongside its own dueProbes call. RunID is server-issued (see
-// routes/probes.ts's POST .../trigger), not node-generated the way a
-// normal scheduled run's is -- every node executing the same trigger
-// reports back under that one shared id, which is what lets the
-// dashboard correlate one button click across however many nodes the
-// probe is assigned to into a single table instead of N unrelated runs.
+// applyTriggeredEvents (a "triggered" event) and drained by the
+// scheduler tick alongside its own dueProbes call. RunID is server-
+// issued (see routes/probes.ts's POST .../trigger), not node-generated
+// the way a normal scheduled run's is -- every node executing the same
+// trigger reports back under that one shared id, which is what lets
+// the dashboard correlate one button click across however many nodes
+// the probe is assigned to into a single table instead of N unrelated
+// runs.
 type pendingTrigger struct {
 	ProbeID string
 	RunID   string
 }
 
 // probeCache is the node's local understanding of which probes it's
-// responsible for, built and kept current by applying events synced
-// via POST /v1/nodes/heartbeat's since_seq/events (see heartbeatLoop
-// in agent.go). Safe for concurrent use by the scheduler and
-// heartbeat loops.
+// responsible for. As of SpecVersion 2, assignment sync is content-
+// hash-compared, not delta-applied: contentHash is this node's own
+// last-known hash (sent as HeartbeatRequest.ProbeHash on every
+// heartbeat), and replaceAssignment is called whenever the server
+// reports a mismatch, replacing the whole set at once (see agent.go's
+// beat()). "triggered" events are unrelated to this and still arrive
+// incrementally via HeartbeatResponse.Events on every heartbeat
+// regardless of hash match. Safe for concurrent use by the scheduler
+// and heartbeat loops.
 type probeCache struct {
 	mu              sync.Mutex
 	probes          map[string]*cachedProbe
-	lastSeq         int
+	contentHash     string
 	pendingTriggers []pendingTrigger
 }
 
@@ -44,32 +50,58 @@ func newProbeCache() *probeCache {
 	return &probeCache{probes: map[string]*cachedProbe{}}
 }
 
-func (c *probeCache) lastKnownSeq() int {
+// lastKnownHash is empty on a fresh cache (this node's very first-ever
+// heartbeat) -- an empty ProbeHash on the wire naturally compares
+// unequal to whatever the server has compiled, triggering a full
+// snapshot in response, the same "no separate bootstrap path needed"
+// shape SinceSeq=0 used to give.
+func (c *probeCache) lastKnownHash() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.lastSeq
+	return c.contentHash
 }
 
-// applyEvents folds a batch of events into the cache in order --
-// "created" and "updated" both carry the probe's full current
-// definition, so applying them in seq order always converges to the
-// latest state regardless of how many changes happened between
-// syncs. An existing probe's lastRunAt is preserved across an update
-// (the probe changing doesn't reset this node's own due-ness memory
-// for it). "triggered" carries a fresh snapshot too (so a trigger
-// fired the instant after an edit still runs the new definition, not
-// a stale cached one) but never touches lastRunAt -- it queues an
-// immediate one-off run instead, entirely independent of this probe's
-// normal schedule/due-ness bookkeeping.
-func (c *probeCache) applyEvents(events []wire.Event) {
+// replaceAssignment applies a full-snapshot response (the hash-compare
+// path's mismatch case, see agent.go's beat()) -- not a merge of
+// deltas the way the old applyEvents used to be. lastRunAt is still
+// carried forward per probe ID for anything present in both the old
+// and new sets: a probe's own due-ness timer must survive a sync
+// that's unrelated to its own schedule, or every probe on this node
+// would look simultaneously overdue the instant a hash mismatch
+// resolves, causing a check-burst across however many probes this
+// node runs. A probe absent from the new set (removed, paused,
+// deactivated, ...) is simply dropped -- the same outcome an explicit
+// "removed" event used to produce under the old delta protocol.
+func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := make(map[string]*cachedProbe, len(probes))
+	for _, snapshot := range probes {
+		entry := &cachedProbe{ProbeSnapshot: snapshot}
+		if existing, ok := c.probes[snapshot.ID]; ok {
+			entry.lastRunAt = existing.lastRunAt
+		}
+		next[snapshot.ID] = entry
+	}
+	c.probes = next
+	c.contentHash = hash
+}
+
+// applyTriggeredEvents queues a run for each "triggered" entry in
+// events -- entirely independent of replaceAssignment above (see
+// wire.Event's own doc comment: as of SpecVersion 2 "triggered" is the
+// only event type that still arrives this way, on every heartbeat
+// regardless of hash match). Each trigger also refreshes this probe's
+// own cached snapshot from the event's own embedded payload, so a
+// trigger fired the instant after an edit still runs the new
+// definition, not a stale cached one -- but never touches lastRunAt,
+// since a trigger is an independent one-off run, not part of this
+// probe's normal schedule/due-ness bookkeeping.
+func (c *probeCache) applyTriggeredEvents(events []wire.Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, ev := range events {
-		if ev.Seq > c.lastSeq {
-			c.lastSeq = ev.Seq
-		}
-		if ev.EventType == "removed" {
-			delete(c.probes, ev.Probe.ID)
+		if ev.EventType != "triggered" || ev.RunID == "" {
 			continue
 		}
 		entry := &cachedProbe{ProbeSnapshot: ev.Probe}
@@ -77,9 +109,7 @@ func (c *probeCache) applyEvents(events []wire.Event) {
 			entry.lastRunAt = existing.lastRunAt
 		}
 		c.probes[ev.Probe.ID] = entry
-		if ev.EventType == "triggered" && ev.RunID != "" {
-			c.pendingTriggers = append(c.pendingTriggers, pendingTrigger{ProbeID: ev.Probe.ID, RunID: ev.RunID})
-		}
+		c.pendingTriggers = append(c.pendingTriggers, pendingTrigger{ProbeID: ev.Probe.ID, RunID: ev.RunID})
 	}
 }
 
