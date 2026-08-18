@@ -101,6 +101,8 @@ agent flags:
                           (http://, https://, socks5://, socks5h://)
   --scheduler-tick duration    how often to check cached probes for due-ness (default "2s")
   --concurrency int       max probes running at once (default 64)
+  --destination-interval duration  min spacing between checks against the
+                          same real destination, node-wide (default "10s")
   --modules-dir path      load/override modules from *.yaml/*.yml here,
                           on top of the embedded defaults
   --tools-dir path        resolves __TOOLS_DIR__ in a loaded module's own
@@ -210,13 +212,14 @@ func runProbe(args []string) error {
 
 func runAgent(args []string) error {
 	var (
-		apiURL        string
-		apiKey        string
-		apiProxy      string
-		schedulerTick time.Duration
-		concurrency   int
-		modulesDir    string
-		toolsDir      string
+		apiURL              string
+		apiKey              string
+		apiProxy            string
+		schedulerTick       time.Duration
+		concurrency         int
+		destinationInterval time.Duration
+		modulesDir          string
+		toolsDir            string
 	)
 
 	fs := flag.NewFlagSet("agent", flag.ContinueOnError)
@@ -225,6 +228,7 @@ func runAgent(args []string) error {
 	fs.StringVar(&apiProxy, "api-proxy", "", "")
 	fs.DurationVar(&schedulerTick, "scheduler-tick", 2*time.Second, "")
 	fs.IntVar(&concurrency, "concurrency", 64, "")
+	fs.DurationVar(&destinationInterval, "destination-interval", 10*time.Second, "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
 	fs.StringVar(&toolsDir, "tools-dir", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -241,14 +245,15 @@ func runAgent(args []string) error {
 	defer stop()
 
 	return agent.Run(ctx, agent.Config{
-		APIURL:        apiURL,
-		APIKey:        apiKey,
-		ProxyURL:      apiProxy,
-		Version:       version,
-		SchedulerTick: schedulerTick,
-		Concurrency:   concurrency,
-		ModulesDir:    modulesDir,
-		ToolsDir:      toolsDir,
+		APIURL:              apiURL,
+		APIKey:              apiKey,
+		ProxyURL:            apiProxy,
+		Version:             version,
+		SchedulerTick:       schedulerTick,
+		Concurrency:         concurrency,
+		DestinationInterval: destinationInterval,
+		ModulesDir:          modulesDir,
+		ToolsDir:            toolsDir,
 	})
 }
 

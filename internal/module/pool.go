@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mehrnet/radar-node/internal/destgate"
 	"github.com/mehrnet/radar-node/internal/portalloc"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
@@ -176,17 +177,21 @@ func (c PoolChecker) runInstance(ctx context.Context, batch []probe.Options, out
 }
 
 // testJobs tests every job in one instance, Pool.TestConcurrency at a
-// time, writing each result into out at that job's own idx.
+// time, writing each result into out at that job's own idx. Every
+// goroutine is spawned unconditionally (cheap) rather than gating
+// spawn itself on sem -- testJob's own destgate.Wait can block a
+// while if a job's destination is busy, and a goroutine parked there
+// while already holding one of only TestConcurrency slots would
+// starve every other job in this instance waiting on a completely
+// unrelated destination; see testJob's own comment.
 func (c PoolChecker) testJobs(ctx context.Context, jobs []poolJob, out []probe.Result) {
 	sem := make(chan struct{}, c.m.Pool.TestConcurrency)
 	var wg sync.WaitGroup
 	for _, j := range jobs {
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(j poolJob) {
 			defer wg.Done()
-			defer func() { <-sem }()
-			out[j.idx] = c.testJob(ctx, j)
+			out[j.idx] = c.testJob(ctx, sem, j)
 		}(j)
 	}
 	wg.Wait()
@@ -197,10 +202,25 @@ func (c PoolChecker) testJobs(ctx context.Context, jobs []poolJob, out []probe.R
 // equivalent of Checker.Check's own run+collect stage, sharing
 // runAndCollect so the two can never drift on latency calculation or
 // error wrapping.
-func (c PoolChecker) testJob(ctx context.Context, j poolJob) probe.Result {
+//
+// Waits for j's own destination to be clear (destgate.Wait) *before*
+// taking a slot from sem, not after -- taking sem first would let one
+// busy destination's queue of blocked jobs exhaust this instance's
+// whole TestConcurrency budget, starving jobs against destinations
+// that aren't busy at all. The wait is bounded by jobCtx, already
+// scoped to opts.Timeout, so a destination still busy past that point
+// fails this one job as an ordinary timeout, same as a slow dial
+// would.
+func (c PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob) probe.Result {
 	opts := j.opts
 	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
+
+	if err := destgate.Wait(jobCtx, opts.Destination); err != nil {
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("waiting for destination to clear: %w", err))
+	}
+	sem <- struct{}{}
+	defer func() { <-sem }()
 
 	paramsPath, cleanup, err := writeParamsJSON(opts.Params)
 	if err != nil {

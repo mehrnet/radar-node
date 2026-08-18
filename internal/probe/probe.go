@@ -12,6 +12,19 @@ import (
 type Options struct {
 	Target  string
 	Timeout time.Duration
+	// Destination is the real network endpoint this check will
+	// actually connect to, for internal/destgate's own rate-limiting
+	// purposes -- usually just Target (already exactly right for a
+	// direct tcp/http/dns/icmp check), but for a check that only
+	// probes *through* an already-established tunnel/proxy (xray,
+	// wireguard, openvpn), Target is a fixed or through-tunnel value
+	// unrelated to which server is actually being dialed, and the
+	// caller building Options is expected to set this to whatever it
+	// can determine the real destination to be. Empty means "unknown"
+	// -- destgate treats that as "don't gate this one" rather than
+	// guessing, since a wrong guess could serialize unrelated checks
+	// against each other under one bogus shared key.
+	Destination string
 	// Seq is the 1-indexed attempt number when Count > 1, so results
 	// stay identifiable once flattened into a single output array.
 	Seq int

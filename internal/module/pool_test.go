@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mehrnet/radar-node/internal/destgate"
 	"github.com/mehrnet/radar-node/internal/module"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
@@ -294,6 +295,73 @@ func TestPoolChecker_CheckBatch_RequestSchemaValidatesEachJobIndependently(t *te
 	}
 	if results[1].Ok || results[1].ErrorCode != probe.ErrorCodeInvalidParams {
 		t.Fatalf("expected job 1 (missing required param) to be invalid_params, got ok=%v code=%q", results[1].Ok, results[1].ErrorCode)
+	}
+}
+
+// TestPoolChecker_CheckBatch_SpacesJobsSharingADestination is
+// internal/destgate's own pool-level integration test (its unit tests
+// cover Wait in isolation; TestRun_DestinationIntervalSpacesChecksAgainstASharedTarget
+// in internal/agent covers the non-pooled dispatch path) -- it proves
+// testJobs actually calls destgate.Wait before running a job, not
+// just that destgate works on its own. Two jobs sharing one
+// Destination, testConcurrency=2 (so nothing about the pool's own
+// concurrency cap would otherwise force them apart), against a fixture
+// whose own real work (connecting to a local socket) is near-instant
+// -- so the whole CheckBatch call should still take at least the
+// configured floor if and only if destgate actually serialized them.
+func TestPoolChecker_CheckBatch_SpacesJobsSharingADestination(t *testing.T) {
+	m, _ := poolFixture(t, 10, 2)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+
+	const floor = 200 * time.Millisecond
+	destgate.Configure(floor)
+	t.Cleanup(func() { destgate.Configure(0) })
+
+	opts := []probe.Options{
+		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "shared-host:443"},
+		{Target: "t", Timeout: 5 * time.Second, Seq: 2, Destination: "shared-host:443"},
+	}
+	start := time.Now()
+	results := checker.CheckBatch(context.Background(), opts)
+	elapsed := time.Since(start)
+
+	for i, r := range results {
+		if !r.Ok {
+			t.Fatalf("job %d: expected ok, got error %q", i, r.Error)
+		}
+	}
+	if elapsed < floor-50*time.Millisecond {
+		t.Fatalf("two jobs sharing a destination completed in %v, expected at least ~%v (destgate should have spaced them within testJobs)", elapsed, floor)
+	}
+}
+
+// TestPoolChecker_CheckBatch_DoesNotSpaceJobsWithDifferentDestinations
+// is the negative case -- without it, a bug that gated on something
+// too coarse (e.g. always the module name, or ignoring Destination
+// entirely and gating everything against one global key) would still
+// pass the positive test above.
+func TestPoolChecker_CheckBatch_DoesNotSpaceJobsWithDifferentDestinations(t *testing.T) {
+	m, _ := poolFixture(t, 10, 2)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+
+	destgate.Configure(time.Hour) // absurdly large -- any accidental gating would time the test out
+	t.Cleanup(func() { destgate.Configure(0) })
+
+	opts := []probe.Options{
+		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "host-a:443"},
+		{Target: "t", Timeout: 5 * time.Second, Seq: 2, Destination: "host-b:443"},
+	}
+	start := time.Now()
+	results := checker.CheckBatch(context.Background(), opts)
+	elapsed := time.Since(start)
+
+	for i, r := range results {
+		if !r.Ok {
+			t.Fatalf("job %d: expected ok, got error %q", i, r.Error)
+		}
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("two jobs against different destinations took %v, expected near-instant (destgate should never serialize unrelated destinations)", elapsed)
 	}
 }
 

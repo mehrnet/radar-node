@@ -137,6 +137,7 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--api-proxy` | proxy for the agent's own `radar-api` traffic (`http://`, `https://`, `socks5://`, `socks5h://`) |
 | `--scheduler-tick` | how often to check cached probes for due-ness (default `2s`) |
 | `--concurrency` | max probes running at once (default `64`) |
+| `--destination-interval` | min spacing between any two checks against the same real destination, node-wide, regardless of which probe/group/subscription/account asked for either -- overrides a probe's own `interval_seconds` when its destination is shared and busy (default `10s`, `0` disables) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
 
 The agent has no server-computed dispatch: it syncs probe definitions

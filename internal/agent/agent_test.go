@@ -33,6 +33,13 @@ type fakeAPI struct {
 	prober     string
 	probeCount int
 	timeoutMs  int
+	// probeIDs defaults to a single "probe_test" probe (probeCount
+	// checks of it) when left unset -- TestRun_DestinationIntervalSpacesChecksAgainstAOneSharedTarget
+	// overrides it with more than one id, all sharing f.target, to get
+	// several *separate* probes (probeCount=1 each) due at the same
+	// tick against one destination, rather than one probe's own
+	// repeated checks.
+	probeIDs []string
 }
 
 func newFakeAPI(target string) *fakeAPI {
@@ -90,25 +97,43 @@ func (f *fakeAPI) handler() http.Handler {
 			if timeoutMs == 0 {
 				timeoutMs = 1000
 			}
-			snapshot := wire.ProbeSnapshot{
-				ID:           "probe_test",
-				Target:       f.target,
-				Prober:       prober,
-				ProbeCount:   probeCount,
-				TimeoutMs:    timeoutMs,
-				ScheduleType: "manual",
-				Status:       wire.ProbeStatusActive,
-				StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
+			ids := f.probeIDs
+			if len(ids) == 0 {
+				ids = []string{"probe_test"}
 			}
 			// "created" alone would never run at all now -- a manual
 			// probe only executes via an explicit "triggered" event, so
 			// this fakes exactly that: a create immediately followed by
 			// one trigger, both applied from a single heartbeat
 			// response the same way a real create-then-click-"Run now"
-			// would arrive across two real ones.
-			resp.Events = []wire.Event{
-				{Seq: 1, EventType: "created", Probe: snapshot},
-				{Seq: 2, EventType: "triggered", RunID: "run_test_trigger", Probe: snapshot},
+			// would arrive across two real ones. seq just needs to be
+			// unique within this one response. runID stays the single
+			// original literal for the (far more common) one-probe
+			// case, matching every existing test's own expectation --
+			// only suffixed per-id when f.probeIDs was actually set to
+			// more than one, so results from different probes in the
+			// same response are still trivially distinguishable.
+			seq := 1
+			for _, id := range ids {
+				snapshot := wire.ProbeSnapshot{
+					ID:           id,
+					Target:       f.target,
+					Prober:       prober,
+					ProbeCount:   probeCount,
+					TimeoutMs:    timeoutMs,
+					ScheduleType: "manual",
+					Status:       wire.ProbeStatusActive,
+					StartsAt:     time.Now().Add(-time.Hour).UnixMilli(),
+				}
+				runID := "run_test_trigger"
+				if len(f.probeIDs) > 1 {
+					runID += "_" + id
+				}
+				resp.Events = append(resp.Events,
+					wire.Event{Seq: seq, EventType: "created", Probe: snapshot},
+					wire.Event{Seq: seq + 1, EventType: "triggered", RunID: runID, Probe: snapshot},
+				)
+				seq += 2
 			}
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -447,5 +472,106 @@ func TestRun_RejectsMalformedAPIKey(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected an error for an api-key without a colon")
+	}
+}
+
+// TestRun_DestinationIntervalSpacesChecksAgainstASharedTarget is the
+// scheduler-level counterpart to internal/destgate's own unit tests:
+// it proves the agent's real due-check dispatch (executeProbes/
+// runChecks/runCheck) actually calls destgate.Wait before running a
+// check, not just that destgate works in isolation. Two entirely
+// separate probes (different ids, both probeCount=1, both "manual"
+// triggered on the same heartbeat -- so both are due on the exact
+// same scheduler tick) share one Target; with DestinationInterval set
+// well above the tcp check's own near-instant dial time, their
+// results' own ObservedAt timestamps should land at least
+// DestinationInterval apart, proving the second one waited for the
+// first's destination slot to clear rather than running concurrently
+// with it (which is what a shared destination hammered by unrelated
+// probes looks like in production -- see this feature's own plan).
+func TestRun_DestinationIntervalSpacesChecksAgainstASharedTarget(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	fake := newFakeAPI(ln.Addr().String())
+	fake.probeCount = 1
+	fake.probeIDs = []string{"probe_a", "probe_b"}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const destinationInterval = 300 * time.Millisecond
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL:              srv.URL,
+			APIKey:              "node_test:secret",
+			SchedulerTick:       20 * time.Millisecond,
+			Concurrency:         4,
+			DestinationInterval: destinationInterval,
+		})
+	}()
+
+	got := 0
+	deadline := time.After(5 * time.Second)
+	for got < 2 {
+		select {
+		case <-fake.resultsAdded:
+			got++
+		case <-deadline:
+			t.Fatalf("timed out waiting for results; got %d of 2", got)
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent.Run did not exit after context cancellation")
+	}
+
+	fake.mu.Lock()
+	results := append([]wire.Result(nil), fake.gotResults...)
+	fake.mu.Unlock()
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results (one per probe), got %d: %+v", len(results), results)
+	}
+
+	var observedAt [2]time.Time
+	for i, r := range results {
+		if !r.Ok {
+			t.Errorf("expected a successful tcp probe against a live listener, got %+v", r)
+		}
+		ts, err := time.Parse(time.RFC3339Nano, r.ObservedAt)
+		if err != nil {
+			t.Fatalf("observed_at %q did not parse: %v", r.ObservedAt, err)
+		}
+		observedAt[i] = ts
+	}
+
+	first, second := observedAt[0], observedAt[1]
+	if second.Before(first) {
+		first, second = second, first
+	}
+	gap := second.Sub(first)
+	if gap < destinationInterval-50*time.Millisecond {
+		t.Fatalf("two checks against the same target were only %v apart, expected at least ~%v (destgate should have spaced them)", gap, destinationInterval)
 	}
 }

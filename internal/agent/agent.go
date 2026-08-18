@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/apiclient"
+	"github.com/mehrnet/radar-node/internal/destgate"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
 	"github.com/mehrnet/radar-node/internal/wire"
@@ -62,6 +63,12 @@ type Config struct {
 	// all.
 	SchedulerTick time.Duration
 	Concurrency   int
+	// DestinationInterval is the minimum spacing internal/destgate
+	// enforces between two connection attempts aimed at the same real
+	// destination, node-wide, regardless of which probe/group/
+	// subscription/account asked for either -- see destgate's own doc
+	// comment for why this exists. Zero disables it.
+	DestinationInterval time.Duration
 	// ModulesDir loads probers from *.yaml/*.yml files there, on top
 	// of (and overriding by name) the embedded default fixtures
 	// (tcp/udp/dns/icmp/http/https/system). Empty means defaults-only.
@@ -124,6 +131,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := reg.LoadModules(cfg.ModulesDir, cfg.ToolsDir); err != nil {
 		return err
 	}
+	destgate.Configure(cfg.DestinationInterval)
 
 	version := cfg.Version
 	if version == "" {
@@ -744,11 +752,16 @@ func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
 
 	for _, j := range singles {
 		wg.Add(1)
-		sem <- struct{}{}
+		// Deliberately spawned unconditionally, without taking sem
+		// first -- runCheck's own destgate.Wait can block a while if
+		// this job's destination is busy, and a goroutine parked there
+		// is cheap, but a goroutine parked there *while holding a
+		// semaphore slot* would starve every other check waiting on a
+		// totally unrelated destination for that same slot. See
+		// runCheck's own comment.
 		go func(j checkJob) {
 			defer wg.Done()
-			defer func() { <-sem }()
-			r := a.runCheck(ctx, j.pr, j.runID, j.seq)
+			r := a.runCheck(ctx, sem, j.pr, j.runID, j.seq)
 			mu.Lock()
 			results = append(results, r)
 			mu.Unlock()
@@ -758,13 +771,32 @@ func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
 	return results
 }
 
-func (a *agent) runCheck(ctx context.Context, pr wire.ProbeSnapshot, runID string, seq int) wire.Result {
+// runCheck waits for this check's own destination to be clear
+// (destgate.Wait), *then* takes a concurrency slot from sem, then
+// actually runs the check -- in that order. Taking sem before waiting
+// would let one busy destination's queue of blocked checks exhaust
+// the whole fleet's concurrency budget, starving checks against
+// destinations that aren't busy at all; see runChecks' own comment on
+// its singles loop. The wait is bounded by this check's own timeout
+// (via ctx, constructed here rather than left to Checker.Check's own
+// internal WithTimeout), so a destination that's still busy past that
+// point fails this one check as an ordinary timeout, exactly as if
+// the dial itself had been slow.
+func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSnapshot, runID string, seq int) wire.Result {
+	opts := optionsFor(pr, seq)
+	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
+
 	checker, ok := a.reg.Get(pr.Prober)
 	var r probe.Result
 	if !ok {
 		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("unknown prober %q", pr.Prober))
+	} else if err := destgate.Wait(ctx, opts.Destination); err != nil {
+		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("waiting for destination to clear: %w", err))
 	} else {
-		r = checker.Check(ctx, optionsFor(pr, seq))
+		sem <- struct{}{}
+		r = checker.Check(ctx, opts)
+		<-sem
 	}
 
 	return wire.Result{
@@ -814,11 +846,63 @@ func optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
 		timeout = 5 * time.Second
 	}
 	return probe.Options{
-		Target:  pr.Target,
-		Timeout: timeout,
-		Seq:     seq,
-		Params:  pr.Params,
+		Target:      pr.Target,
+		Timeout:     timeout,
+		Seq:         seq,
+		Params:      pr.Params,
+		Destination: destinationFor(pr),
 	}
+}
+
+// destinationFor is destgate's rate-limiting key for pr -- see
+// probe.Options.Destination's own doc comment. Target is already
+// exactly right for a direct tcp/http/dns/icmp check (no indirection
+// -- confirmed by reading each one's own Checker), and is used as-is
+// for every prober this doesn't special-case, including wireguard/
+// openvpn: their own Target is a through-tunnel probe value too, not
+// their real endpoint, but that endpoint lives in raw wg-quick/.ovpn
+// text inside Params with no JSON path to it -- a real text parser,
+// not attempted here (see the plan this shipped under).
+func destinationFor(pr wire.ProbeSnapshot) string {
+	if pr.Prober == "xray" {
+		if d, ok := xrayDestination(pr.Params); ok {
+			return d
+		}
+	}
+	return pr.Target
+}
+
+// xrayDestination pulls the real proxy server address:port out of an
+// xray probe's own Params -- unlike Target (always the fixed
+// connectivity-test constant, see internal/checks/subscriptionfetch's
+// own comment), this is the thing actually being dialed. Mirrors
+// xray-pool-build-config.sh's own vnext-or-servers fallback (vless/
+// vmess vs. trojan-shaped configs). Returns ok=false on any shape
+// mismatch rather than panicking or erroring -- an unrecognized/
+// malformed config just falls back to destinationFor's own Target
+// default, no worse than not having this at all.
+func xrayDestination(params map[string]any) (string, bool) {
+	config, _ := params["config"].(map[string]any)
+	outbounds, _ := config["outbounds"].([]any)
+	if len(outbounds) == 0 {
+		return "", false
+	}
+	outbound, _ := outbounds[0].(map[string]any)
+	settings, _ := outbound["settings"].(map[string]any)
+	endpoints, _ := settings["vnext"].([]any)
+	if len(endpoints) == 0 {
+		endpoints, _ = settings["servers"].([]any)
+	}
+	if len(endpoints) == 0 {
+		return "", false
+	}
+	endpoint, _ := endpoints[0].(map[string]any)
+	address, ok := endpoint["address"].(string)
+	if !ok || address == "" {
+		return "", false
+	}
+	port := endpoint["port"]
+	return fmt.Sprintf("%s:%v", address, port), true
 }
 
 func newBatchID() string {
