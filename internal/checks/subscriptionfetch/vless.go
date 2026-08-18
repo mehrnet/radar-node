@@ -39,6 +39,10 @@ func parseVless(line string) (DiscoveredProxy, error) {
 			network: q.Get("type"), security: q.Get("security"), host: q.Get("host"), path: q.Get("path"), sni: q.Get("sni"),
 			fingerprint: q.Get("fp"), publicKey: q.Get("pbk"), shortID: q.Get("sid"), spiderX: q.Get("spx"),
 			headerType: q.Get("headerType"), mode: q.Get("mode"), extra: q.Get("extra"),
+			alpn:                 q.Get("alpn"),
+			pinnedPeerCertSha256: queryFirst(q, "pinnedPeerCertSha256", "pcs"),
+			verifyPeerCertByName: queryFirst(q, "verifyPeerCertByName", "vcn"),
+			serviceName:          q.Get("serviceName"),
 		}),
 	}
 

@@ -340,6 +340,35 @@ source, hex-encoded) are what a heartbeat reports and what
 drive a probe-creation form dynamically, without radar-node ever pushing
 full module bodies on every heartbeat.
 
+### Subscription-link parsing (`internal/checks/subscriptionfetch`)
+
+The `subscription_fetch` prober turns a subscription URL's own content
+(a base64/raw VLESS/VMess/Trojan/Shadowsocks URI list, a full xray-style
+JSON config, or a plain host:port list) into xray `outbound`/
+`streamSettings` configs, hand-rolled per protocol/transport rather than
+delegated to a library -- there is no CGO-free, cross-platform-buildable
+Go package that does this for us today. That hand-rolling is exactly
+what's produced several real gaps and bugs this project has hit in
+production (missing `xhttpSettings`, missing `tcpSettings.header`
+obfuscation, `grpcSettings.serviceName` read from the wrong query param,
+several TLS fields never wired up at all) -- each fixed as found, not by
+design.
+
+[kutovoys/xray-checker](https://github.com/kutovoys/xray-checker) solves
+the same problem (subscription proxies -> xray config -> connectivity
+check) and is the reference this package's own field coverage is checked
+against when in doubt. It gets its own parsing correctness from
+[xtls/libxray](https://github.com/xtls/libxray) -- a share-link/config
+conversion library published by the same `xtls` org that maintains
+`xray-core` itself, so it tracks xray-core's own config-format changes
+directly rather than reactively. Adopting `libxray` here directly (in
+place of this package's own hand-rolled parsing) hasn't been done -- it's
+a real architecture change (a new, sizeable dependency; unclear
+cross-platform build story for this binary's own `CGO_ENABLED=0`/6-target
+release matrix) -- but if this package's own gaps keep recurring, that's
+the more durable fix to reach for before patching another individual
+field.
+
 ## Wire protocol -- radar-node <-> radar-api
 
 This is the contract between a `radar-node agent` process and `radar-api`.

@@ -3,6 +3,8 @@ package subscriptionfetch
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 // socksInboundPort is a fixed placeholder, not a real port anyone
@@ -54,14 +56,37 @@ type streamSettingsOpts struct {
 	// headerType is tcp's own obfuscation mode (the only value in real
 	// use is "http", camouflaging the stream as plaintext HTTP -- an
 	// empty/absent value means no obfuscation, xray-core's own default,
-	// so the tcp case below only adds anything when it's set). mode/
-	// extra are xhttp-specific: mode picks which of xhttp's transfer
-	// modes to use ("auto" lets the client and server negotiate one --
-	// see the xhttp case below for why that's the fallback rather than
-	// leaving it unset), extra is a server-tuned opaque JSON object
-	// (buffer sizes, padding, etc.) passed through verbatim, never
-	// interpreted here.
+	// so the tcp case below only adds anything when it's set). mode is
+	// reused across two otherwise-unrelated networks the same way real
+	// subscription generators overload the query param itself: xhttp's
+	// own transfer mode ("auto" lets the client and server negotiate
+	// one -- see the xhttp case below for why that's the fallback
+	// rather than leaving it unset) and grpc's "multi" flag (any other
+	// value, including empty, means grpc's regular single-mode
+	// streaming -- see the grpc case). extra is xhttp-specific: a
+	// server-tuned opaque JSON object (buffer sizes, padding, etc.)
+	// passed through verbatim, never interpreted here.
 	headerType, mode, extra string
+	// alpn is a comma-separated list (e.g. "h2,http/1.1"), matching
+	// every real generator's own query-param convention -- only ever
+	// applied under plain tls (see xray-checker's own generation,
+	// confirmed against it as the reference for every field in this
+	// struct: Reality doesn't carry an alpn setting of its own).
+	// pinnedPeerCertSha256/verifyPeerCertByName are tls's own modern
+	// replacement for the "allowInsecure" flag xray-core has since
+	// removed outright (an "allowInsecure": true in a generated config
+	// now aborts that whole outbound's build instead of being a no-op,
+	// so unlike the others this one is deliberately never even
+	// modeled here).
+	alpn, pinnedPeerCertSha256, verifyPeerCertByName string
+	// serviceName is grpc's own dedicated query param in every real
+	// generator's own URI convention -- grpc has no concept of an HTTP
+	// path at all, so path is only ever consulted as a fallback for a
+	// generator that happens to overload it that way, never the
+	// primary source (confirmed against xray-checker/libxray's own
+	// generation, which reads a proxy's own ServiceName field, never
+	// its path, for grpcSettings).
+	serviceName string
 }
 
 func streamSettingsFor(o streamSettingsOpts) map[string]any {
@@ -72,6 +97,20 @@ func streamSettingsFor(o streamSettingsOpts) map[string]any {
 		tlsSettings := map[string]any{}
 		if effectiveSNI != "" {
 			tlsSettings["serverName"] = effectiveSNI
+		}
+		if o.alpn != "" {
+			tlsSettings["alpn"] = strings.Split(o.alpn, ",")
+		}
+		// The modern replacement for "allowInsecure" (removed outright
+		// by xray-core, not just deprecated -- see this struct's own
+		// comment). Only meaningful when a URI actually carries one;
+		// most don't, and omitting both here is exactly xray-core's own
+		// "verify normally" default.
+		if o.pinnedPeerCertSha256 != "" {
+			tlsSettings["pinnedPeerCertSha256"] = o.pinnedPeerCertSha256
+		}
+		if o.verifyPeerCertByName != "" {
+			tlsSettings["verifyPeerCertByName"] = o.verifyPeerCertByName
 		}
 		stream["security"] = "tls"
 		stream["tlsSettings"] = tlsSettings
@@ -125,7 +164,38 @@ func streamSettingsFor(o streamSettingsOpts) map[string]any {
 			"headers": map[string]any{"Host": firstNonEmpty(o.host, effectiveSNI)},
 		}
 	case "grpc":
-		stream["grpcSettings"] = map[string]any{"serviceName": o.path}
+		grpcSettings := map[string]any{"serviceName": firstNonEmpty(o.serviceName, o.path)}
+		// See this struct's own comment on why mode is grpc's own
+		// multiMode flag here, not xhttp's transfer mode -- a config
+		// missing this when the server actually runs its grpc listener
+		// in multi mode fails the same "structurally incomplete, silent
+		// failure" way an unhandled network case does, just without an
+		// unhandled case to point at.
+		if o.mode == "multi" {
+			grpcSettings["multiMode"] = true
+		}
+		stream["grpcSettings"] = grpcSettings
+	case "http", "h2":
+		// Previously completely unhandled, the exact same "falls
+		// through this switch, nothing about path/host ever makes it
+		// into the outbound" gap xhttp had before it was fixed -- see
+		// that case's own comment. host may be a comma-separated list
+		// (xray-core's own httpSettings.host accepts several, and real
+		// generators emit that), unlike every other network's own
+		// single-value host.
+		httpSettings := map[string]any{"path": defaultStr(o.path, "/")}
+		if host := firstNonEmpty(o.host, effectiveSNI); host != "" {
+			httpSettings["host"] = strings.Split(host, ",")
+		}
+		stream["httpSettings"] = httpSettings
+	case "httpupgrade":
+		// Same gap as http/h2 above -- a newer, less common WebSocket
+		// alternative some servers use instead.
+		httpupgradeSettings := map[string]any{"path": defaultStr(o.path, "/")}
+		if host := firstNonEmpty(o.host, effectiveSNI); host != "" {
+			httpupgradeSettings["host"] = host
+		}
+		stream["httpupgradeSettings"] = httpupgradeSettings
 	case "xhttp":
 		// Previously completely unhandled -- a subscription's xhttp
 		// entries all fell through this switch with none of path/host/
@@ -191,6 +261,19 @@ func defaultStr(v, def string) string {
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// queryFirst returns the first non-empty value among keys in q -- for
+// a URI query param real generators disagree on the exact name of
+// (e.g. pinnedPeerCertSha256 vs. the shorter pcs alias xray-checker's
+// own parser also accepts), tried in the order given.
+func queryFirst(q url.Values, keys ...string) string {
+	for _, k := range keys {
+		if v := q.Get(k); v != "" {
 			return v
 		}
 	}

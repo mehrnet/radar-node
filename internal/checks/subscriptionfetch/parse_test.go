@@ -290,6 +290,180 @@ func TestParse_VlessTcpNoHeaderType(t *testing.T) {
 	}
 }
 
+// Regression: alpn/pinnedPeerCertSha256/verifyPeerCertByName -- tls's
+// own modern replacement for the "allowInsecure" flag xray-core has
+// since removed outright -- were never read from the URI at all,
+// silently dropping a server's own TLS-hardening requirements. Confirmed
+// field-for-field against kutovoys/xray-checker's own generation
+// (github.com/xtls/libxray, the same org that maintains xray-core
+// itself) as the reference for the correct shape.
+func TestParse_VlessTlsAlpnAndPinnedCert(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=tls&type=tcp&sni=example.com&alpn=h2,http%2F1.1&pcs=deadbeef&vcn=example.org#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	tlsSettings, ok := streamSettings["tlsSettings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected tlsSettings to be present, got %+v", streamSettings)
+	}
+	alpn, ok := tlsSettings["alpn"].([]string)
+	if !ok || len(alpn) != 2 || alpn[0] != "h2" || alpn[1] != "http/1.1" {
+		t.Fatalf("unexpected alpn: %+v", tlsSettings)
+	}
+	if tlsSettings["pinnedPeerCertSha256"] != "deadbeef" {
+		t.Fatalf("unexpected pinnedPeerCertSha256 (short pcs alias): %+v", tlsSettings)
+	}
+	if tlsSettings["verifyPeerCertByName"] != "example.org" {
+		t.Fatalf("unexpected verifyPeerCertByName (short vcn alias): %+v", tlsSettings)
+	}
+}
+
+// The long-form param names must work too, not just the short aliases.
+func TestParse_VlessTlsPinnedCertLongFormNames(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=tls&type=tcp&pinnedPeerCertSha256=cafef00d&verifyPeerCertByName=example.net#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	tlsSettings := outbounds[0]["streamSettings"].(map[string]any)["tlsSettings"].(map[string]any)
+	if tlsSettings["pinnedPeerCertSha256"] != "cafef00d" {
+		t.Fatalf("unexpected pinnedPeerCertSha256: %+v", tlsSettings)
+	}
+	if tlsSettings["verifyPeerCertByName"] != "example.net" {
+		t.Fatalf("unexpected verifyPeerCertByName: %+v", tlsSettings)
+	}
+}
+
+// Regression: type=http/h2 fell straight through streamSettingsFor's
+// switch with no httpSettings at all -- the exact same silent-failure
+// shape xhttp had before it was fixed. host may be a comma-separated
+// list (xray-core's own httpSettings.host accepts several).
+func TestParse_VlessHttpTransport(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=http&path=%2Fapi&host=a.example.com,b.example.com#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	httpSettings, ok := streamSettings["httpSettings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected httpSettings to be present, got %+v", streamSettings)
+	}
+	if httpSettings["path"] != "/api" {
+		t.Fatalf("unexpected path: %+v", httpSettings)
+	}
+	hosts, ok := httpSettings["host"].([]string)
+	if !ok || len(hosts) != 2 || hosts[0] != "a.example.com" || hosts[1] != "b.example.com" {
+		t.Fatalf("unexpected host list: %+v", httpSettings)
+	}
+}
+
+// Regression: type=httpupgrade had the same gap as http/h2 above.
+func TestParse_VlessHttpUpgradeTransport(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=httpupgrade&path=%2Fup&host=up.example.com#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	streamSettings := outbounds[0]["streamSettings"].(map[string]any)
+	httpupgradeSettings, ok := streamSettings["httpupgradeSettings"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected httpupgradeSettings to be present, got %+v", streamSettings)
+	}
+	if httpupgradeSettings["path"] != "/up" {
+		t.Fatalf("unexpected path: %+v", httpupgradeSettings)
+	}
+	if httpupgradeSettings["host"] != "up.example.com" {
+		t.Fatalf("unexpected host: %+v", httpupgradeSettings)
+	}
+}
+
+// Regression: grpc's own multiMode flag (mode=multi) was never read,
+// silently degrading to grpc's regular single-mode streaming even when
+// the server actually runs multi mode.
+func TestParse_VlessGrpcMultiMode(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=grpc&serviceName=svc&mode=multi#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	grpcSettings := outbounds[0]["streamSettings"].(map[string]any)["grpcSettings"].(map[string]any)
+	if grpcSettings["multiMode"] != true {
+		t.Fatalf("expected multiMode true, got %+v", grpcSettings)
+	}
+}
+
+// A plain grpc entry (no mode=multi) must not gain a spurious
+// multiMode key -- grpc's regular single-mode streaming is xray-core's
+// own default and the overwhelmingly common case.
+func TestParse_VlessGrpcNoMultiMode(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=grpc&serviceName=svc#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	grpcSettings := outbounds[0]["streamSettings"].(map[string]any)["grpcSettings"].(map[string]any)
+	if _, present := grpcSettings["multiMode"]; present {
+		t.Fatalf("expected no multiMode key for a plain grpc entry, got %+v", grpcSettings)
+	}
+	if grpcSettings["serviceName"] != "svc" {
+		t.Fatalf("unexpected serviceName: %+v", grpcSettings)
+	}
+}
+
+// Regression: grpcSettings.serviceName used to be read from the URI's
+// path= param unconditionally -- real generators overwhelmingly use a
+// dedicated serviceName= instead (grpc has no concept of an HTTP path
+// at all), so a real grpc entry's serviceName was silently empty every
+// time path= was absent, which is the common case for grpc URIs. path
+// is now only a fallback for the rare generator that happens to
+// overload it that way, confirmed here by omitting serviceName=
+// entirely.
+func TestParse_VlessGrpcServiceNameFallsBackToPath(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=grpc&path=fallback-svc#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	grpcSettings := outbounds[0]["streamSettings"].(map[string]any)["grpcSettings"].(map[string]any)
+	if grpcSettings["serviceName"] != "fallback-svc" {
+		t.Fatalf("expected serviceName to fall back to path, got %+v", grpcSettings)
+	}
+}
+
+// serviceName= must win over path= when a URI carries both (an
+// unlikely but possible generator quirk) -- serviceName is the
+// dedicated, authoritative param for grpc.
+func TestParse_VlessGrpcServiceNameWinsOverPath(t *testing.T) {
+	line := "vless://521fdaab-83cc-45dd-b141-511e5a5659c8@example.com:443?security=none&type=grpc&serviceName=real-svc&path=stale-path#test"
+	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
+	if err != nil || len(proxies) != 1 {
+		t.Fatalf("unexpected parse result: %v, %+v", err, proxies)
+	}
+	config := proxies[0].Params["config"].(map[string]any)
+	outbounds := config["outbounds"].([]map[string]any)
+	grpcSettings := outbounds[0]["streamSettings"].(map[string]any)["grpcSettings"].(map[string]any)
+	if grpcSettings["serviceName"] != "real-svc" {
+		t.Fatalf("expected serviceName to win over path, got %+v", grpcSettings)
+	}
+}
+
 func TestParse_Trojan(t *testing.T) {
 	line := "trojan://s3cr3t@9.10.11.12:443?sni=trojan.example#my-trojan"
 	proxies, err := subscriptionfetch.Parse([]byte(line), subscriptionfetch.XrayURIList)
