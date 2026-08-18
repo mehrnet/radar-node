@@ -365,6 +365,47 @@ func TestPoolChecker_CheckBatch_DoesNotSpaceJobsWithDifferentDestinations(t *tes
 	}
 }
 
+// TestPoolChecker_CheckBatch_JobWhoseWaitTimesOutIsSkippedNotFailed is
+// this package's own counterpart to internal/agent's
+// TestRun_DestinationMaxWaitExceededMeansNoResultReported: when a
+// shared destination's floor is wider than maxWait, the job that never
+// gets its turn must come back with Skip=true, not a synthetic
+// "waiting for destination to clear" failure -- see probe.Result.Skip's
+// own doc comment (internal/agent's own wire-reporting layer is what
+// actually drops it from what gets sent on; this only proves testJob
+// itself produces the right signal for that layer to act on).
+func TestPoolChecker_CheckBatch_JobWhoseWaitTimesOutIsSkippedNotFailed(t *testing.T) {
+	m, _ := poolFixture(t, 10, 2)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+
+	destgate.Configure(2*time.Second, 100*time.Millisecond) // floor far wider than maxWait
+	t.Cleanup(func() { destgate.Configure(0, 0) })
+
+	opts := []probe.Options{
+		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "oversubscribed-host:443"},
+		{Target: "t", Timeout: 5 * time.Second, Seq: 2, Destination: "oversubscribed-host:443"},
+	}
+	results := checker.CheckBatch(context.Background(), opts)
+
+	var skipped, ok int
+	for _, r := range results {
+		switch {
+		case r.Skip:
+			skipped++
+			if r.Ok || r.Error != "" {
+				t.Fatalf("a skipped result should carry no Ok/Error payload at all, got %+v", r)
+			}
+		case r.Ok:
+			ok++
+		default:
+			t.Fatalf("expected every non-skipped result to be a real success, got %+v", r)
+		}
+	}
+	if ok != 1 || skipped != 1 {
+		t.Fatalf("expected exactly 1 real success and 1 skipped result, got %d ok / %d skipped: %+v", ok, skipped, results)
+	}
+}
+
 func loadOneWithRunScriptRequiringParam(t *testing.T) module.Module {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {

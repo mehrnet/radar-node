@@ -766,7 +766,10 @@ func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
 		// runCheck's own comment.
 		go func(j checkJob) {
 			defer wg.Done()
-			r := a.runCheck(ctx, sem, j.pr, j.runID, j.seq)
+			r, ok := a.runCheck(ctx, sem, j.pr, j.runID, j.seq)
+			if !ok {
+				return // never actually ran -- see runCheck's own comment
+			}
 			mu.Lock()
 			results = append(results, r)
 			mu.Unlock()
@@ -794,7 +797,14 @@ func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
 // clears, the check gets a full, fresh timeout_ms-scoped budget of
 // its own to actually run in -- ctx is only wrapped with
 // context.WithTimeout after Wait returns, not before.
-func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSnapshot, runID string, seq int) wire.Result {
+//
+// Returns ok=false when the wait itself never cleared -- deliberately
+// not reported as a failure at all (radar-node only reports when it
+// has real data), not just tagged specially, so this never shows up
+// as a misleading down-tick for a proxy that was simply never asked
+// to answer this cycle. Logged locally so it's still visible for our
+// own operational debugging, just never sent on.
+func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSnapshot, runID string, seq int) (wire.Result, bool) {
 	opts := optionsFor(pr, seq)
 
 	checker, ok := a.reg.Get(pr.Prober)
@@ -802,7 +812,8 @@ func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSn
 	if !ok {
 		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("unknown prober %q", pr.Prober))
 	} else if err := destgate.Wait(ctx, opts.Destination); err != nil {
-		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("waiting for destination to clear: %w", err))
+		log.Printf("agent: %s check for probe %s (seq %d): destination %q never cleared, not reporting: %v", pr.Prober, pr.ID, seq, opts.Destination, err)
+		return wire.Result{}, false
 	} else {
 		checkCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 		sem <- struct{}{}
@@ -816,7 +827,7 @@ func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSn
 		ProbeID:    pr.ID,
 		Result:     r,
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
-	}
+	}, true
 }
 
 // runCheckBatch is runCheck's batched counterpart: every job in
@@ -836,14 +847,25 @@ func (a *agent) runCheckBatch(ctx context.Context, prober string, batchJobs []ch
 	checkResults := batchChecker.CheckBatch(ctx, opts)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	out := make([]wire.Result, len(batchJobs))
+	out := make([]wire.Result, 0, len(batchJobs))
 	for i, j := range batchJobs {
-		out[i] = wire.Result{
+		if checkResults[i].Skip {
+			// Never actually ran (see probe.Result.Skip's own doc
+			// comment, and internal/module/pool.go's testJob, the only
+			// place inside a pooled Checker that sets it). internal/
+			// module never logs anything itself (see testJob's own
+			// comment), so this is where that gets surfaced -- same
+			// message shape as runCheck's own non-pooled counterpart,
+			// and equally not reported on at all.
+			log.Printf("agent: %s check for probe %s (seq %d): destination never cleared, not reporting", j.pr.Prober, j.pr.ID, j.seq)
+			continue
+		}
+		out = append(out, wire.Result{
 			RunID:      j.runID,
 			ProbeID:    j.pr.ID,
 			Result:     checkResults[i],
 			ObservedAt: now,
-		}
+		})
 	}
 	return out
 }

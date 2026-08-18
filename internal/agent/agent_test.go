@@ -575,3 +575,88 @@ func TestRun_DestinationIntervalSpacesChecksAgainstASharedTarget(t *testing.T) {
 		t.Fatalf("two checks against the same target were only %v apart, expected at least ~%v (destgate should have spaced them)", gap, destinationInterval)
 	}
 }
+
+// TestRun_DestinationMaxWaitExceededMeansNoResultReported is the
+// companion to the spacing test above: when a shared destination's
+// floor is wider than DestinationMaxWait (an oversubscribed
+// destination, dozens of probes wanting a turn faster than the floor
+// allows -- see destgate.Configure's own comment), the second probe's
+// wait times out entirely. It must never be reported as a failure at
+// all -- radar-node only reports when it actually has data -- so
+// exactly one result (the first probe's own real success) should ever
+// reach the server, not two, and never a synthetic "waiting for
+// destination to clear" failure for the second.
+func TestRun_DestinationMaxWaitExceededMeansNoResultReported(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	fake := newFakeAPI(ln.Addr().String())
+	fake.probeCount = 1
+	fake.probeIDs = []string{"probe_a", "probe_b"}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL:              srv.URL,
+			APIKey:              "node_test:secret",
+			SchedulerTick:       20 * time.Millisecond,
+			Concurrency:         4,
+			DestinationInterval: 2 * time.Second,        // far wider than...
+			DestinationMaxWait:  100 * time.Millisecond, // ...this, so the second probe gives up entirely
+		})
+	}()
+
+	select {
+	case <-fake.resultsAdded:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the first probe's own result")
+	}
+
+	// Both probes are "manual" (probeCount=1, triggered once) -- neither
+	// runs again on its own, so anything arriving after this pause would
+	// have to be a second, unwanted result for probe_b. Long enough to
+	// comfortably clear DestinationMaxWait (100ms) plus scheduling
+	// jitter, short enough to keep the test fast.
+	select {
+	case <-fake.resultsAdded:
+		t.Fatal("expected only one result ever -- the second probe's own timed-out wait must not be reported at all")
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent.Run did not exit after context cancellation")
+	}
+
+	fake.mu.Lock()
+	results := append([]wire.Result(nil), fake.gotResults...)
+	fake.mu.Unlock()
+	if len(results) != 1 {
+		t.Fatalf("expected exactly 1 result (the first probe's own), got %d: %+v", len(results), results)
+	}
+	if !results[0].Ok {
+		t.Errorf("expected the one reported result to be a real success, got %+v", results[0])
+	}
+}

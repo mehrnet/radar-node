@@ -221,7 +221,13 @@ func (c PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob) 
 	opts := j.opts
 
 	if err := destgate.Wait(ctx, opts.Destination); err != nil {
-		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("waiting for destination to clear: %w", err))
+		// Skip, not Fail -- never actually ran, so nothing to report at
+		// all (see probe.Result.Skip's own doc comment); Target/Type
+		// are still set purely so the caller (internal/agent, the one
+		// place in this codebase that actually logs -- this package
+		// deliberately never does) can log something useful about which
+		// job this was.
+		return probe.Result{Skip: true, Type: c.Type(), Target: opts.Target, Seq: opts.Seq}
 	}
 	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()

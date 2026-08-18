@@ -59,6 +59,18 @@ func (o Options) Param(key, def string) string {
 // doesn't belong in the fixed fields (e.g. resolved DNS records,
 // HTTP status code, TLS/DNS/connect timing breakdown).
 type Result struct {
+	// Skip marks a Result that never actually ran at all -- currently
+	// only set when internal/destgate's own spacing window never
+	// cleared in time (see destgate's own doc comment) -- and is
+	// purely an internal signal between a Checker/PoolChecker and
+	// internal/agent's own wire-reporting layer, which drops every
+	// Result carrying this before ever building a wire.Result to send
+	// on. json:"-" since it must never actually appear in any output,
+	// wire or `radar-node probe`'s own CLI JSON alike: reporting a
+	// "failure" for a check that was simply never asked to run this
+	// cycle would render as a misleading down-tick on a proxy that may
+	// well be perfectly healthy.
+	Skip      bool     `json:"-"`
 	Ok        bool     `json:"ok"`
 	Type      string   `json:"type"`
 	Target    string   `json:"target"`
