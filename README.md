@@ -138,6 +138,7 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--scheduler-tick` | how often to check cached probes for due-ness (default `2s`) |
 | `--concurrency` | max probes running at once (default `64`) |
 | `--destination-interval` | min spacing between any two checks against the same real destination, node-wide, regardless of which probe/group/subscription/account asked for either -- overrides a probe's own `interval_seconds` when its destination is shared and busy (default `10s`, `0` disables) |
+| `--destination-max-wait` | longest a single check will wait for its own destination to clear before giving up and failing that one check -- its own budget, separate from the check's own `timeout_ms`, so a heavily-shared destination (many probes resolving to one host) doesn't leave every check but the first permanently failing before it ever gets a real attempt (default `30s`) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
 
 The agent has no server-computed dispatch: it syncs probe definitions

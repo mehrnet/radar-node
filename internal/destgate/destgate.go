@@ -29,20 +29,38 @@ import (
 )
 
 var (
-	mu    sync.Mutex
-	last  = map[string]time.Time{}
-	floor time.Duration
+	mu      sync.Mutex
+	last    = map[string]time.Time{}
+	floor   time.Duration
+	maxWait time.Duration
 )
 
 // Configure sets the minimum spacing between two granted Wait calls
-// for the same destination. Call once, before either the scheduler or
-// pool loops start; zero (the default) disables gating entirely, so
-// callers that never configure this (the `probe` one-shot subcommand,
-// which has no fleet-spamming risk to guard against) pay nothing.
-func Configure(d time.Duration) {
+// for the same destination (floor), and the longest Wait will ever
+// block one caller before giving up (maxWait). Call once, before
+// either the scheduler or pool loops start; floor<=0 disables gating
+// entirely, so callers that never configure this (the `probe`
+// one-shot subcommand, which has no fleet-spamming risk to guard
+// against) pay nothing.
+//
+// maxWait is deliberately its own, separate budget from a check's own
+// configured timeout_ms -- confirmed against real production fan-out
+// (one account's subscription listed 33 separate "proxies" that all
+// turned out to be the same physical host on different ports, all due
+// on the same schedule): with a 10s floor and typical few-second check
+// timeouts, only the very first of many probes sharing one destination
+// could ever get a real attempt in per floor window, and every other
+// one would fail waiting, every single cycle, forever -- not a
+// transient/occasional failure but a permanent one, indistinguishable
+// from the destination actually being down. Once Wait's own budget
+// clears, the caller gives the check itself a full, fresh
+// timeout_ms-scoped budget to actually run in -- see agent.runCheck's
+// own comment.
+func Configure(floorD, maxWaitD time.Duration) {
 	mu.Lock()
 	defer mu.Unlock()
-	floor = d
+	floor = floorD
+	maxWait = maxWaitD
 }
 
 // Wait blocks until at least the configured floor has elapsed since
@@ -53,18 +71,26 @@ func Configure(d time.Duration) {
 // is safer than accidentally serializing every such call against
 // itself under one bogus shared key.
 //
-// The caller is expected to pass a context already scoped to the
-// check's own timeout (not the scheduler's whole-tick context) -- a
-// destination that's already busy past that point fails this one
-// check as an ordinary timeout, exactly as if the dial itself had
-// been slow, rather than hanging indefinitely or starving whatever
-// concurrency limit the caller enforces separately. Callers must
-// acquire any such concurrency slot *after* Wait returns, never
-// before calling it -- otherwise every check queued behind one busy
-// destination sits there holding a slot, starving unrelated checks
-// against completely different destinations, reintroducing the exact
-// class of problem this package exists to prevent.
+// Bounded by the lesser of ctx's own deadline and the configured
+// maxWait -- a destination still busy past that point returns an
+// error rather than blocking indefinitely, so one oversubscribed
+// destination can never hang a caller (or, transitively, whatever
+// concurrency-limited dispatch loop is waiting on that caller's own
+// goroutine) forever. Callers must acquire any concurrency-limiting
+// slot *after* Wait returns, never before calling it -- otherwise
+// every check queued behind one busy destination sits there holding a
+// slot, starving unrelated checks against completely different
+// destinations, reintroducing the exact class of problem this package
+// exists to prevent.
 func Wait(ctx context.Context, dest string) error {
+	mu.Lock()
+	if maxWait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, maxWait)
+		defer cancel()
+	}
+	mu.Unlock()
+
 	for {
 		mu.Lock()
 		if dest == "" || floor <= 0 {

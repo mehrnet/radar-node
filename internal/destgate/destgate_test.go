@@ -6,15 +6,24 @@ import (
 	"time"
 )
 
-// resetForTest clears the shared last-attempt map and floor between
-// tests -- destgate is a package-level singleton by design (see its
-// own doc comment), so tests need to reset that shared state
+// resetForTest clears the shared last-attempt map and configures floor
+// between tests -- destgate is a package-level singleton by design
+// (see its own doc comment), so tests need to reset that shared state
 // themselves rather than constructing a fresh instance each time.
+// maxWait stays 0 (no internal bound beyond whatever ctx a test
+// itself supplies) unless a test explicitly needs otherwise -- see
+// resetForTestWithMaxWait.
 func resetForTest(t *testing.T, floorD time.Duration) {
+	t.Helper()
+	resetForTestWithMaxWait(t, floorD, 0)
+}
+
+func resetForTestWithMaxWait(t *testing.T, floorD, maxWaitD time.Duration) {
 	t.Helper()
 	mu.Lock()
 	last = map[string]time.Time{}
 	floor = floorD
+	maxWait = maxWaitD
 	mu.Unlock()
 }
 
@@ -129,5 +138,57 @@ func TestWait_ConcurrentCallersForTheSameDestinationAreFullySerialized(t *testin
 		if gap < floorD-20*time.Millisecond {
 			t.Fatalf("consecutive grants %d and %d were only %v apart, expected at least ~%v", i-1, i, gap, floorD)
 		}
+	}
+}
+
+// TestWait_MaxWaitGivesUpEvenWithAnUnboundedCallerContext is the
+// regression this maxWait budget exists for: production fan-out (one
+// account's subscription listed 33 separate "proxies" that all turned
+// out to be the same physical host on different ports) meant a floor
+// bounded only by each check's own few-second timeout left every
+// probe but the first permanently failing, every single cycle -- not
+// an occasional/transient failure. maxWait is destgate's own second,
+// independent budget, enforced even when the caller's own ctx never
+// expires on its own (context.Background(), standing in for the
+// caller giving Wait a long-lived context and expecting Wait itself
+// to bound the wait, not the caller).
+func TestWait_MaxWaitGivesUpEvenWithAnUnboundedCallerContext(t *testing.T) {
+	resetForTestWithMaxWait(t, time.Hour, 100*time.Millisecond) // floor far longer than maxWait
+	if err := Wait(context.Background(), "oversubscribed-host:443"); err != nil {
+		t.Fatalf("first Wait: %v", err)
+	}
+
+	start := time.Now()
+	err := Wait(context.Background(), "oversubscribed-host:443")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error once maxWait passed while still waiting on a floor that hasn't cleared")
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("maxWait should cut the wait short even with an unbounded caller ctx, took %v", elapsed)
+	}
+}
+
+// TestWait_ZeroMaxWaitLeavesBoundingEntirelyToTheCallersContext is the
+// converse -- maxWait<=0 (this package's own zero value, and what
+// Configure is never called with at all for the `probe` one-shot
+// subcommand) must not silently impose some other bound; the only
+// thing that can end an unbounded wait is the caller's own ctx.
+func TestWait_ZeroMaxWaitLeavesBoundingEntirelyToTheCallersContext(t *testing.T) {
+	resetForTestWithMaxWait(t, time.Hour, 0)
+	if err := Wait(context.Background(), "busy-host:443"); err != nil {
+		t.Fatalf("first Wait: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := Wait(ctx, "busy-host:443")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error once the caller's own ctx deadline passed")
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("the caller's own ctx should still cut the wait short with maxWait disabled, took %v", elapsed)
 	}
 }

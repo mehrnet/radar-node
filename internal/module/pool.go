@@ -207,18 +207,24 @@ func (c PoolChecker) testJobs(ctx context.Context, jobs []poolJob, out []probe.R
 // taking a slot from sem, not after -- taking sem first would let one
 // busy destination's queue of blocked jobs exhaust this instance's
 // whole TestConcurrency budget, starving jobs against destinations
-// that aren't busy at all. The wait is bounded by jobCtx, already
-// scoped to opts.Timeout, so a destination still busy past that point
-// fails this one job as an ordinary timeout, same as a slow dial
-// would.
+// that aren't busy at all.
+//
+// The wait is deliberately its own budget (destgate's own configured
+// maxWait), not opts.Timeout -- confirmed in production that a
+// heavily-shared destination (dozens of jobs resolving to one
+// physical host) with a short opts.Timeout meant only the very first
+// job per floor window could ever get a real attempt in, and every
+// other one failed waiting, every cycle, permanently. Once the wait
+// clears, the job gets a full, fresh opts.Timeout-scoped budget of
+// its own to actually run in.
 func (c PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob) probe.Result {
 	opts := j.opts
-	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
 
-	if err := destgate.Wait(jobCtx, opts.Destination); err != nil {
+	if err := destgate.Wait(ctx, opts.Destination); err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("waiting for destination to clear: %w", err))
 	}
+	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
 	sem <- struct{}{}
 	defer func() { <-sem }()
 

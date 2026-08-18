@@ -103,6 +103,9 @@ agent flags:
   --concurrency int       max probes running at once (default 64)
   --destination-interval duration  min spacing between checks against the
                           same real destination, node-wide (default "10s")
+  --destination-max-wait duration  longest a check will wait for a busy
+                          destination before failing it, own budget
+                          separate from the check's own timeout (default "30s")
   --modules-dir path      load/override modules from *.yaml/*.yml here,
                           on top of the embedded defaults
   --tools-dir path        resolves __TOOLS_DIR__ in a loaded module's own
@@ -218,6 +221,7 @@ func runAgent(args []string) error {
 		schedulerTick       time.Duration
 		concurrency         int
 		destinationInterval time.Duration
+		destinationMaxWait  time.Duration
 		modulesDir          string
 		toolsDir            string
 	)
@@ -229,6 +233,7 @@ func runAgent(args []string) error {
 	fs.DurationVar(&schedulerTick, "scheduler-tick", 2*time.Second, "")
 	fs.IntVar(&concurrency, "concurrency", 64, "")
 	fs.DurationVar(&destinationInterval, "destination-interval", 10*time.Second, "")
+	fs.DurationVar(&destinationMaxWait, "destination-max-wait", 30*time.Second, "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
 	fs.StringVar(&toolsDir, "tools-dir", "", "")
 	if err := fs.Parse(args); err != nil {
@@ -252,6 +257,7 @@ func runAgent(args []string) error {
 		SchedulerTick:       schedulerTick,
 		Concurrency:         concurrency,
 		DestinationInterval: destinationInterval,
+		DestinationMaxWait:  destinationMaxWait,
 		ModulesDir:          modulesDir,
 		ToolsDir:            toolsDir,
 	})

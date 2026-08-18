@@ -314,8 +314,8 @@ func TestPoolChecker_CheckBatch_SpacesJobsSharingADestination(t *testing.T) {
 	checker := module.NewChecker(m).(probe.BatchChecker)
 
 	const floor = 200 * time.Millisecond
-	destgate.Configure(floor)
-	t.Cleanup(func() { destgate.Configure(0) })
+	destgate.Configure(floor, 2*time.Second) // maxWait comfortably above floor -- this test is about floor spacing, not maxWait
+	t.Cleanup(func() { destgate.Configure(0, 0) })
 
 	opts := []probe.Options{
 		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "shared-host:443"},
@@ -344,8 +344,8 @@ func TestPoolChecker_CheckBatch_DoesNotSpaceJobsWithDifferentDestinations(t *tes
 	m, _ := poolFixture(t, 10, 2)
 	checker := module.NewChecker(m).(probe.BatchChecker)
 
-	destgate.Configure(time.Hour) // absurdly large -- any accidental gating would time the test out
-	t.Cleanup(func() { destgate.Configure(0) })
+	destgate.Configure(time.Hour, time.Hour) // absurdly large -- any accidental gating would time the test out
+	t.Cleanup(func() { destgate.Configure(0, 0) })
 
 	opts := []probe.Options{
 		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "host-a:443"},

@@ -69,6 +69,11 @@ type Config struct {
 	// subscription/account asked for either -- see destgate's own doc
 	// comment for why this exists. Zero disables it.
 	DestinationInterval time.Duration
+	// DestinationMaxWait caps how long a single check will ever wait
+	// for its own destination to clear (see destgate.Configure's own
+	// comment on why this is a separate budget from a check's own
+	// timeout_ms) before giving up and failing that one check.
+	DestinationMaxWait time.Duration
 	// ModulesDir loads probers from *.yaml/*.yml files there, on top
 	// of (and overriding by name) the embedded default fixtures
 	// (tcp/udp/dns/icmp/http/https/system). Empty means defaults-only.
@@ -131,7 +136,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := reg.LoadModules(cfg.ModulesDir, cfg.ToolsDir); err != nil {
 		return err
 	}
-	destgate.Configure(cfg.DestinationInterval)
+	destgate.Configure(cfg.DestinationInterval, cfg.DestinationMaxWait)
 
 	version := cfg.Version
 	if version == "" {
@@ -777,15 +782,20 @@ func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
 // would let one busy destination's queue of blocked checks exhaust
 // the whole fleet's concurrency budget, starving checks against
 // destinations that aren't busy at all; see runChecks' own comment on
-// its singles loop. The wait is bounded by this check's own timeout
-// (via ctx, constructed here rather than left to Checker.Check's own
-// internal WithTimeout), so a destination that's still busy past that
-// point fails this one check as an ordinary timeout, exactly as if
-// the dial itself had been slow.
+// its singles loop.
+//
+// The wait is deliberately its own budget (destgate's own configured
+// maxWait), not this check's own timeout_ms -- confirmed in
+// production that a heavily-shared destination (dozens of probes
+// resolving to one physical host) with a short timeout_ms meant only
+// the very first probe per floor window could ever get a real
+// attempt in, and every other one failed waiting, every cycle,
+// permanently, not as an occasional/transient thing. Once the wait
+// clears, the check gets a full, fresh timeout_ms-scoped budget of
+// its own to actually run in -- ctx is only wrapped with
+// context.WithTimeout after Wait returns, not before.
 func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSnapshot, runID string, seq int) wire.Result {
 	opts := optionsFor(pr, seq)
-	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
 
 	checker, ok := a.reg.Get(pr.Prober)
 	var r probe.Result
@@ -794,9 +804,11 @@ func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSn
 	} else if err := destgate.Wait(ctx, opts.Destination); err != nil {
 		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("waiting for destination to clear: %w", err))
 	} else {
+		checkCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 		sem <- struct{}{}
-		r = checker.Check(ctx, opts)
+		r = checker.Check(checkCtx, opts)
 		<-sem
+		cancel()
 	}
 
 	return wire.Result{
