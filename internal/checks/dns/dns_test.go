@@ -278,10 +278,17 @@ func TestCheck_NoPTRRecordIsOk(t *testing.T) {
 }
 
 func TestCheck_SRVRecordsWithServiceAndProto(t *testing.T) {
+	// Deliberately DIFFERENT priorities -- net.Resolver's own
+	// LookupSRV doc comment: "returned records are sorted by priority
+	// and randomized by weight within a priority." Two records sharing
+	// one priority (weight-randomized on purpose, per RFC 2782's
+	// weighted-selection algorithm) would make answers' own order
+	// nondeterministic across runs; distinct priorities keep the sort
+	// -- and this test -- deterministic.
 	server := startFakeDNS(t, map[qkey][]xdns.ResourceBody{
 		{"_sip._tcp.example.radar.test.", xdns.TypeSRV}: {
 			&xdns.SRVResource{Priority: 10, Weight: 60, Port: 5060, Target: mustName(t, "sip1.radar.test.")},
-			&xdns.SRVResource{Priority: 10, Weight: 40, Port: 5060, Target: mustName(t, "sip2.radar.test.")},
+			&xdns.SRVResource{Priority: 20, Weight: 40, Port: 5060, Target: mustName(t, "sip2.radar.test.")},
 		},
 	})
 
@@ -296,8 +303,8 @@ func TestCheck_SRVRecordsWithServiceAndProto(t *testing.T) {
 	priorities, _ := res.Extra["priorities"].([]int)
 	weights, _ := res.Extra["weights"].([]int)
 	ports, _ := res.Extra["ports"].([]int)
-	if len(priorities) != 2 || priorities[0] != 10 || priorities[1] != 10 {
-		t.Fatalf("expected [10 10], got %v", priorities)
+	if len(priorities) != 2 || priorities[0] != 10 || priorities[1] != 20 {
+		t.Fatalf("expected [10 20], got %v", priorities)
 	}
 	if len(weights) != 2 || weights[0] != 60 || weights[1] != 40 {
 		t.Fatalf("expected [60 40], got %v", weights)
