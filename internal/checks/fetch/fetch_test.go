@@ -14,26 +14,28 @@ import (
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
-func TestDo_ReturnsBody(t *testing.T) {
+func TestCheck_ReturnsBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("hello world"))
 	}))
 	defer srv.Close()
 
-	body, status, err := fetch.Do(context.Background(), probe.Options{Target: srv.URL, Timeout: 2 * time.Second})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	res := check(t, srv.URL, map[string]any{
+		"fields": map[string]any{"body": map[string]any{"parser": "jq", "expr": ".", "raw": true}},
+	})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
 	}
-	if status != http.StatusOK {
-		t.Fatalf("expected 200, got %d", status)
+	if res.Extra["http_code"] != http.StatusOK {
+		t.Fatalf("expected 200, got %v", res.Extra["http_code"])
 	}
-	if string(body) != "hello world" {
-		t.Fatalf("unexpected body: %q", body)
+	if res.Extra["body"] != "hello world" {
+		t.Fatalf("unexpected body: %q", res.Extra["body"])
 	}
 }
 
-func TestDo_CapsBodySize(t *testing.T) {
+func TestCheck_CapsBodySize(t *testing.T) {
 	// 11MB of content, well over fetch's own 10MB cap.
 	big := strings.Repeat("x", 11*1024*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,12 +43,12 @@ func TestDo_CapsBodySize(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, _, err := fetch.Do(context.Background(), probe.Options{Target: srv.URL, Timeout: 5 * time.Second})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	res := check(t, srv.URL, nil)
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
 	}
-	if len(body) != 10*1024*1024 {
-		t.Fatalf("expected body capped at 10MB, got %d bytes", len(body))
+	if res.Extra["bytes"] != 10*1024*1024 {
+		t.Fatalf("expected body capped at 10MB, got %v bytes", res.Extra["bytes"])
 	}
 }
 

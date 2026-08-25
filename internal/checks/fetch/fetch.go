@@ -8,13 +8,11 @@
 // them, not something this binary has to know in advance.
 //
 // Deliberately mechanical: no protocol-specific business logic lives
-// here. subscriptionfetch imports Do below directly for its own raw-
-// body needs (GET only, no headers/body/fields) rather than this
-// package growing awareness of proxy subscription formats itself --
-// see this project's own README on why that split matters: real
-// per-protocol parsing/conversion work belongs server-side (radar-api,
-// fixed with a git push) rather than in this binary (fixed only on
-// however long a fleet takes to pick up a tagged release).
+// here -- see this project's own README on why that split matters:
+// real per-protocol parsing/conversion work (e.g. proxy-subscription
+// content, see radar-api's lib/subscriptionParse.ts) belongs server-
+// side (fixed with a git push) rather than in this binary (fixed only
+// on however long a fleet takes to pick up a tagged release).
 package fetch
 
 import (
@@ -46,17 +44,6 @@ type Checker struct{}
 func New() Checker { return Checker{} }
 
 func (Checker) Type() string { return "fetch" }
-
-// Do performs a plain GET and returns the response body (capped at
-// maxBodyBytes), the HTTP status code, and any error -- the original,
-// narrower shape this package always had, kept as its own function
-// (rather than folded into Check below) specifically because
-// subscriptionfetch calls this directly as a plain Go function, not
-// through the action registry, and has no need for method/headers/
-// body/fields.
-func Do(ctx context.Context, opts probe.Options) ([]byte, int, error) {
-	return do(ctx, opts.Target, opts.Timeout, "GET", nil, "")
-}
 
 func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)

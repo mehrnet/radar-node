@@ -1,5 +1,0 @@
-name: subscription-fetch
-action: subscription_fetch
-response:
-  - name: discovered
-    type: number

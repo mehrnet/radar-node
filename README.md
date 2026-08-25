@@ -11,11 +11,9 @@ Every prober -- including the seven built-ins (`tcp`, `udp`, `dns`, `icmp`,
 There is no "native vs. custom module" distinction: a module either calls a
 built-in Go implementation in-process (`action:`, zero subprocess overhead)
 or shells out to an external binary (`run:`, e.g. `xray`/`sing-box`). The
-seven built-ins (plus `subscription-fetch`, embedded the same way but
-intentionally hidden from ordinary probe creation -- see "Subscription-link
-parsing" under [Modules](#modules) below) are embedded in the binary and
-load automatically; `radar-node init` writes every one of them out as real,
-editable files. In this sense radar-node isn't fundamentally a network
+seven built-ins are embedded in the binary and load automatically;
+`radar-node init` writes every one of them out as real, editable files. In
+this sense radar-node isn't fundamentally a network
 prober -- it's a generic scheduled data-transform runner (request in,
 structured response out, on a schedule, billed and stored) that ships with
 networking as its first set of fixtures -- `fetch`'s own dynamic field-
@@ -165,8 +163,8 @@ radar-node init -C /etc/radar-node/modules.d
 
 Writes every embedded default module file (`tcp.yaml`, `udp.yaml`,
 `dns.yaml`, `icmp.yaml`, `http.yaml`, `https.yaml`, `system.yaml`,
-`fetch.yaml`, `subscription-fetch.yaml` -- literally whatever's in
-`internal/registry/defaults/*.yaml` at build time, not a hardcoded list) to
+`fetch.yaml` -- literally whatever's in `internal/registry/defaults/*.yaml`
+at build time, not a hardcoded list) to
 `-C` (default `.`) as real files, so there's something to actually edit --
 until `init` is run, or a directory is pointed at with `--modules-dir`, they
 only exist embedded inside the binary. `--force` overwrites files that
@@ -311,26 +309,28 @@ yourself which parts of its response you actually care about.
 
 Every entry under `fields` is either a single `{"parser", "expr"}` step or
 an array of them for a multi-step chain, applied in order against the raw
-response body. A subscription URL's own content is exactly this shape --
-a base64-encoded, newline-delimited proxy-URI list -- and `fetch` can
-already reproduce that raw list on its own, verified against a real live
-deployment:
+response body. This is also, today, how a proxy-subscription URL's own
+content reaches `radar-api`: a `fetch` probe with a `subscription_type`
+param and a `fields.content` pipeline that just decodes/passes through
+the raw body (no protocol awareness here at all) --
 
 ```jsonc
 {
+  "subscription_type": "base64-xray",
   "fields": {
-    "proxies": [
-      { "parser": "base64" },
-      { "parser": "jq", "expr": "split(\"\n\") | map(select(length > 0))", "raw": true }
-    ]
+    "content": { "parser": "base64" }
   }
 }
 ```
 
-(See "Subscription-link parsing" below for why the *next* step --
-parsing each line's own `vless://`/`vmess://`/`trojan://`/`ss://` scheme
-into a real, connectable config -- deliberately does *not* live here, on
-this same generic pipeline, despite the shape overlap this far.)
+-- with every actual `vless://`/`vmess://`/`trojan://`/`ss://` URI
+parsing, and the outbound/`streamSettings` config construction, done
+server-side in `radar-api`'s `src/lib/subscriptionParse.ts` (a
+dedicated `subscription-fetch` prober used to hand-roll this in Go here;
+it's been retired in favor of this split -- radar-node fetches/decodes/
+splits, radar-api owns every protocol-specific decision, so a parsing fix
+ships with a `git push` rather than waiting on a fleet to pick up a
+tagged release).
 
 Three parsers today:
 
@@ -423,35 +423,6 @@ source, hex-encoded) are what a heartbeat reports and what
 `radar-api` learns each node's request/response schema well enough to
 drive a probe-creation form dynamically, without radar-node ever pushing
 full module bodies on every heartbeat.
-
-### Subscription-link parsing (`internal/checks/subscriptionfetch`)
-
-The `subscription_fetch` prober turns a subscription URL's own content
-(a base64/raw VLESS/VMess/Trojan/Shadowsocks URI list, a full xray-style
-JSON config, or a plain host:port list) into xray `outbound`/
-`streamSettings` configs, hand-rolled per protocol/transport rather than
-delegated to a library -- there is no CGO-free, cross-platform-buildable
-Go package that does this for us today. That hand-rolling is exactly
-what's produced several real gaps and bugs this project has hit in
-production (missing `xhttpSettings`, missing `tcpSettings.header`
-obfuscation, `grpcSettings.serviceName` read from the wrong query param,
-several TLS fields never wired up at all) -- each fixed as found, not by
-design.
-
-[kutovoys/xray-checker](https://github.com/kutovoys/xray-checker) solves
-the same problem (subscription proxies -> xray config -> connectivity
-check) and is the reference this package's own field coverage is checked
-against when in doubt. It gets its own parsing correctness from
-[xtls/libxray](https://github.com/xtls/libxray) -- a share-link/config
-conversion library published by the same `xtls` org that maintains
-`xray-core` itself, so it tracks xray-core's own config-format changes
-directly rather than reactively. Adopting `libxray` here directly (in
-place of this package's own hand-rolled parsing) hasn't been done -- it's
-a real architecture change (a new, sizeable dependency; unclear
-cross-platform build story for this binary's own `CGO_ENABLED=0`/6-target
-release matrix) -- but if this package's own gaps keep recurring, that's
-the more durable fix to reach for before patching another individual
-field.
 
 ## Wire protocol -- radar-node <-> radar-api
 

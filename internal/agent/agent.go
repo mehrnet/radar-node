@@ -908,8 +908,9 @@ func destinationFor(pr wire.ProbeSnapshot) string {
 
 // xrayDestination pulls the real proxy server address:port out of an
 // xray probe's own Params -- unlike Target (always the fixed
-// connectivity-test constant, see internal/checks/subscriptionfetch's
-// own comment), this is the thing actually being dialed. Mirrors
+// connectivity-test constant a discovered proxy is created with, see
+// radar-api's lib/subscriptionParse.ts), this is the thing actually
+// being dialed. Mirrors
 // xray-pool-build-config.sh's own vnext-or-servers fallback (vless/
 // vmess vs. trojan-shaped configs). Returns ok=false on any shape
 // mismatch rather than panicking or erroring -- an unrecognized/
