@@ -1,6 +1,10 @@
 name: dns
 action: dns_query
 request:
+  # a (default), aaaa, ns, mx, txt, cname, or ptr -- see
+  # internal/checks/dns's own doc comment. Not enforced as an enum
+  # here (this schema has no enum concept); an unsupported value fails
+  # the check itself with a clear error instead.
   - name: record
     type: string
     required: false
@@ -10,7 +14,10 @@ request:
 response:
   - name: record
     type: string
-  # answers is a list of resolved addresses -- the bespoke string/
-  # number/bool schema has no array type, so it's left undeclared
-  # here rather than mis-typed; still present in a real result's
-  # Extra exactly as before.
+  - name: answers
+    type: array
+  # mx-only -- each answer's own preference value, same index as
+  # answers. Absent (not present in Extra at all) for every other
+  # record type.
+  - name: preferences
+    type: array
