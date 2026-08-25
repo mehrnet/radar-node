@@ -311,19 +311,33 @@ yourself which parts of its response you actually care about.
 
 Every entry under `fields` is either a single `{"parser", "expr"}` step or
 an array of them for a multi-step chain, applied in order against the raw
-response body -- e.g. `[{"parser": "base64"}, {"parser": "jq", "expr":
-".foo"}]` to base64-decode the whole body first, then pull one key out of
-the JSON that decodes to (exactly the shape a subscription URL's own
-content already takes -- see "Subscription-link parsing" below for why
-that hand-rolled protocol parsing deliberately does *not* live here, on
-this same generic pipeline, despite the shape overlap).
+response body. A subscription URL's own content is exactly this shape --
+a base64-encoded, newline-delimited proxy-URI list -- and `fetch` can
+already reproduce that raw list on its own, verified against a real live
+deployment:
+
+```jsonc
+{
+  "fields": {
+    "proxies": [
+      { "parser": "base64" },
+      { "parser": "jq", "expr": "split(\"\n\") | map(select(length > 0))", "raw": true }
+    ]
+  }
+}
+```
+
+(See "Subscription-link parsing" below for why the *next* step --
+parsing each line's own `vless://`/`vmess://`/`trojan://`/`ss://` scheme
+into a real, connectable config -- deliberately does *not* live here, on
+this same generic pipeline, despite the shape overlap this far.)
 
 Three parsers today:
 
 | Parser | What it does |
 |---|---|
 | `base64` | Decodes the current value as base64 -- tries the standard, raw-standard, URL-safe, and raw-URL-safe alphabets in turn, since real-world content in the wild isn't consistent about which one it used. |
-| `jq` | JSON-decodes the current value, then evaluates a real [jq](https://jqlang.org) expression (via [itchyny/gojq](https://github.com/itchyny/gojq), a pure-Go implementation -- no `jq` binary dependency) against it. A query resolving to `null` (jq's own default for a missing key -- not an error) is treated as "no value," same as an outright evaluation error. |
+| `jq` | JSON-decodes the current value, then evaluates a real [jq](https://jqlang.org) expression (via [itchyny/gojq](https://github.com/itchyny/gojq), a pure-Go implementation -- no `jq` binary dependency) against it. A query resolving to `null` (jq's own default for a missing key -- not an error) is treated as "no value," same as an outright evaluation error. Add `"raw": true` (same idea as real jq's own `--raw-input` flag) to treat the current value as a plain string instead of JSON -- needed for e.g. `split("\n")` against a base64-decoded, newline-delimited line list that was never JSON to begin with. |
 | `regex` | Matches the current value (as text) against a Go `regexp` pattern -- RE2-backed, so a probe-supplied pattern (remote, untrusted input reaching a BYO node) can't become a ReDoS lever the way a backtracking engine's could. Returns the first capture group if the pattern has one, else the whole match. |
 
 A field whose pipeline fails for any reason (bad expression, no match,

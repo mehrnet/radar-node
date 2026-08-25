@@ -16,6 +16,26 @@ func TestParseFieldSteps_SingleObjectShorthand(t *testing.T) {
 	}
 }
 
+func TestParseFieldSteps_ParsesRawFlag(t *testing.T) {
+	steps, err := parseFieldSteps(map[string]any{"parser": "jq", "expr": "split(\"\\n\")", "raw": true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(steps) != 1 || !steps[0].Raw {
+		t.Fatalf("expected Raw=true, got %+v", steps)
+	}
+}
+
+func TestParseFieldSteps_RawDefaultsFalse(t *testing.T) {
+	steps, err := parseFieldSteps(map[string]any{"parser": "jq", "expr": "."})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(steps) != 1 || steps[0].Raw {
+		t.Fatalf("expected Raw=false by default, got %+v", steps)
+	}
+}
+
 func TestParseFieldSteps_ChainArray(t *testing.T) {
 	steps, err := parseFieldSteps([]any{
 		map[string]any{"parser": "base64"},
@@ -84,6 +104,55 @@ func TestRunPipeline_JQOnNonJSONBodyFails(t *testing.T) {
 	_, err := runPipeline(context.Background(), []fieldStep{{Parser: "jq", Expr: "."}}, []byte("not json"))
 	if err == nil {
 		t.Fatal("expected an error for non-JSON input to jq")
+	}
+}
+
+// The exact scenario a live end-to-end test against a real base64-
+// encoded, newline-delimited subscription-style list first caught:
+// plain-text lines aren't JSON at all, so a jq step needs to opt into
+// treating them as a raw string (same idea as real jq's own
+// --raw-input flag) rather than trying to parse them as JSON syntax
+// and failing outright.
+func TestRunPipeline_JQRawStringSplit(t *testing.T) {
+	v, err := runPipeline(context.Background(), []fieldStep{
+		{Parser: "jq", Expr: `split("\n") | map(select(length > 0))`, Raw: true},
+	}, []byte("vless://one\nvless://two\n"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines, ok := v.([]any)
+	if !ok || len(lines) != 2 || lines[0] != "vless://one" || lines[1] != "vless://two" {
+		t.Fatalf("expected [vless://one vless://two], got %v (%T)", v, v)
+	}
+}
+
+// Without raw, the exact same expression against the exact same
+// plain-text (non-JSON) content must still fail clearly -- raw is
+// opt-in, not an automatic fallback, so a genuine "this isn't valid
+// JSON" config mistake elsewhere still surfaces as an error rather
+// than being silently reinterpreted.
+func TestRunPipeline_JQWithoutRawStillFailsOnPlainText(t *testing.T) {
+	_, err := runPipeline(context.Background(), []fieldStep{
+		{Parser: "jq", Expr: `split("\n")`, Raw: false},
+	}, []byte("vless://one\nvless://two\n"))
+	if err == nil {
+		t.Fatal("expected an error for plain-text input without raw:true")
+	}
+}
+
+func TestRunPipeline_ChainBase64ThenRawJQSplit(t *testing.T) {
+	// base64("vless://one\nvless://two\n")
+	encoded := "dmxlc3M6Ly9vbmUKdmxlc3M6Ly90d28K"
+	v, err := runPipeline(context.Background(), []fieldStep{
+		{Parser: "base64"},
+		{Parser: "jq", Expr: `split("\n") | map(select(length > 0))`, Raw: true},
+	}, []byte(encoded))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	lines, ok := v.([]any)
+	if !ok || len(lines) != 2 || lines[0] != "vless://one" || lines[1] != "vless://two" {
+		t.Fatalf("expected [vless://one vless://two], got %v (%T)", v, v)
 	}
 }
 

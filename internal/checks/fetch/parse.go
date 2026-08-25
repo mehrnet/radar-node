@@ -27,9 +27,18 @@ const (
 // base64-decode the whole body, then jq-select a key out of the
 // decoded JSON), applied in order with each step's output feeding the
 // next step's input.
+//
+// Raw only means something to a "jq" step -- same idea as real jq's
+// own --raw-input flag: treat the current value as a plain string
+// rather than JSON-decoding it first. Without it, a jq step against
+// e.g. a base64-decoded, newline-delimited list of plain-text lines
+// (not JSON at all) fails outright before the query ever runs -- jq's
+// own string functions (split, ltrimstr, test, ...) need a real string
+// value to operate on, not a parse error.
 type fieldStep struct {
 	Parser string
 	Expr   string
+	Raw    bool
 }
 
 // parseFieldSteps normalizes a raw "fields.<name>" param value into a
@@ -85,7 +94,8 @@ func decodeStep(m map[string]any) (fieldStep, error) {
 	if len(expr) > maxExprLen {
 		return fieldStep{}, fmt.Errorf("expr exceeds %d characters", maxExprLen)
 	}
-	return fieldStep{Parser: parser, Expr: expr}, nil
+	raw, _ := m["raw"].(bool)
+	return fieldStep{Parser: parser, Expr: expr, Raw: raw}, nil
 }
 
 // runPipeline applies steps in order to body, returning a value safe
@@ -107,7 +117,7 @@ func runStep(ctx context.Context, step fieldStep, value any) (any, error) {
 	case "base64":
 		return applyBase64(value)
 	case "jq":
-		return applyJQ(ctx, step.Expr, value)
+		return applyJQ(ctx, step.Expr, step.Raw, value)
 	case "regex":
 		return applyRegex(step.Expr, value)
 	default:
@@ -147,7 +157,7 @@ func applyBase64(value any) (any, error) {
 	return nil, fmt.Errorf("not valid base64")
 }
 
-func applyJQ(ctx context.Context, expr string, value any) (any, error) {
+func applyJQ(ctx context.Context, expr string, raw bool, value any) (any, error) {
 	if expr == "" {
 		return nil, fmt.Errorf("missing \"expr\"")
 	}
@@ -156,8 +166,14 @@ func applyJQ(ctx context.Context, expr string, value any) (any, error) {
 		return nil, err
 	}
 	var input any
-	if err := json.Unmarshal(b, &input); err != nil {
-		return nil, fmt.Errorf("input isn't valid JSON: %w", err)
+	if raw {
+		// Same idea as jq's own --raw-input: the current value becomes
+		// a plain jq string, never parsed as JSON syntax -- what lets
+		// e.g. split("\n") operate on a base64-decoded, newline-
+		// delimited line list that was never JSON in the first place.
+		input = string(b)
+	} else if err := json.Unmarshal(b, &input); err != nil {
+		return nil, fmt.Errorf("input isn't valid JSON (set \"raw\": true on this step to treat it as a plain string instead): %w", err)
 	}
 	query, err := gojq.Parse(expr)
 	if err != nil {

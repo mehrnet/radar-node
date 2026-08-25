@@ -228,6 +228,43 @@ func TestCheck_ChainedBase64ThenJQ(t *testing.T) {
 	}
 }
 
+// The exact subscription_fetch-equivalence scenario this was built to
+// validate against a real live radar-api+radar-node deployment: fetch
+// a base64-encoded, newline-delimited proxy-URI list (the same shape
+// a real subscription URL's own content already takes), decode it,
+// and split it into an array of individual lines -- proving fetch's
+// own generic pipeline can reproduce that raw shape without any
+// protocol-specific code.
+func TestCheck_ReproducesSubscriptionFetchRawListShape(t *testing.T) {
+	lines := "vless://11111111@1.2.3.4:443?type=tcp&security=tls#server-one\n" +
+		"vless://22222222@5.6.7.8:8443?type=ws&security=tls#server-two\n" +
+		"trojan://password123@9.10.11.12:443?sni=example.com#server-three\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(lines))
+	srv := jsonServer(t, encoded)
+
+	res := check(t, srv.URL, map[string]any{
+		"fields": map[string]any{
+			"proxies": []any{
+				map[string]any{"parser": "base64"},
+				map[string]any{"parser": "jq", "expr": `split("\n") | map(select(length > 0))`, "raw": true},
+			},
+		},
+	})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	proxies, ok := res.Extra["proxies"].([]any)
+	if !ok || len(proxies) != 3 {
+		t.Fatalf("expected an array of 3 lines, got %v (%T)", res.Extra["proxies"], res.Extra["proxies"])
+	}
+	if proxies[0] != "vless://11111111@1.2.3.4:443?type=tcp&security=tls#server-one" {
+		t.Fatalf("expected the first raw URI line intact, got %v", proxies[0])
+	}
+	if proxies[2] != "trojan://password123@9.10.11.12:443?sni=example.com#server-three" {
+		t.Fatalf("expected the third raw URI line intact, got %v", proxies[2])
+	}
+}
+
 func TestCheck_Base64OnlyField(t *testing.T) {
 	inner := "vless://uuid@host:443?type=tcp#name"
 	encoded := base64.StdEncoding.EncodeToString([]byte(inner))
