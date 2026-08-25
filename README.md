@@ -88,9 +88,10 @@ back, with the node still mid-restart.
 ```sh
 make build      # -> ./radar-node
 make test
-make lint
-make cross       # sanity build for linux/amd64 + linux/arm64
-make install      # go install into $GOBIN
+make lint       # gofmt -l check + go vet
+make cross      # sanity build across the full release matrix: linux/darwin amd64+arm64, windows amd64+arm64
+make install    # go install into $GOBIN
+make clean      # rm ./radar-node
 ```
 
 Requires Go 1.26+. Release builds (tagged) are handled by `.goreleaser.yaml`.
@@ -104,6 +105,7 @@ radar-node init [-C path]
 radar-node fetch-module <url> [flags]
 radar-node install-module <name> [flags]
 radar-node remove-module <name> [flags]
+radar-node version
 ```
 
 ### `probe` -- one-shot check runner
@@ -113,6 +115,7 @@ radar-node probe 1.1.1.1:443 --type tcp --param tls=true
 radar-node probe https://example.com --type http --count 3 --format table
 radar-node probe 8.8.8.8 --type icmp --count 5
 radar-node probe self --type system
+radar-node probe cloudflare.com --type dns --param record=mx
 ```
 
 | Flag | Meaning |
@@ -121,7 +124,7 @@ radar-node probe self --type system
 | `--count` | number of probes to run (default `1`) |
 | `--timeout` | per-probe timeout (default `5s`) |
 | `--format` | `json` \| `csv` \| `table` (default `json`) |
-| `--param k=v` | module-specific parameter, repeatable (`tcp`: `tls`,`sni`,`insecure` -- `dns`: `record`,`server` -- `http`: `method`) |
+| `--param k=v` | module-specific parameter, repeatable (`tcp`: `tls`,`sni`,`insecure` -- `dns`: `record` (`a`\|`aaaa`\|`ns`\|`mx`\|`txt`\|`cname`\|`ptr`\|`srv`, default `a`), `server`, and (`srv` only) `service`,`proto` -- `http`: `method`) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
 
 ### `agent` -- long-lived worker
@@ -690,22 +693,24 @@ it's picked up again once the process restarts and resyncs.
 
 ### Endpoints
 
-#### `POST /v1/nodes/register`
+#### `POST /v1/nodes`
 
 One-time. Used at node provisioning (root-operated boxes and
 account-added BYO nodes alike) to mint credentials. Called with an
 account bearer token (not a node token, since the node doesn't exist
-yet), typically by whatever provisioning flow/UI adds the node.
+yet), typically by whatever provisioning flow/UI adds the node -- an
+ordinary account-authed REST call, not part of the `spec_version`-
+carrying wire protocol the rest of this document covers, so it carries
+no `spec_version` field itself.
 
 Request:
 ```jsonc
-{ "spec_version": 2, "name": "eu-west-3" }
+{ "name": "eu-west-3" }
 ```
 
 Response:
 ```jsonc
 {
-  "spec_version": 2,
   "node_id": "node_01J8Z1A2B3C4D5E6F7G8H9J0KL",
   "node_secret": "9f2c...redacted...a41d"   // shown once, never retrievable again
 }
@@ -925,7 +930,13 @@ barrel ahead assuming the server still agrees the action is live.
 Uploads the full definition of one or more modules named in a
 heartbeat's `missing_prober_ids`. `file_hash` must equal
 `sha256(yaml)`; the server independently verifies this rather than
-trusting the claim.
+trusting the claim. `manifest` is the same manifest `yaml` itself
+parses to (name/engine/engine_version/request/response), sent
+alongside the raw YAML as plain already-validated JSON -- the server
+derives `kind`/`engine`/`engine_version` and the request/response
+schema it later serves from `GET /v1/probers/:proberId/schema` from
+`manifest` directly, never by parsing YAML itself; `yaml` itself is
+only ever stored verbatim, never parsed server-side.
 
 Request:
 ```jsonc
@@ -936,7 +947,16 @@ Request:
     {
       "prober_id": "xray-vless",
       "file_hash": "a1b2c3d4e5f6...",
-      "yaml": "name: xray-vless\nengine: xray\n..."
+      "yaml": "name: xray-vless\nengine: xray\n...",
+      "manifest": {
+        "name": "xray-vless",
+        "engine": "xray",
+        "engine_version": "26.3.27",
+        "request": [],
+        "response": [
+          { "name": "latency_ms", "type": "number", "primary": true }
+        ]
+      }
     }
   ]
 }
@@ -944,8 +964,14 @@ Request:
 
 Response:
 ```jsonc
-{ "spec_version": 2, "stored": 1 }
+{ "spec_version": 1, "stored": 1 }
 ```
+
+(`spec_version` here is currently always `1`, regardless of the
+request's own `spec_version` -- this response body's shape hasn't
+changed since the original protocol version, worth confirming with
+radar-api directly if that ever looks surprising rather than assuming
+it's a typo.)
 
 `stored` counts only genuinely new content -- radar-api is
 content-addressed on `file_hash` server-side, so uploading a hash it
