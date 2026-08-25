@@ -1,7 +1,7 @@
 name: dns
 action: dns_query
 request:
-  # a (default), aaaa, ns, mx, txt, cname, or ptr -- see
+  # a (default), aaaa, ns, mx, txt, cname, ptr, or srv -- see
   # internal/checks/dns's own doc comment. Not enforced as an enum
   # here (this schema has no enum concept); an unsupported value fails
   # the check itself with a clear error instead.
@@ -9,6 +9,15 @@ request:
     type: string
     required: false
   - name: server
+    type: string
+    required: false
+  # srv only -- e.g. service: sip, proto: tcp, target: example.com
+  # queries _sip._tcp.example.com. Leave both empty to query target as
+  # an already-fully-formed SRV name instead.
+  - name: service
+    type: string
+    required: false
+  - name: proto
     type: string
     required: false
 response:
@@ -20,4 +29,11 @@ response:
   # answers. Absent (not present in Extra at all) for every other
   # record type.
   - name: preferences
+    type: array
+  # srv-only, same index-per-answer convention as preferences above.
+  - name: priorities
+    type: array
+  - name: weights
+    type: array
+  - name: ports
     type: array

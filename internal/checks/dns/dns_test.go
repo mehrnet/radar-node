@@ -86,6 +86,17 @@ func check(t *testing.T, server, target, record string) probe.Result {
 	})
 }
 
+func checkSRV(t *testing.T, server, target, service, proto string) probe.Result {
+	t.Helper()
+	c := dns.New()
+	return c.Check(context.Background(), probe.Options{
+		Target:  target,
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Params:  map[string]any{"server": server, "record": "srv", "service": service, "proto": proto},
+	})
+}
+
 func TestCheck_ResolvesAgainstCustomServer(t *testing.T) {
 	server := startFakeDNS(t, map[qkey][]xdns.ResourceBody{
 		{"example.radar.test.", xdns.TypeA}: {&xdns.AResource{A: [4]byte{203, 0, 113, 42}}},
@@ -122,11 +133,19 @@ func TestCheck_MultipleARecordsAllReported(t *testing.T) {
 	}
 }
 
-func TestCheck_NoAnswerIsFailureForARecord(t *testing.T) {
+// Zero A records is ok, not a failure -- this check's own Ok answers
+// "did the DNS query itself succeed," never "did I like what it
+// found"; a caller building their own domain-health tooling on top
+// can treat an empty answers array however they choose.
+func TestCheck_NoARecordsIsOk(t *testing.T) {
 	server := startFakeDNS(t, nil)
 	res := check(t, server, "nowhere.radar.test.", "a")
-	if res.Ok {
-		t.Fatal("expected failure when no A records are returned")
+	if !res.Ok {
+		t.Fatalf("expected ok with zero A records, got error %q", res.Error)
+	}
+	answers, _ := res.Extra["answers"].([]string)
+	if len(answers) != 0 {
+		t.Fatalf("expected no answers, got %v", answers)
 	}
 }
 
@@ -148,11 +167,11 @@ func TestCheck_NSRecords(t *testing.T) {
 	}
 }
 
-func TestCheck_NoNSRecordsIsFailure(t *testing.T) {
+func TestCheck_NoNSRecordsIsOk(t *testing.T) {
 	server := startFakeDNS(t, nil)
 	res := check(t, server, "nowhere.radar.test.", "ns")
-	if res.Ok {
-		t.Fatal("expected failure when no NS records are returned -- a domain with none can't actually resolve")
+	if !res.Ok {
+		t.Fatalf("expected ok with zero NS records, got error %q", res.Error)
 	}
 }
 
@@ -179,8 +198,7 @@ func TestCheck_MXRecordsReportPreferencesAlongsideAnswers(t *testing.T) {
 }
 
 // Not every domain accepts mail -- zero MX records is a legitimate,
-// common state, unlike zero A or NS records, and must not fail the
-// check.
+// common state, and must not fail the check.
 func TestCheck_NoMXRecordsIsOk(t *testing.T) {
 	server := startFakeDNS(t, nil)
 	res := check(t, server, "no-mail.radar.test.", "mx")
@@ -256,6 +274,65 @@ func TestCheck_NoPTRRecordIsOk(t *testing.T) {
 	res := check(t, server, "203.0.113.99", "ptr")
 	if !res.Ok {
 		t.Fatalf("expected ok with no reverse DNS entry, got error %q", res.Error)
+	}
+}
+
+func TestCheck_SRVRecordsWithServiceAndProto(t *testing.T) {
+	server := startFakeDNS(t, map[qkey][]xdns.ResourceBody{
+		{"_sip._tcp.example.radar.test.", xdns.TypeSRV}: {
+			&xdns.SRVResource{Priority: 10, Weight: 60, Port: 5060, Target: mustName(t, "sip1.radar.test.")},
+			&xdns.SRVResource{Priority: 10, Weight: 40, Port: 5060, Target: mustName(t, "sip2.radar.test.")},
+		},
+	})
+
+	res := checkSRV(t, server, "example.radar.test.", "sip", "tcp")
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	answers, _ := res.Extra["answers"].([]string)
+	if len(answers) != 2 || answers[0] != "sip1.radar.test" || answers[1] != "sip2.radar.test" {
+		t.Fatalf("expected [sip1.radar.test sip2.radar.test], got %v", answers)
+	}
+	priorities, _ := res.Extra["priorities"].([]int)
+	weights, _ := res.Extra["weights"].([]int)
+	ports, _ := res.Extra["ports"].([]int)
+	if len(priorities) != 2 || priorities[0] != 10 || priorities[1] != 10 {
+		t.Fatalf("expected [10 10], got %v", priorities)
+	}
+	if len(weights) != 2 || weights[0] != 60 || weights[1] != 40 {
+		t.Fatalf("expected [60 40], got %v", weights)
+	}
+	if len(ports) != 2 || ports[0] != 5060 || ports[1] != 5060 {
+		t.Fatalf("expected [5060 5060], got %v", ports)
+	}
+}
+
+// Leaving both service and proto empty queries target directly as an
+// already-fully-formed SRV name, for a caller that already has one.
+func TestCheck_SRVRecordsWithoutServiceAndProto(t *testing.T) {
+	server := startFakeDNS(t, map[qkey][]xdns.ResourceBody{
+		{"_sip._tcp.example.radar.test.", xdns.TypeSRV}: {
+			&xdns.SRVResource{Priority: 10, Weight: 100, Port: 5060, Target: mustName(t, "sip1.radar.test.")},
+		},
+	})
+
+	res := checkSRV(t, server, "_sip._tcp.example.radar.test.", "", "")
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	answers, _ := res.Extra["answers"].([]string)
+	if len(answers) != 1 || answers[0] != "sip1.radar.test" {
+		t.Fatalf("expected [sip1.radar.test], got %v", answers)
+	}
+}
+
+// Not every domain publishes a given SRV service -- zero results is
+// ok, same as every other record type.
+func TestCheck_NoSRVRecordsIsOk(t *testing.T) {
+	server := startFakeDNS(t, nil)
+	res := checkSRV(t, server, "no-sip.radar.test.", "sip", "tcp")
+	if !res.Ok {
+		t.Fatalf("expected ok with zero SRV records, got error %q", res.Error)
 	}
 }
 

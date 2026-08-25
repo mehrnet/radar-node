@@ -18,32 +18,19 @@ func New() Checker { return Checker{} }
 
 func (Checker) Type() string { return "dns" }
 
-// optionalRecordTypes are the ones where a query that comes back with
-// zero results is a legitimate, common state, not a failure -- a
-// domain not accepting mail (mx), not publishing any TXT records, not
-// having a CNAME (it's a plain A/AAAA name instead), or an IP with no
-// reverse DNS entry (ptr) are all completely normal. a, aaaa, and ns
-// are deliberately NOT here: a hostname that doesn't resolve at all,
-// or a domain with no nameservers, both mean the domain itself is
-// broken, not "this optional feature isn't in use" -- exactly the
-// original, only, behavior before ns/mx/txt/cname/ptr were added.
-//
-// Go's resolver reports both cases -- NXDOMAIN (the name doesn't exist
-// at all) and NODATA (the name exists, just not with this record
-// type) -- as the exact same *net.DNSError with IsNotFound set; there
-// is no way to tell them apart through the standard library short of
-// a full DNS client able to inspect the raw response code. This means
-// an optional-type check on a genuinely nonexistent domain reads as
-// "ok, zero records" here rather than failing -- an accepted, disclosed
-// limitation of staying on net.Resolver instead of a dedicated DNS
-// library: pair an ns or a/aaaa check on the same target for that.
-var optionalRecordTypes = map[string]bool{"mx": true, "txt": true, "cname": true, "ptr": true}
-
 // isNotFound reports whether err is the specific "resolved with zero
-// results" shape net.Resolver produces for NXDOMAIN/NODATA alike (see
-// optionalRecordTypes above) -- as opposed to a real transport failure
-// (timeout, refused, servfail), which stays a hard failure regardless
-// of record type.
+// results" shape net.Resolver produces, for every record type this
+// checker supports -- Ok, not Fail, either way (see Check's own doc
+// comment on why zero results is never itself a failure here). Go's
+// resolver reports both NXDOMAIN (the name doesn't exist at all) and
+// NODATA (the name exists, just not with this record type) as this
+// exact same *net.DNSError with IsNotFound set; there's no way to
+// tell them apart through the standard library short of a full DNS
+// client able to inspect the raw response code, so both alike come
+// back as "ok, zero answers" here. A real transport failure (timeout,
+// refused, servfail) is a different DNSError shape and stays a
+// genuine Fail, same as a caller/config error (an unsupported record
+// type, a non-IP ptr target) that never reaches the network at all.
 func isNotFound(err error) bool {
 	var dnsErr *net.DNSError
 	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
@@ -51,18 +38,35 @@ func isNotFound(err error) bool {
 
 // Check resolves opts.Target against the record type named by the
 // "record" param (default "a"). Supported values: a, aaaa, ns, mx,
-// txt, cname, ptr. For ptr, opts.Target must be an IP address (a
+// txt, cname, ptr, srv. For ptr, opts.Target must be an IP address (a
 // reverse lookup has no other kind of target). Supported params:
 //
-//	record: "a" (default), "aaaa", "ns", "mx", "txt", "cname", or "ptr"
-//	server: "host:port" of a specific DNS server to query instead of
-//	        the system resolver
+//	record:  "a" (default), "aaaa", "ns", "mx", "txt", "cname", "ptr", or "srv"
+//	server:  "host:port" of a specific DNS server to query instead of
+//	         the system resolver
+//	service: srv only -- e.g. "sip". Combined with proto to build the
+//	         standard _service._proto.<target> query name (RFC 2782).
+//	         Leave both service and proto empty to query opts.Target
+//	         directly as an already-fully-formed SRV name instead.
+//	proto:   srv only -- "tcp" or "udp", paired with service above.
 //
-// Every record type reports its results as answers ([]string) --
-// mx additionally reports each answer's own preference value as a
-// parallel preferences ([]int) array, since a mail exchanger's
-// priority isn't something a caller can drop without losing real
-// information the way it can for e.g. a TXT record's own ordering.
+// Every record type reports its results as answers ([]string) -- mx
+// additionally reports each answer's own preference in a parallel
+// preferences ([]int) array, and srv reports parallel priorities/
+// weights/ports ([]int each), since none of that is something a
+// caller could drop without losing real information a plain string
+// can't carry.
+//
+// A query resolving successfully but finding zero records of the
+// requested type is Ok, never Fail, for every record type -- a domain
+// not accepting mail, not publishing TXT records, having no CNAME,
+// lacking reverse DNS, or (yes, even) having no A/AAAA/NS records
+// under this particular query are all just facts a caller building
+// their own domain-health tooling on top of this data can act on
+// however they choose; this check's own Ok only ever answers "did the
+// DNS query itself succeed," never "did I like what it found." A
+// genuine failure -- timeout, refused, servfail, an unsupported record
+// type, a non-IP ptr target -- still fails normally.
 func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
@@ -80,9 +84,9 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	record := strings.ToLower(opts.Param("record", "a"))
 	start := time.Now()
-	answers, extra, err := lookup(ctx, resolver, record, opts.Target)
+	answers, extra, err := lookup(ctx, resolver, record, opts)
 	elapsed := time.Since(start)
-	if err != nil && optionalRecordTypes[record] && isNotFound(err) {
+	if err != nil && isNotFound(err) {
 		err = nil
 		answers = []string{}
 	}
@@ -98,11 +102,13 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 }
 
 // lookup dispatches to the net.Resolver method for record, normalizing
-// every result to a flat []string (mx's own preference values ride
-// along in extra instead, see Check's own doc comment) -- a uniform
-// shape callers can render the same way regardless of which type was
-// actually queried.
-func lookup(ctx context.Context, resolver *net.Resolver, record, target string) (answers []string, extra map[string]any, err error) {
+// every result to a flat []string (a record type's own extra
+// structured data -- mx's preferences, srv's priorities/weights/ports
+// -- rides along in extra instead, see Check's own doc comment) -- a
+// uniform shape callers can render the same way regardless of which
+// type was actually queried.
+func lookup(ctx context.Context, resolver *net.Resolver, record string, opts probe.Options) (answers []string, extra map[string]any, err error) {
+	target := opts.Target
 	switch record {
 	case "a", "aaaa":
 		network := "ip4"
@@ -171,7 +177,31 @@ func lookup(ctx context.Context, resolver *net.Resolver, record, target string) 
 		}
 		return answers, nil, nil
 
+	case "srv":
+		// RFC 2782's own construction (_service._proto.name) when both
+		// are given; an operator who already has the full SRV query
+		// name in hand can instead leave both empty and put it straight
+		// in target -- LookupSRV treats that as a literal name rather
+		// than adding an empty ".." prefix (see its own doc comment).
+		service := opts.Param("service", "")
+		proto := opts.Param("proto", "")
+		_, recs, lookupErr := resolver.LookupSRV(ctx, service, proto, target)
+		if lookupErr != nil {
+			return nil, nil, lookupErr
+		}
+		answers = make([]string, len(recs))
+		priorities := make([]int, len(recs))
+		weights := make([]int, len(recs))
+		ports := make([]int, len(recs))
+		for i, r := range recs {
+			answers[i] = strings.TrimSuffix(r.Target, ".")
+			priorities[i] = int(r.Priority)
+			weights[i] = int(r.Weight)
+			ports[i] = int(r.Port)
+		}
+		return answers, map[string]any{"priorities": priorities, "weights": weights, "ports": ports}, nil
+
 	default:
-		return nil, nil, fmt.Errorf("unsupported record type %q -- expected a, aaaa, ns, mx, txt, cname, or ptr", record)
+		return nil, nil, fmt.Errorf("unsupported record type %q -- expected a, aaaa, ns, mx, txt, cname, ptr, or srv", record)
 	}
 }
