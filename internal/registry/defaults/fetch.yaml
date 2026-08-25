@@ -1,0 +1,37 @@
+name: fetch
+action: http_fetch
+request:
+  # GET (default), POST, PUT, PATCH, DELETE, or HEAD.
+  - name: method
+    type: string
+    required: false
+  # Arbitrary request headers, e.g. {"Authorization": "Bearer ..."} --
+  # what lets this hit a paid/private API with its own key, not just a
+  # public one.
+  - name: headers
+    type: object
+    required: false
+  - name: body
+    type: string
+    required: false
+  # One entry per custom data point to extract from the response body,
+  # keyed by whatever name should show up in this check's own extra --
+  # each value is either a single {"parser": "base64"|"jq"|"regex",
+  # "expr": "..."} step, or an array of them for a multi-step chain
+  # (e.g. base64-decode the whole body, then jq-select a key out of the
+  # decoded JSON). expr is required for jq/regex, unused for base64.
+  # See internal/checks/fetch's own doc comment for the full pipeline
+  # design. A field whose pipeline fails is simply absent from the
+  # result, never a check failure on its own.
+  - name: fields
+    type: object
+    required: false
+response:
+  - name: http_code
+    type: number
+  - name: bytes
+    type: number
+    unit: bytes
+  # Every entry under the request's own "fields" param shows up here
+  # too, under whichever name that field was given -- inherently
+  # dynamic, so not (and not meaningfully) declarable ahead of time.

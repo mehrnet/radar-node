@@ -6,16 +6,23 @@ one-shot probe from the CLI, or runs as a long-lived agent that syncs probe
 definitions from `radar-api`, executes them on schedule, and reports results
 back.
 
-Every prober -- including the six built-ins (`tcp`, `udp`, `dns`, `icmp`,
-`http`/`https`, `system`) -- is a config file, not hardcoded Go. There is no
-"native vs. custom module" distinction: a module either calls a built-in Go
-implementation in-process (`action:`, zero subprocess overhead) or shells out
-to an external binary (`run:`, e.g. `xray`/`sing-box`). The six built-ins are
-embedded in the binary and load automatically; `radar-node init` writes
-them out as real, editable files. In this sense radar-node isn't
-fundamentally a network prober -- it's a generic scheduled data-transform
-runner (request in, structured response out, on a schedule, billed and
-stored) that ships with networking as its first set of fixtures.
+Every prober -- including the seven built-ins (`tcp`, `udp`, `dns`, `icmp`,
+`http`/`https`, `system`, `fetch`) -- is a config file, not hardcoded Go.
+There is no "native vs. custom module" distinction: a module either calls a
+built-in Go implementation in-process (`action:`, zero subprocess overhead)
+or shells out to an external binary (`run:`, e.g. `xray`/`sing-box`). The
+seven built-ins (plus `subscription-fetch`, embedded the same way but
+intentionally hidden from ordinary probe creation -- see "Subscription-link
+parsing" under [Modules](#modules) below) are embedded in the binary and
+load automatically; `radar-node init` writes every one of them out as real,
+editable files. In this sense radar-node isn't fundamentally a network
+prober -- it's a generic scheduled data-transform runner (request in,
+structured response out, on a schedule, billed and stored) that ships with
+networking as its first set of fixtures -- `fetch`'s own dynamic field-
+extraction pipeline (see "Generic fetch and field extraction" under
+[Modules](#modules) below) is that idea taken furthest: point it at any
+HTTP API at all, public or your own paid/private one, and define your own
+named data points from whatever it returns.
 
 ## Install (Linux/macOS)
 
@@ -116,15 +123,16 @@ radar-node probe https://example.com --type http --count 3 --format table
 radar-node probe 8.8.8.8 --type icmp --count 5
 radar-node probe self --type system
 radar-node probe cloudflare.com --type dns --param record=mx
+radar-node probe http://ip-api.com/json/8.8.8.8 --type fetch
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--type` | `tcp` \| `udp` \| `dns` \| `icmp` \| `http` \| `system` \| any module name (default `tcp`) |
+| `--type` | `tcp` \| `udp` \| `dns` \| `icmp` \| `http` \| `system` \| `fetch` \| any module name (default `tcp`) |
 | `--count` | number of probes to run (default `1`) |
 | `--timeout` | per-probe timeout (default `5s`) |
 | `--format` | `json` \| `csv` \| `table` (default `json`) |
-| `--param k=v` | module-specific parameter, repeatable (`tcp`: `tls`,`sni`,`insecure` -- `dns`: `record` (`a`\|`aaaa`\|`ns`\|`mx`\|`txt`\|`cname`\|`ptr`\|`srv`, default `a`), `server`, and (`srv` only) `service`,`proto` -- `http`: `method`) |
+| `--param k=v` | module-specific parameter, repeatable (`tcp`: `tls`,`sni`,`insecure` -- `dns`: `record` (`a`\|`aaaa`\|`ns`\|`mx`\|`txt`\|`cname`\|`ptr`\|`srv`, default `a`), `server`, and (`srv` only) `service`,`proto` -- `http`: `method` -- `fetch`: `method`,`body` this way; `headers`/`fields` need real JSON object values a flat `k=v` flag can't carry, see "Generic fetch and field extraction" under [Modules](#modules) for those, set via a real probe's `params` instead) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
 
 ### `agent` -- long-lived worker
@@ -155,12 +163,14 @@ mechanics.
 radar-node init -C /etc/radar-node/modules.d
 ```
 
-Writes the six embedded default module files (`tcp.yaml`, `udp.yaml`,
-`dns.yaml`, `icmp.yaml`, `http.yaml`, `https.yaml`, `system.yaml`) to `-C`
-(default `.`) as real files, so there's something to actually edit -- until
-`init` is run, or a directory is pointed at with `--modules-dir`, they only
-exist embedded inside the binary. `--force` overwrites files that already
-exist there.
+Writes every embedded default module file (`tcp.yaml`, `udp.yaml`,
+`dns.yaml`, `icmp.yaml`, `http.yaml`, `https.yaml`, `system.yaml`,
+`fetch.yaml`, `subscription-fetch.yaml` -- literally whatever's in
+`internal/registry/defaults/*.yaml` at build time, not a hardcoded list) to
+`-C` (default `.`) as real files, so there's something to actually edit --
+until `init` is run, or a directory is pointed at with `--modules-dir`, they
+only exist embedded inside the binary. `--force` overwrites files that
+already exist there.
 
 ### `fetch-module` / `install-module` / `remove-module` -- Go-native module install
 
@@ -275,6 +285,63 @@ validated for well-formedness at load time but not checked against actual
 output, since a check's own failure modes (partial data, a tool's varying
 output shape on error) shouldn't be conflated with a request-validation
 rejection.
+
+### Generic fetch and field extraction
+
+`fetch` (`internal/checks/fetch`, action `http_fetch`) is a real HTTP
+client -- any method, arbitrary headers, an optional body -- plus an
+optional per-field extraction pipeline for turning whatever the response
+actually contains into named data points. This is what makes it genuinely
+general-purpose rather than tied to one particular API: point it at a free
+public IP/ASN lookup service, or your own paid one with an
+`Authorization` header, or honestly any REST API at all, and decide for
+yourself which parts of its response you actually care about.
+
+```jsonc
+// A probe's own params -- e.g. an IP/ASN lookup against a public API,
+// extracting just the two fields that matter for this account.
+{
+  "headers": { "Authorization": "Bearer <a paid API's own key>" },
+  "fields": {
+    "asn": { "parser": "jq", "expr": ".as" },
+    "country": { "parser": "jq", "expr": ".country" }
+  }
+}
+```
+
+Every entry under `fields` is either a single `{"parser", "expr"}` step or
+an array of them for a multi-step chain, applied in order against the raw
+response body -- e.g. `[{"parser": "base64"}, {"parser": "jq", "expr":
+".foo"}]` to base64-decode the whole body first, then pull one key out of
+the JSON that decodes to (exactly the shape a subscription URL's own
+content already takes -- see "Subscription-link parsing" below for why
+that hand-rolled protocol parsing deliberately does *not* live here, on
+this same generic pipeline, despite the shape overlap).
+
+Three parsers today:
+
+| Parser | What it does |
+|---|---|
+| `base64` | Decodes the current value as base64 -- tries the standard, raw-standard, URL-safe, and raw-URL-safe alphabets in turn, since real-world content in the wild isn't consistent about which one it used. |
+| `jq` | JSON-decodes the current value, then evaluates a real [jq](https://jqlang.org) expression (via [itchyny/gojq](https://github.com/itchyny/gojq), a pure-Go implementation -- no `jq` binary dependency) against it. A query resolving to `null` (jq's own default for a missing key -- not an error) is treated as "no value," same as an outright evaluation error. |
+| `regex` | Matches the current value (as text) against a Go `regexp` pattern -- RE2-backed, so a probe-supplied pattern (remote, untrusted input reaching a BYO node) can't become a ReDoS lever the way a backtracking engine's could. Returns the first capture group if the pattern has one, else the whole match. |
+
+A field whose pipeline fails for any reason (bad expression, no match,
+wrong content type for that step) is simply **absent** from the check's
+own `extra` -- the same "omitted, never sent as an explicit null"
+convention the wire protocol already uses everywhere else (see
+[Conventions](#conventions) below) -- not a failed check. The request
+itself may well have genuinely succeeded; one misconfigured field
+shouldn't read as "this API is down." `http_code`/`bytes` are always
+present and always win over a same-named user field, deliberately, so
+they can never be shadowed by a badly-named custom field.
+
+Real caps exist against a hostile or just-badly-configured probe: at most
+20 custom fields, at most 20 request headers, a chain of at most 5 steps
+per field, and a 500-character ceiling on any single `expr` -- the same
+"an account-controlled param reaching a BYO node's own process is a
+resource lever, not just a data value" reasoning `resultSchema`'s own
+field-count cap gets on the `radar-api` side.
 
 ### Bundled engine modules (xray, WireGuard, OpenVPN)
 
