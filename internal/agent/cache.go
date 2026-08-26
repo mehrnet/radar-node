@@ -9,10 +9,14 @@ import (
 
 // cachedProbe is a locally-held probe definition plus this node's own
 // memory of when it last ran it -- due-ness is computed entirely
-// from this, no server round trip needed per decision.
+// from this, no server round trip needed per decision. lastTriggerRunID
+// is the dedup memory applyTriggeredEvents relies on -- see its own
+// doc comment for why a single trigger's RunID can legitimately arrive
+// more than once.
 type cachedProbe struct {
 	wire.ProbeSnapshot
-	lastRunAt time.Time
+	lastRunAt        time.Time
+	lastTriggerRunID string
 }
 
 // pendingTrigger is one "run this probe right now" request, queued by
@@ -80,6 +84,15 @@ func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot)
 		entry := &cachedProbe{ProbeSnapshot: snapshot}
 		if existing, ok := c.probes[snapshot.ID]; ok {
 			entry.lastRunAt = existing.lastRunAt
+			// Carried forward for the same reason lastRunAt is: a full-
+			// snapshot resync is unrelated to any trigger this probe may
+			// already have queued/run, and losing this would reopen the
+			// exact redelivery-after-resync gap applyTriggeredEvents'
+			// own dedup exists to close (see its doc comment) -- a probe
+			// whose standing assignment happens to resync in the same
+			// window as a still-undeleted "triggered" event redelivery
+			// would otherwise re-run it.
+			entry.lastTriggerRunID = existing.lastTriggerRunID
 		}
 		next[snapshot.ID] = entry
 	}
@@ -97,6 +110,22 @@ func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot)
 // definition, not a stale cached one -- but never touches lastRunAt,
 // since a trigger is an independent one-off run, not part of this
 // probe's normal schedule/due-ness bookkeeping.
+//
+// Deduped by RunID against lastTriggerRunID -- radar-api's own server
+// side delivers a "triggered" event on *every* heartbeat regardless of
+// hash match, deleting the underlying row only once this node reports
+// results back under that RunID (see its own doc comment: "delivered
+// inline on every heartbeat... deleted synchronously the moment this
+// node reports results"). Any lag between a heartbeat delivering the
+// event and this node's first successful report of it -- a slow probe,
+// a delayed results flush, a batch of intervening heartbeats -- means
+// the exact same RunID can legitimately arrive more than once before
+// the server-side row is gone. Without this check, each redelivery
+// unconditionally queued another run, all sharing that one RunID; a
+// real production incident traced this to node results failing outright
+// (a (node_id, run_id, seq) uniqueness violation), taking down every
+// other, unrelated result batched alongside it, not just the triggered
+// probe's own.
 func (c *probeCache) applyTriggeredEvents(events []wire.Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -104,7 +133,10 @@ func (c *probeCache) applyTriggeredEvents(events []wire.Event) {
 		if ev.EventType != "triggered" || ev.RunID == "" {
 			continue
 		}
-		entry := &cachedProbe{ProbeSnapshot: ev.Probe}
+		if existing, ok := c.probes[ev.Probe.ID]; ok && existing.lastTriggerRunID == ev.RunID {
+			continue
+		}
+		entry := &cachedProbe{ProbeSnapshot: ev.Probe, lastTriggerRunID: ev.RunID}
 		if existing, ok := c.probes[ev.Probe.ID]; ok {
 			entry.lastRunAt = existing.lastRunAt
 		}

@@ -98,6 +98,68 @@ func TestProbeCache_TriggeredEvent_DoesNotChangeLastKnownHash(t *testing.T) {
 	}
 }
 
+// Regression for a real production incident: radar-api's own heartbeat
+// handler delivers a "triggered" event on *every* heartbeat regardless
+// of hash match, deleting the underlying row only once this node
+// reports results under that RunID -- so the exact same RunID can
+// legitimately arrive more than once before that first report lands
+// (a slow probe, a delayed results flush, several heartbeats in that
+// window). Without a dedup, each redelivery queued another run, all
+// sharing one RunID -- which then failed outright on report (a
+// (node_id, run_id, seq) uniqueness violation), taking down every
+// other, unrelated result batched alongside it.
+func TestProbeCache_TriggeredEvent_DuplicateRunIDNotRequeued(t *testing.T) {
+	c := newProbeCache()
+	now := time.Now()
+	snapshot := wire.ProbeSnapshot{ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli()}
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{snapshot})
+
+	// Same event, delivered on three separate (simulated) heartbeats --
+	// must only ever queue once.
+	for i := 0; i < 3; i++ {
+		c.applyTriggeredEvents([]wire.Event{{Seq: 1, EventType: "triggered", RunID: "run_abc", Probe: snapshot}})
+	}
+	if triggers := c.drainPendingTriggers(); len(triggers) != 1 {
+		t.Fatalf("expected exactly one queued trigger despite 3 redeliveries of the same RunID, got %+v", triggers)
+	}
+
+	// A later, genuinely different trigger on the same probe must still
+	// queue normally -- the dedup is per-RunID, not "this probe already
+	// ran once."
+	c.applyTriggeredEvents([]wire.Event{{Seq: 2, EventType: "triggered", RunID: "run_def", Probe: snapshot}})
+	if triggers := c.drainPendingTriggers(); len(triggers) != 1 || triggers[0].RunID != "run_def" {
+		t.Fatalf("expected a new RunID to queue its own trigger, got %+v", triggers)
+	}
+}
+
+// The same dedup must survive a standing-assignment resync landing in
+// between two redeliveries of the same trigger -- exactly the real
+// incident's own timeline (a hash-mismatch resync and a still-
+// undelivered trigger redelivery both riding the same heartbeat
+// stream). replaceAssignment must carry lastTriggerRunID forward the
+// same way it already does lastRunAt.
+func TestProbeCache_TriggeredEvent_DuplicateRunIDNotRequeuedAcrossResync(t *testing.T) {
+	c := newProbeCache()
+	now := time.Now()
+	snapshot := wire.ProbeSnapshot{ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual", StartsAt: now.Add(-time.Minute).UnixMilli()}
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{snapshot})
+	c.applyTriggeredEvents([]wire.Event{{Seq: 1, EventType: "triggered", RunID: "run_abc", Probe: snapshot}})
+	if triggers := c.drainPendingTriggers(); len(triggers) != 1 {
+		t.Fatalf("expected the first delivery to queue, got %+v", triggers)
+	}
+
+	// An unrelated full-snapshot resync (e.g. a routine hash-mismatch
+	// refresh) lands in between.
+	c.replaceAssignment("hash2", []wire.ProbeSnapshot{snapshot})
+
+	// The same RunID is redelivered afterward -- must still be
+	// recognized as already-seen, not requeued.
+	c.applyTriggeredEvents([]wire.Event{{Seq: 2, EventType: "triggered", RunID: "run_abc", Probe: snapshot}})
+	if triggers := c.drainPendingTriggers(); len(triggers) != 0 {
+		t.Fatalf("expected no requeue for an already-seen RunID surviving a resync, got %+v", triggers)
+	}
+}
+
 func TestProbeCache_IntervalProbe_DueAgainAfterInterval(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
