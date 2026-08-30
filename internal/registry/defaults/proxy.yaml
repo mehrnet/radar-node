@@ -1,0 +1,29 @@
+name: proxy
+action: proxy_connect
+request:
+  - name: protocol
+    type: string
+    required: false
+  - name: username
+    type: string
+    required: false
+  - name: password
+    type: string
+    required: false
+  - name: tls
+    type: bool
+    required: false
+  - name: test_url
+    type: string
+    required: false
+response:
+  - name: socks5_latency_ms
+    type: number
+    unit: ms
+  - name: socks5_error
+    type: string
+  - name: http_latency_ms
+    type: number
+    unit: ms
+  - name: http_error
+    type: string

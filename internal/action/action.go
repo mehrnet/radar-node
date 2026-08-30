@@ -20,6 +20,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/checks/fetch"
 	"github.com/mehrnet/radar-node/internal/checks/httpcheck"
 	"github.com/mehrnet/radar-node/internal/checks/icmp"
+	"github.com/mehrnet/radar-node/internal/checks/proxycheck"
 	"github.com/mehrnet/radar-node/internal/checks/system"
 	"github.com/mehrnet/radar-node/internal/checks/tcp"
 	"github.com/mehrnet/radar-node/internal/checks/udp"
@@ -32,13 +33,14 @@ import (
 // number of differently-configured modules can reference the same
 // action.
 var Registry = map[string]probe.Checker{
-	"tcp_connect":  tcp.New(),
-	"udp_probe":    udp.New(),
-	"dns_query":    dns.New(),
-	"icmp_ping":    icmp.New(),
-	"http_request": httpcheck.New(),
-	"system_stats": system.New(),
-	"http_fetch":   fetch.New(),
+	"tcp_connect":   tcp.New(),
+	"udp_probe":     udp.New(),
+	"dns_query":     dns.New(),
+	"icmp_ping":     icmp.New(),
+	"http_request":  httpcheck.New(),
+	"system_stats":  system.New(),
+	"http_fetch":    fetch.New(),
+	"proxy_connect": proxycheck.New(),
 }
 
 // Get returns the Checker registered under name, if any.

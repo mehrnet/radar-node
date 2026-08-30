@@ -238,8 +238,8 @@ a request, what it returns as a response, and how it does the work. Exactly
 one of two execution modes is set per module:
 
 - **`action:`** -- calls a built-in Go implementation directly, in-process,
-  no subprocess. This is how the six defaults work (`tcp` -> `tcp_connect`,
-  `system` -> `system_stats`, ...). Action names are an internal
+  no subprocess. This is how the built-in defaults work (`tcp` ->
+  `tcp_connect`, `system` -> `system_stats`, ...). Action names are an internal
   implementation library, decoupled from prober identity: any number of
   differently-configured modules can reference the same action (e.g. a
   `tcp-strict.yaml` with a tighter request schema, still `action:
@@ -356,6 +356,31 @@ per field, and a 500-character ceiling on any single `expr` -- the same
 "an account-controlled param reaching a BYO node's own process is a
 resource lever, not just a data value" reasoning `resultSchema`'s own
 field-count cap gets on the `radar-api` side.
+
+### Real proxy protocol validation (SOCKS5 / HTTP-CONNECT)
+
+`proxy` (`internal/checks/proxycheck`, action `proxy_connect`) dials
+`target` (a proxy's own `host:port`) and fetches `test_url` (defaults to
+a small `generate_204`-style endpoint) *through* it -- a genuine
+SOCKS5 or HTTP-CONNECT handshake, not a bare TCP connect. This is what
+a plain host:port(:username:password) proxy list (radar-api's own
+`proxy-list` subscription type) gets checked with, since knowing
+*something* answers on that port says nothing about whether it
+actually works as a proxy.
+
+```jsonc
+// protocol omitted -- the source gave no scheme, so both are
+// attempted and both results are reported (never guessed):
+{ "username": "user", "password": "pass" }
+// -> extra: { "socks5_latency_ms": 41.2, "http_error": "..." }
+
+// protocol pinned -- the source's own scheme said which one:
+{ "protocol": "socks5", "username": "user", "password": "pass" }
+```
+
+`tls: true` (protocol=`http` only) wraps the connection to the proxy
+itself in TLS -- a "HTTPS proxy," distinct from whatever `test_url`'s
+own scheme is.
 
 ### Bundled engine modules (xray, WireGuard, OpenVPN)
 
