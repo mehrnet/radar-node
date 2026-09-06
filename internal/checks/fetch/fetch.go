@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -45,7 +46,13 @@ func New() Checker { return Checker{} }
 
 func (Checker) Type() string { return "fetch" }
 
-func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string) ([]byte, int, error) {
+// ttfbMs is time-to-first-byte in milliseconds -- deliberately not the
+// same thing as the caller's own elapsed, which also covers reading the
+// whole body. On a large response those diverge sharply, and it is the
+// first byte that says whether the server is responding promptly.
+// Every call builds a fresh transport (see below), so this is always a
+// cold-path figure: DNS, connect and TLS included.
+func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string) ([]byte, int, float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -60,11 +67,17 @@ func do(ctx context.Context, target string, timeout time.Duration, method string
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+
+	start := time.Now()
+	var ttfbMs float64
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotFirstResponseByte: func() { ttfbMs = float64(time.Since(start).Microseconds()) / 1000 },
+	}))
 
 	// No warm/hard transport distinction, unlike httpcheck -- this
 	// check's own schedule is whatever an account picked, not a tight
@@ -73,18 +86,18 @@ func do(ctx context.Context, target string, timeout time.Duration, method string
 	client := &http.Client{Transport: &http.Transport{TLSHandshakeTimeout: 10 * time.Second}}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
-		return nil, resp.StatusCode, err
+		return nil, resp.StatusCode, ttfbMs, err
 	}
 	if len(respBody) > maxBodyBytes {
 		respBody = respBody[:maxBodyBytes]
 	}
-	return respBody, resp.StatusCode, nil
+	return respBody, resp.StatusCode, ttfbMs, nil
 }
 
 // Check performs the configured request and, for each entry in the
@@ -119,7 +132,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 
 	start := time.Now()
-	respBody, statusCode, err := do(ctx, opts.Target, opts.Timeout, method, headers, body)
+	respBody, statusCode, ttfbMs, err := do(ctx, opts.Target, opts.Timeout, method, headers, body)
 	elapsed := time.Since(start)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
@@ -137,6 +150,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		}
 		extra[name] = value
 	}
+	extra["ttfb_ms"] = ttfbMs
 	extra["http_code"] = statusCode
 	extra["bytes"] = len(respBody)
 

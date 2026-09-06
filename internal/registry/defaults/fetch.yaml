@@ -32,8 +32,19 @@ request:
     type: object
     required: false
 response:
-  # See http.yaml: a status code is categorical, so it is reported as
-  # its latest value rather than charted and averaged.
+  # First, so it leads: this prober reported no timing at all until
+  # now, which left it with nothing meaningful to headline -- bytes is
+  # near-constant for most targets and a status code is categorical.
+  # Time to first byte, not the full round trip (that is latency_ms,
+  # which also covers reading the body); on a large response the two
+  # diverge sharply and it is the first byte that says whether the
+  # server answered promptly.
+  - name: ttfb_ms
+    type: number
+    unit: ms
+    group: timing
+  # See http.yaml: categorical, so reported as its latest value rather
+  # than charted and averaged.
   - name: http_code
     type: number
     display: stat
@@ -42,6 +53,3 @@ response:
     type: number
     unit: bytes
     group: response
-  # Every entry under the request's own "fields" param shows up here
-  # too, under whichever name that field was given -- inherently
-  # dynamic, so not (and not meaningfully) declarable ahead of time.

@@ -17,21 +17,18 @@ request:
 # on the cold request -- a reused warm connection skips all three, so
 # they'd read as a meaningless near-zero there.
 response:
-  # A status code is a category, not a quantity: averaging 200 and 404
-  # gives 302, a code that never happened and means something else
-  # entirely. display:stat is what marks it as "the latest value is the
-  # answer" -- the frontend renders it as a number instead of a trend
-  # line, and radar-api aggregates it by last-value instead of by mean
-  # (see lib/publicStats.ts's bucketByInterval).
-  - name: http_code
-    type: number
-    display: stat
-    group: response
-  - name: cold_ttfb_ms
+  # Order is load-bearing: absent a per-probe choice, radar leads with
+  # the first *chartable* field (see radar's getProbeFieldSelection).
+  # warm_ttfb_ms goes first deliberately -- it is the steady-state
+  # figure, the same one latency_ms mirrors, and the number someone
+  # means by "how fast is this". cold_ttfb_ms follows: a fresh
+  # connection every time, so it carries DNS+connect+TLS and is
+  # spikier by nature.
+  - name: warm_ttfb_ms
     type: number
     unit: ms
     group: timing
-  - name: warm_ttfb_ms
+  - name: cold_ttfb_ms
     type: number
     unit: ms
     group: timing
@@ -47,6 +44,15 @@ response:
     type: number
     unit: ms
     group: timing
+  # A status code is a category, not a quantity: averaging 200 and 404
+  # gives 302, a code that never happened and means something else
+  # entirely. display:stat marks it as "the latest value is the
+  # answer" -- rendered as a number, and aggregated by last-value
+  # rather than by mean (see radar-api's bucketByInterval).
+  - name: http_code
+    type: number
+    display: stat
+    group: response
   - name: bytes
     type: number
     unit: bytes
