@@ -27,15 +27,21 @@ import (
 // Unit is a free-form string ("ms", "%", "bytes", "usd", ...) rather
 // than a fixed enum, for the same reason.
 //
-// Primary marks the *one* response field that stands in for this
-// prober's single headline number in the most compact (text-only)
-// views; a module with none falls back to the universal latency_ms
-// every check already records regardless of prober.
+// Primary and Summary are accepted and validated here, but radar's UI
+// no longer consults either -- do not reach for them expecting an
+// effect. Which fields a probe charts, and in what order, became a
+// per-probe choice owned by the account rather than something a module
+// dictates (see radar's getProbeFieldSelection). Absent a choice, the
+// default headline is simply the *first* declared response field, so
+// declaration order is what carries that meaning now.
 //
-// Summary marks a field (any number of them, unlike Primary) for
-// inclusion in the richer dashboard views' at-a-glance row -- e.g.
-// system's cpu/mem/network fields all being visible together, not
-// just one.
+// They are kept rather than removed because a module in the wild may
+// already declare them and the validation below still describes a
+// coherent shape: Primary marks at most one numeric response field,
+// Summary marks any number of them. If the UI ever wants a
+// module-supplied glance set again, this is the hook -- but until then
+// a manifest declaring either is documenting an intention, not
+// changing what renders.
 //
 // Group names an arbitrary tab/section a field belongs to in the
 // probe detail view (e.g. "cpu", "memory", "network") -- fields sharing

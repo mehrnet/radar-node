@@ -1,10 +1,19 @@
 name: system
 action: system_stats
+# Field order is load-bearing: absent a per-probe choice, radar shows
+# the first declared field as a probe's headline chart (see radar's
+# getProbeFieldSelection, which falls back to candidates[0]). cpu_percent
+# leads deliberately.
+#
+# There are no `summary:`/`primary:` flags here any more. They were
+# retired on the frontend in favour of a per-probe, user-owned field
+# choice, and kept being declared long after anything read them --
+# `primary: true` sat on mem_used_percent while cpu_percent, being
+# first, was the actual headline.
 response:
   - name: cpu_percent
     type: number
     unit: "%"
-    summary: true
     group: cpu
     display: gauge
   - name: load1
@@ -22,8 +31,6 @@ response:
   - name: mem_used_percent
     type: number
     unit: "%"
-    primary: true
-    summary: true
     group: memory
     display: gauge
   - name: mem_total_bytes
@@ -50,12 +57,10 @@ response:
   - name: net_in_mbps
     type: number
     unit: mbps
-    summary: true
     group: network
   - name: net_out_mbps
     type: number
     unit: mbps
-    summary: true
     group: network
   - name: uptime_seconds
     type: number
