@@ -4,6 +4,9 @@ request:
   - name: method
     type: string
     required: false
+  - name: expect_status
+    type: string
+    required: false
 # Every check now measures both a cold (fresh connection) and a warm
 # (Checker's own reused, keep-alive connection) round trip and reports
 # both -- replacing the old mode-dependent single ttfb_ms, which meant

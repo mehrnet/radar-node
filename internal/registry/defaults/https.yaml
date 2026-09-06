@@ -4,6 +4,9 @@ request:
   - name: method
     type: string
     required: false
+  - name: expect_status
+    type: string
+    required: false
 # See http.yaml's own comment -- same action, same schema change.
 response:
   - name: http_code

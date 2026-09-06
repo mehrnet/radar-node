@@ -113,3 +113,80 @@ func TestCheck_WarmRequestReusesConnectionAcrossCalls(t *testing.T) {
 		t.Fatalf("expected each call's own cold request to dial fresh, got the same source port twice: %q", remoteAddrs[0])
 	}
 }
+
+// The gap expect_status exists to close: without it, only 5xx fails,
+// so a Cloudflare Worker answering 404 for a bad route or 403 behind a
+// WAF reported as perfectly healthy.
+func TestCheck_NotFoundIsOkWithoutExpectStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	res := httpcheck.New().Check(context.Background(), probe.Options{Target: srv.URL, Timeout: 2 * time.Second, Seq: 1})
+	if !res.Ok {
+		t.Fatal("default rule should still treat 404 as up -- changing that silently would flip existing probes")
+	}
+}
+
+func TestCheck_ExpectStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   int
+		expect string
+		wantOk bool
+	}{
+		{"exact match", 200, "200", true},
+		{"exact mismatch", 404, "200", false},
+		{"forbidden fails", 403, "200", false},
+		{"range covers", 204, "200-299", true},
+		{"range excludes", 301, "200-299", false},
+		{"list covers", 204, "200,204", true},
+		{"list excludes", 202, "200,204", false},
+		{"whitespace tolerated", 204, " 200 , 204 ", true},
+		// An expectation replaces the default rule rather than adding
+		// to it, so a target that is supposed to answer 500 can be
+		// monitored as healthy when it does.
+		{"5xx can be the expectation", 500, "500", true},
+		// ...and the same expectation still fails when it is not met.
+		{"5xx expectation unmet", 502, "500", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+			}))
+			defer srv.Close()
+
+			res := httpcheck.New().Check(context.Background(), probe.Options{
+				Target: srv.URL, Timeout: 2 * time.Second, Seq: 1,
+				Params: map[string]any{"expect_status": tc.expect},
+			})
+			if res.Ok != tc.wantOk {
+				t.Fatalf("code %d against %q: ok=%v, want %v (error %q)", tc.code, tc.expect, res.Ok, tc.wantOk, res.Error)
+			}
+			if !tc.wantOk && res.Error == "" {
+				t.Fatal("a failed expectation must say what it expected")
+			}
+		})
+	}
+}
+
+// A typo'd expectation fails the check outright instead of quietly
+// falling back to the default rule, which would leave someone
+// believing they had asserted something they had not.
+func TestCheck_MalformedExpectStatusFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	for _, spec := range []string{"abc", "99", "600", "299-200", "200-"} {
+		res := httpcheck.New().Check(context.Background(), probe.Options{
+			Target: srv.URL, Timeout: 2 * time.Second, Seq: 1,
+			Params: map[string]any{"expect_status": spec},
+		})
+		if res.Ok {
+			t.Fatalf("expect_status=%q should have failed the check outright", spec)
+		}
+	}
+}

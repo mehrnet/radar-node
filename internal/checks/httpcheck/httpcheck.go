@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,9 @@ type roundTripResult struct {
 // Supported params:
 //
 //	method: HTTP method, default GET
+//	expect_status: which codes count as healthy -- "200", "200-299",
+//	  or "200,204". Anything else fails the check. Omitted, the
+//	  default rule applies instead: only 5xx is a failure.
 func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
@@ -98,6 +102,29 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	// alerting built on it keeps meaning what it always meant rather
 	// than silently doubling in scope.
 	result := probe.Ok(c.Type(), opts.Target, opts.Seq, warm.elapsed, extra)
+	// An explicit expectation replaces the default rule entirely rather
+	// than adding to it: someone who says "expect_status: 500" is
+	// monitoring something that is supposed to return 500, and the
+	// built-in "5xx is bad" would otherwise make that impossible to
+	// express.
+	if spec := opts.Param("expect_status", ""); strings.TrimSpace(spec) != "" {
+		expect, err := parseStatusSpec(spec)
+		if err != nil {
+			return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("expect_status: %w", err))
+		}
+		// Both halves are checked, same as the default rule below: a
+		// target that answers 200 warm but 404 cold is not healthy, and
+		// which of the two a given tick happened to see first should
+		// never decide whether the check passes.
+		for _, code := range []int{cold.httpCode, warm.httpCode} {
+			if !expect(code) {
+				result.Ok = false
+				result.Error = fmt.Sprintf("http %d, expected %s", code, spec)
+				break
+			}
+		}
+		return result
+	}
 	if bad := badStatusCode(cold.httpCode, warm.httpCode); bad != 0 {
 		result.Ok = false
 		result.Error = fmt.Sprintf("http %d", bad)
@@ -112,6 +139,64 @@ func badStatusCode(codes ...int) int {
 		}
 	}
 	return 0
+}
+
+// parseStatusSpec turns an expect_status param into a predicate.
+//
+// Accepts a comma-separated list whose entries are either a single
+// code ("200") or an inclusive range ("200-299"), so the three things
+// people actually want to say -- one exact code, a family, or a
+// handful of acceptable ones -- are all expressible without a
+// separate syntax for each. Whitespace around entries is ignored,
+// since these arrive from a form field.
+//
+// A malformed spec fails the check loudly rather than being ignored:
+// silently falling back to the default rule would leave someone
+// believing they had asserted something they had not.
+func parseStatusSpec(spec string) (func(int) bool, error) {
+	type rng struct{ lo, hi int }
+	var ranges []rng
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		lo, hi, isRange := strings.Cut(part, "-")
+		loN, err := parseCode(lo)
+		if err != nil {
+			return nil, err
+		}
+		hiN := loN
+		if isRange {
+			if hiN, err = parseCode(hi); err != nil {
+				return nil, err
+			}
+			if hiN < loN {
+				return nil, fmt.Errorf("range %q is backwards", part)
+			}
+		}
+		ranges = append(ranges, rng{loN, hiN})
+	}
+	if len(ranges) == 0 {
+		return nil, fmt.Errorf("no status codes given")
+	}
+	return func(code int) bool {
+		for _, r := range ranges {
+			if code >= r.lo && code <= r.hi {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
+func parseCode(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 100 || n > 599 {
+		return 0, fmt.Errorf("%q is not an HTTP status code", s)
+	}
+	return n, nil
 }
 
 func (c *Checker) roundTrip(ctx context.Context, transport *http.Transport, method, url string) (roundTripResult, error) {
