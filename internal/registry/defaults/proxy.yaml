@@ -20,10 +20,12 @@ response:
   - name: socks5_latency_ms
     type: number
     unit: ms
+    group: socks5
   - name: socks5_error
     type: string
   - name: http_latency_ms
     type: number
     unit: ms
+    group: http
   - name: http_error
     type: string

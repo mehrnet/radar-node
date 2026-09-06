@@ -9,23 +9,37 @@ request:
     required: false
 # See http.yaml's own comment -- same action, same schema change.
 response:
+  # A status code is a category, not a quantity: averaging 200 and 404
+  # gives 302, a code that never happened and means something else
+  # entirely. display:stat is what marks it as "the latest value is the
+  # answer" -- the frontend renders it as a number instead of a trend
+  # line, and radar-api aggregates it by last-value instead of by mean
+  # (see lib/publicStats.ts's bucketByInterval).
   - name: http_code
     type: number
+    display: stat
+    group: response
   - name: cold_ttfb_ms
     type: number
     unit: ms
+    group: timing
   - name: warm_ttfb_ms
     type: number
     unit: ms
+    group: timing
   - name: dns_ms
     type: number
     unit: ms
+    group: timing
   - name: connect_ms
     type: number
     unit: ms
+    group: timing
   - name: tls_ms
     type: number
     unit: ms
+    group: timing
   - name: bytes
     type: number
     unit: bytes
+    group: response

@@ -32,11 +32,16 @@ request:
     type: object
     required: false
 response:
+  # See http.yaml: a status code is categorical, so it is reported as
+  # its latest value rather than charted and averaged.
   - name: http_code
     type: number
+    display: stat
+    group: response
   - name: bytes
     type: number
     unit: bytes
+    group: response
   # Every entry under the request's own "fields" param shows up here
   # too, under whichever name that field was given -- inherently
   # dynamic, so not (and not meaningfully) declarable ahead of time.
