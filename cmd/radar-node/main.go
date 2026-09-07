@@ -52,6 +52,8 @@ func main() {
 		err = runInstallModule(os.Args[2:])
 	case "remove-module":
 		err = runRemoveModule(os.Args[2:])
+	case "logs":
+		err = runLogs(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("radar-node", version)
 		return
@@ -116,6 +118,15 @@ init flags:
                           into (default ".") -- refuses to overwrite
                           an existing file unless --force is set
   --force                 overwrite files that already exist at path
+
+logs:
+  radar-node logs                   this node's own service journal, one
+                                      formatted line per entry
+  -n N                    how many entries to show (default 50)
+  -f                      stream new entries as they arrive
+  --level L               only this level or worse (debug|info|warn|error)
+  --src S                 only this subsystem (e.g. agent)
+  --raw                   the original JSON lines, for piping into jq
 
 fetch-module/install-module/remove-module:
   radar-node fetch-module <url>     download+install a module from its own

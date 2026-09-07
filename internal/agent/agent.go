@@ -15,7 +15,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -26,6 +25,7 @@ import (
 
 	"github.com/mehrnet/radar-node/internal/apiclient"
 	"github.com/mehrnet/radar-node/internal/destgate"
+	"github.com/mehrnet/radar-node/internal/journal"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
 	"github.com/mehrnet/radar-node/internal/wire"
@@ -210,13 +210,13 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		var rejected *apiclient.HeartbeatRejectedError
 		if errors.As(err, &rejected) {
 			if uploadErr := a.uploadMissingModules(ctx, rejected.Rejection.MissingProberIDs); uploadErr != nil {
-				log.Printf("agent: upload modules: %v", uploadErr)
+				journal.Error("agent", "upload modules failed", "err", uploadErr)
 				return
 			}
 			resp, sentAt, receivedAt, err = send()
 		}
 		if err != nil {
-			log.Printf("agent: heartbeat failed: %v", err)
+			journal.Error("agent", "heartbeat failed", "err", err)
 			return
 		}
 		if resp.NodeStatus != "" {
@@ -235,11 +235,11 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		// non-empty hash of its own).
 		if resp.ProbeHash != "" {
 			a.cache.replaceAssignment(resp.ProbeHash, resp.Probes)
-			log.Printf("agent: synced probe assignment (%d probe(s))", len(resp.Probes))
+			journal.Info("agent", "synced probe assignment", "probes", len(resp.Probes))
 		}
 		if len(resp.Events) > 0 {
 			a.cache.applyTriggeredEvents(resp.Events)
-			log.Printf("agent: synced %d triggered event(s)", len(resp.Events))
+			journal.Info("agent", "synced triggered events", "events", len(resp.Events))
 		}
 		switch resp.Command {
 		case "delete":
@@ -325,7 +325,7 @@ func (a *agent) handlePendingAction(ctx context.Context, action *wire.PendingAct
 	ackCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := a.client.AckAction(ackCtx, action.ID); err != nil {
-		log.Printf("agent: could not ack pending action %s (%v) -- not acting on it this heartbeat", action.ID, err)
+		journal.Warn("agent", "could not ack pending action, not acting on it this heartbeat", "action_id", action.ID, "err", err)
 		return
 	}
 	switch action.Kind {
@@ -459,12 +459,12 @@ func (a *agent) reinstall(extraFlags ...string) {
 	// journalctl with one entry per line of the script's own source
 	// (journald splits a single write on newlines), making the actual
 	// per-attempt fetch/run output below harder to find, not easier.
-	log.Printf("agent: %s -- re-running install script", reason)
+	journal.Info("agent", "re-running install script", "reason", reason)
 
 	cmd := selfUpdateCommand(installCmd)
 	logFile, err := os.OpenFile(selfUpdateLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
-		log.Printf("agent: self-update: could not open %s (%v) -- falling back to this process's own stdout, which may not survive the restart that follows", selfUpdateLogPath, err)
+		journal.Warn("agent", "self-update: could not open log file, falling back to this process's own stdout, which may not survive the restart that follows", "path", selfUpdateLogPath, "err", err)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
@@ -485,10 +485,10 @@ func (a *agent) reinstall(extraFlags ...string) {
 	// output, on every attempt. Waiting for confirmation first removes
 	// that race instead of shrinking it.
 	if err := cmd.Run(); err != nil {
-		log.Printf("agent: self-update: launching the installer failed: %v (see %s)", err, selfUpdateLogPath)
+		journal.Error("agent", "self-update: launching the installer failed", "err", err, "log", selfUpdateLogPath)
 		return
 	}
-	log.Printf("agent: installer handed off successfully, logging to %s -- exiting so it can replace this process", selfUpdateLogPath)
+	journal.Info("agent", "installer handed off, exiting so it can replace this process", "log", selfUpdateLogPath)
 	os.Exit(selfUpdateExitCode)
 }
 
@@ -556,8 +556,7 @@ func selfUpdateCommandFor(goos string, euid int, pid int, lookPath func(string) 
 // exit again -- a harmless low-frequency loop, not a resource concern)
 // and tells the operator exactly how to finish the job for real.
 func (a *agent) handleDeleteCommand() {
-	log.Printf("agent: this node was deleted from radar -- stopping. To fully remove it from this machine, run:")
-	log.Printf("  curl -fsSL %s | sh -s -- --uninstall", installScriptURL)
+	journal.Warn("agent", "this node was deleted from radar, stopping; to remove it from this machine run the uninstall command", "uninstall", fmt.Sprintf("curl -fsSL %s | sh -s -- --uninstall", installScriptURL))
 	os.Exit(0)
 }
 
@@ -640,11 +639,12 @@ func (a *agent) runDueProbes(ctx context.Context) {
 		Results: results,
 	})
 	if err != nil {
-		log.Printf("agent: post results: %v", err)
+		journal.Error("agent", "post results failed", "err", err)
 		return
 	}
-	log.Printf("agent: tick complete: %d probe(s) run, %d triggered, %d results, %d accepted, %d rejected",
-		len(due), len(triggers), len(results), resp.Accepted, resp.Rejected)
+	journal.Info("agent", "tick complete",
+		"probes_run", len(due), "triggered", len(triggers), "results", len(results),
+		"accepted", resp.Accepted, "rejected", resp.Rejected)
 }
 
 // checkJob is one (probe, seq) check due to run this tick, before
@@ -812,7 +812,7 @@ func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSn
 	if !ok {
 		r = probe.Fail(pr.Prober, pr.Target, seq, fmt.Errorf("unknown prober %q", pr.Prober))
 	} else if err := destgate.Wait(ctx, opts.Destination); err != nil {
-		log.Printf("agent: %s check for probe %s (seq %d): destination %q never cleared, not reporting: %v", pr.Prober, pr.ID, seq, opts.Destination, err)
+		journal.Warn("agent", "destination never cleared, not reporting", "prober", pr.Prober, "probe_id", pr.ID, "seq", seq, "destination", opts.Destination, "err", err)
 		return wire.Result{}, false
 	} else {
 		checkCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
@@ -857,7 +857,7 @@ func (a *agent) runCheckBatch(ctx context.Context, prober string, batchJobs []ch
 			// comment), so this is where that gets surfaced -- same
 			// message shape as runCheck's own non-pooled counterpart,
 			// and equally not reported on at all.
-			log.Printf("agent: %s check for probe %s (seq %d): destination never cleared, not reporting", j.pr.Prober, j.pr.ID, j.seq)
+			journal.Warn("agent", "destination never cleared, not reporting", "prober", j.pr.Prober, "probe_id", j.pr.ID, "seq", j.seq)
 			continue
 		}
 		out = append(out, wire.Result{
