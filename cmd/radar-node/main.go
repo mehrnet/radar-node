@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/agent"
+	"github.com/mehrnet/radar-node/internal/jobprobe"
 	"github.com/mehrnet/radar-node/internal/moduleinstall"
 	"github.com/mehrnet/radar-node/internal/output"
 	"github.com/mehrnet/radar-node/internal/probe"
@@ -54,6 +55,15 @@ func main() {
 		err = runRemoveModule(os.Args[2:])
 	case "logs":
 		err = runLogs(os.Args[2:])
+	case "jobprobe":
+		// Not for humans: the pooled module scripts' single-process
+		// replacement for their per-job python3/curl/awk chain (see
+		// internal/jobprobe's own doc comment for why that chain had
+		// to go). Registered here so `radar-node jobprobe ...` is
+		// callable from a module `run:` command; the scripts probe for
+		// its existence and fall back to their old chain on binaries
+		// that predate it.
+		err = runJobProbe(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println("radar-node", version)
 		return
@@ -83,6 +93,7 @@ Usage:
   radar-node probe <target> [flags]
   radar-node agent [flags]
   radar-node init [-C path]
+  radar-node jobprobe [flags]   (module-script helper, not for direct use)
 
 probe flags:
   --type string       tcp | udp | dns | icmp | http | system | <module name> (default "tcp")
@@ -446,4 +457,8 @@ func (m stringMap) toParams() map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func runJobProbe(args []string) error {
+	return jobprobe.Run(args, os.Stdout)
 }
