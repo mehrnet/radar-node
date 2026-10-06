@@ -313,3 +313,41 @@ func TestSchemeLessTargetsNormalizeLikeCurl(t *testing.T) {
 		}
 	}
 }
+
+func TestFirstRequestTimesOutAgainstAWedgedEngine(t *testing.T) {
+	// A server that accepts the TCP connection and then never
+	// responds -- the exact shape of a warm-but-wedged engine. The
+	// first request used to run on a bare context.Background() and
+	// would park forever; it must now fail within its own fractional
+	// budget instead of waiting for someone to kill the process.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Hold the connection open, answer nothing.
+			_ = conn
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+
+	params := writeParams(t, `{"config":{"outbounds":[{"protocol":"freedom"}]}}`)
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	start := time.Now()
+	var out strings.Builder
+	err = Run([]string{"--socks-port", port, "--target", "http://127.0.0.1:1/", "--timeout-ms", "2000", "--params-file", params}, &out)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected failure against a wedged engine")
+	}
+	// 2000ms * 0.325 = 650ms budget; allow generous slack for spawn
+	// and scheduling, but nothing like the pre-fix "forever".
+	if elapsed > 5*time.Second {
+		t.Fatalf("first request took %v against a wedged engine -- budget is 650ms", elapsed)
+	}
+}

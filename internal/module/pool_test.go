@@ -715,3 +715,80 @@ pool:
 		t.Fatalf("engine survived Close(): pids %s", out)
 	}
 }
+
+func TestPoolWarm_WedgedEngineFailsJobsButNeverStallsTheBatch(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	// The engine is "healthy" by every signal the pool has -- process
+	// alive, every port accepting -- but a job's run step never
+	// finishes. The batch must still complete inside the jobs' own
+	// timeouts with failed results, because a scheduler tick that
+	// waits on a wedged engine stops every OTHER probe on the node
+	// (the exact production signature: heartbeats alive, all checks
+	// starved).
+	startScript := filepath.Join(dir, "start.py")
+	mustWrite(t, startScript, `
+import json, socket, sys, threading, time
+with open(sys.argv[1]) as f:
+    jobs = json.load(f)
+for j in jobs:
+    def serve(port):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.listen(5)
+        while True:
+            conn, _ = s.accept()
+            conn.close()
+    threading.Thread(target=serve, args=(j["alloc_port"],), daemon=True).start()
+while True:
+    time.sleep(1)
+`)
+	runScript := filepath.Join(dir, "run.py")
+	mustWrite(t, runScript, `
+import time
+time.sleep(30)
+`)
+	m := loadOne(t, `
+name: wedge-pool
+run:
+  command: ["python3", "`+runScript+`"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 2
+  build_config:
+    command: ["cp", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["python3", "`+startScript+`", "{{config_path}}"]
+`)
+	b := asBatch(t, m)
+
+	opts := []probe.Options{
+		{Target: "a", Timeout: 2 * time.Second, Seq: 1},
+		{Target: "b", Timeout: 2 * time.Second, Seq: 2},
+		{Target: "c", Timeout: 2 * time.Second, Seq: 3},
+		{Target: "d", Timeout: 2 * time.Second, Seq: 4},
+	}
+	start := time.Now()
+	results := b.CheckBatch(context.Background(), opts)
+	elapsed := time.Since(start)
+	if len(results) != 4 {
+		t.Fatalf("results len %d", len(results))
+	}
+	for _, r := range results {
+		if r.Ok {
+			t.Fatalf("job against a wedged engine must fail, got ok: %+v", r)
+		}
+	}
+	// 4 jobs / concurrency 2 * 2s timeout = ~4s of work, plus the
+	// process-kill margin. Anything within 15s proves the batch is
+	// bounded by the jobs' own timeouts rather than the run step's
+	// 30s sleep -- and infinitely better than "never returns".
+	if elapsed > 15*time.Second {
+		t.Fatalf("batch took %v against a wedged engine -- jobs' own timeouts must bound it", elapsed)
+	}
+}

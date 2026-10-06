@@ -185,7 +185,18 @@ func Run(args []string, stdout io.Writer) error {
 		tcpDelay = dialTCPDelay(ep, time.Duration(float64(timeout)*dialFraction))
 	}
 
-	realElapsed, _, err := requestThroughSOCKS(context.Background(), socksAddr, *target)
+	// Both requests carry the same fractional budget. The first one
+	// originally ran on a bare context.Background() -- unbounded -- on
+	// the theory that the caller's outer timeout would kill the whole
+	// process anyway. That theory has a hole a production incident
+	// walked straight through: a warm engine that accepts its inbound
+	// TCP connection and then never responds leaves the request parked
+	// in the transport forever, and "somebody will SIGKILL me" is not
+	// a timeout strategy -- it makes the caller's deadline the only
+	// thing between one wedged engine and a stalled scheduler tick.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), time.Duration(float64(timeout)*requestFraction))
+	defer cancel1()
+	realElapsed, _, err := requestThroughSOCKS(ctx1, socksAddr, *target)
 	if err != nil {
 		return fmt.Errorf("jobprobe: first request through tunnel: %w", err)
 	}
