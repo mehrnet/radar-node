@@ -167,6 +167,10 @@ func Run(ctx context.Context, cfg Config) error {
 		a.schedulerLoop(ctx, cfg.SchedulerTick)
 	}()
 	wg.Wait()
+	// Both loops are done (ctx cancelled): stop every warm pooled
+	// engine the scheduler was keeping alive -- the graceful half of
+	// engine cleanup, Pdeathsig being the ungraceful half.
+	reg.Shutdown()
 	return nil
 }
 

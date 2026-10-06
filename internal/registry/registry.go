@@ -97,6 +97,19 @@ func (r Registry) LoadModules(dir, toolsDir string) error {
 }
 
 // Get returns the Checker registered under name, if any.
+// Shutdown stops every warm pooled engine (see internal/module's
+// PoolChecker.Close). Called from the agent's shutdown path so a
+// SIGTERM'd agent does not leave engine processes -- Pdeathsig covers
+// the ungraceful cases on Linux, this covers the graceful one,
+// running the module's own stop step where it declares one.
+func (r Registry) Shutdown() {
+	for _, e := range r {
+		if pc, ok := e.checker.(interface{ Close() }); ok {
+			pc.Close()
+		}
+	}
+}
+
 func (r Registry) Get(name string) (probe.Checker, bool) {
 	e, ok := r[name]
 	return e.checker, ok

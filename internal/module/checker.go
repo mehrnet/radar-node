@@ -172,16 +172,48 @@ func (c Checker) startPrepare(ctx context.Context, ec execContext, port int) err
 // scoped ctx the caller cancels itself once every job in the instance
 // has been tested, for Start).
 func startLongLived(ctx context.Context, step Step, ec execContext, readinessTimeout time.Duration, port int) error {
+	_, err := startEngine(ctx, step, ec, readinessTimeout, port)
+	return err
+}
+
+// startedEngine is one live engine process: the command handle plus a
+// done channel closed once cmd.Wait returns, which is how callers that
+// keep an engine alive across requests (the warm pool) notice the
+// process died on its own.
+type startedEngine struct {
+	cmd  *exec.Cmd
+	done chan struct{}
+}
+
+// startEngine is startLongLived's internals, split out so the warm
+// pool can hold on to the process handle instead of only its error.
+func startEngine(ctx context.Context, step Step, ec execContext, readinessTimeout time.Duration, port int) (*startedEngine, error) {
 	argv := ec.resolve(step.Command)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	setParentDeathSignal(cmd)
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err
 	}
-	go func() { _ = cmd.Wait() }() // reap; ctx cancellation ends the process
+	e := &startedEngine{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait() // reap; ctx cancellation ends the process
+		close(e.done)
+	}()
 
 	readinessCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
 	defer cancel()
-	return portalloc.WaitForPort(readinessCtx, port)
+	if err := portalloc.WaitForPort(readinessCtx, port); err != nil {
+		// A process that started but never became ready must not be
+		// left running: on the old per-request path the caller's ctx
+		// cancellation cleaned up here, but a warm engine's ctx is
+		// owned by the pool, so the kill has to be explicit.
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-e.done
+		return nil, err
+	}
+	return e, nil
 }
 
 func runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {

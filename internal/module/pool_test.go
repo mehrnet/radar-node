@@ -2,6 +2,7 @@ package module_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -467,4 +468,250 @@ pool:
   start:
     command: ["python3", "`+startScript+`", "{{config_path}}"]
 `)
+}
+
+// --- warm reuse -------------------------------------------------------
+//
+// The pool keeps engines alive across CheckBatch calls. Everything
+// below is expressed through the one externally visible counter the
+// fixture offers: build_config writes one "instance" line to its log
+// per engine build. A warm tick adds none.
+
+func buildCount(t *testing.T, logPath string) int {
+	t.Helper()
+	b, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read build log: %v", err)
+	}
+	return strings.Count(string(b), "instance\n")
+}
+
+func asBatch(t *testing.T, m module.Module) probe.BatchChecker {
+	t.Helper()
+	c := module.NewChecker(m)
+	b, ok := c.(probe.BatchChecker)
+	if !ok {
+		t.Fatalf("expected BatchChecker, got %T", c)
+	}
+	// A warm engine outlives its batch by design -- which means a test
+	// that forgets to stop it leaks a python process for the rest of
+	// the binary's run, and (observed) makes any later process-count
+	// assertion lie. Close every checker here, once, for every test.
+	t.Cleanup(func() {
+		if closer, ok := c.(interface{ Close() }); ok {
+			closer.Close()
+		}
+	})
+	return b
+}
+
+func TestPoolWarm_SameBatchTwiceBuildsOneEngine(t *testing.T) {
+	m, logPath := poolFixture(t, 10, 4)
+	b := asBatch(t, m)
+	opts := []probe.Options{jobOpts("a", 1), jobOpts("b", 2), jobOpts("c", 3)}
+
+	for i := 0; i < 3; i++ {
+		results := b.CheckBatch(context.Background(), opts)
+		if len(results) != 3 {
+			t.Fatalf("results len %d", len(results))
+		}
+		for _, r := range results {
+			if !r.Ok {
+				t.Fatalf("result not ok: %+v", r)
+			}
+		}
+	}
+	if got := buildCount(t, logPath); got != 1 {
+		t.Fatalf("expected exactly one engine build across three identical ticks, got %d", got)
+	}
+}
+
+func TestPoolWarm_InputOrderDoesNotMatter(t *testing.T) {
+	m, logPath := poolFixture(t, 10, 4)
+	b := asBatch(t, m)
+	forward := []probe.Options{jobOpts("a", 1), jobOpts("b", 2), jobOpts("c", 3)}
+	shuffled := []probe.Options{jobOpts("c", 3), jobOpts("a", 1), jobOpts("b", 2)}
+
+	r1 := b.CheckBatch(context.Background(), forward)
+	r2 := b.CheckBatch(context.Background(), shuffled)
+	// Results follow the CALLER's order in both cases.
+	if r1[0].Target != "a" || r2[0].Target != "c" {
+		t.Fatalf("result order not caller's: %s, %s", r1[0].Target, r2[0].Target)
+	}
+	if got := buildCount(t, logPath); got != 1 {
+		t.Fatalf("a reordered identical batch must reuse the engine; got %d builds", got)
+	}
+}
+
+func TestPoolWarm_ChangedJobSetRebuildsAndStopsOldEngine(t *testing.T) {
+	m, logPath := poolFixture(t, 10, 4)
+	b := asBatch(t, m)
+
+	first := b.CheckBatch(context.Background(), []probe.Options{jobOpts("a", 1)})
+	if !first[0].Ok {
+		t.Fatalf("first batch: %+v", first[0])
+	}
+	second := b.CheckBatch(context.Background(), []probe.Options{jobOpts("a", 1), jobOpts("new", 2)})
+	if len(second) != 2 || !second[0].Ok || !second[1].Ok {
+		t.Fatalf("second batch: %+v", second)
+	}
+	if got := buildCount(t, logPath); got != 2 {
+		t.Fatalf("changed job set must rebuild exactly once, got %d builds", got)
+	}
+}
+
+func TestPoolWarm_DeadEngineIsRebuilt(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "build.log")
+	buildConfigScript := filepath.Join(dir, "build-config.py")
+	mustWrite(t, buildConfigScript, `
+import shutil, sys
+with open("`+logPath+`", "a") as log:
+    log.write("instance\n")
+shutil.copy(sys.argv[1], sys.argv[2])
+`)
+	// Serves its ports, then exits on its own after one second -- a
+	// crashed or OOM-killed engine, from the pool's point of view.
+	startScript := filepath.Join(dir, "start.py")
+	mustWrite(t, startScript, `
+import json, socket, sys, threading, time
+with open(sys.argv[1]) as f:
+    jobs = json.load(f)
+for j in jobs:
+    def serve(port):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.listen(5)
+        while True:
+            conn, _ = s.accept()
+            conn.close()
+    threading.Thread(target=serve, args=(j["alloc_port"],), daemon=True).start()
+time.sleep(1)
+`)
+	runScript := filepath.Join(dir, "run.py")
+	mustWrite(t, runScript, `
+import socket, sys
+target, port = sys.argv[1], int(sys.argv[2])
+s = socket.create_connection(("127.0.0.1", port), timeout=2)
+s.close()
+print('{"latency_ms": 1}')
+`)
+	m := loadOne(t, `
+name: dying-pool
+run:
+  command: ["python3", "`+runScript+`", "{{target}}", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 4
+  build_config:
+    command: ["python3", "`+buildConfigScript+`", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["python3", "`+startScript+`", "{{config_path}}"]
+`)
+	b := asBatch(t, m)
+
+	first := b.CheckBatch(context.Background(), []probe.Options{jobOpts("a", 1)})
+	if !first[0].Ok {
+		t.Fatalf("first batch against the short-lived engine: %+v", first[0])
+	}
+	time.Sleep(1500 * time.Millisecond) // engine dies on its own
+	second := b.CheckBatch(context.Background(), []probe.Options{jobOpts("a", 1)})
+	if !second[0].Ok {
+		t.Fatalf("second batch must transparently rebuild: %+v", second[0])
+	}
+	if got := buildCount(t, logPath); got != 2 {
+		t.Fatalf("a dead engine must trigger exactly one rebuild, got %d builds", got)
+	}
+}
+
+func TestPoolWarm_EngineOutlivesRequestContext(t *testing.T) {
+	m, logPath := poolFixture(t, 10, 4)
+	b := asBatch(t, m)
+	opts := []probe.Options{jobOpts("a", 1), jobOpts("b", 2)}
+
+	// The batch's own context is cancelled right after the call --
+	// a per-request engine would die with it; a warm one must not.
+	ctx, cancel := context.WithCancel(context.Background())
+	if r := b.CheckBatch(ctx, opts); !r[0].Ok || !r[1].Ok {
+		t.Fatalf("first batch: %+v", r)
+	}
+	cancel()
+
+	if r := b.CheckBatch(context.Background(), opts); !r[0].Ok {
+		t.Fatalf("second batch: %+v", r)
+	}
+	if got := buildCount(t, logPath); got != 1 {
+		t.Fatalf("cancelling a finished batch's context must not kill the engine; got %d builds", got)
+	}
+}
+
+func TestPoolWarm_CloseStopsEngines(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	// A name unique to this run, so pgrep cannot match some other
+	// test's fixture engine by accident.
+	engineName := fmt.Sprintf("close-engine-%d.py", os.Getpid())
+	startScript := filepath.Join(dir, engineName)
+	mustWrite(t, startScript, `
+import json, socket, sys, threading, time
+with open(sys.argv[1]) as f:
+    jobs = json.load(f)
+for j in jobs:
+    def serve(port):
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.listen(5)
+        while True:
+            conn, _ = s.accept()
+            conn.close()
+    threading.Thread(target=serve, args=(j["alloc_port"],), daemon=True).start()
+while True:
+    time.sleep(1)
+`)
+	runScript := filepath.Join(dir, "run.py")
+	mustWrite(t, runScript, `
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=2)
+s.close()
+print('{"latency_ms": 1}')
+`)
+	m := loadOne(t, `
+name: close-pool
+run:
+  command: ["python3", "`+runScript+`", "{{target}}", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 4
+  build_config:
+    command: ["cp", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["python3", "`+startScript+`", "{{config_path}}"]
+`)
+	c := module.NewChecker(m)
+	b := c.(probe.BatchChecker)
+	if r := b.CheckBatch(context.Background(), []probe.Options{jobOpts("a", 1)}); !r[0].Ok {
+		t.Fatalf("batch: %+v", r)
+	}
+	out, err := exec.Command("pgrep", "-f", engineName).Output()
+	if err != nil || len(out) == 0 {
+		t.Fatalf("engine should be running before Close (pgrep err=%v)", err)
+	}
+
+	c.(interface{ Close() }).Close()
+
+	out, err = exec.Command("pgrep", "-f", engineName).Output()
+	if err == nil && len(out) > 0 {
+		t.Fatalf("engine survived Close(): pids %s", out)
+	}
 }
