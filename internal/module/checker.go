@@ -202,8 +202,23 @@ func startEngine(ctx context.Context, step Step, ec execContext, readinessTimeou
 	}()
 
 	readinessCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
-	defer cancel()
-	if err := portalloc.WaitForPort(readinessCtx, port); err != nil {
+	ready := make(chan error, 1)
+	go func() { ready <- portalloc.WaitForPort(readinessCtx, port) }()
+	var waitErr error
+	select {
+	case waitErr = <-ready:
+	case <-e.done:
+		// Fail fast when the process already exited: it can never open
+		// the port, and waiting out the full readiness timeout both
+		// makes a bad-config batch look like a slow hang and makes
+		// pool bisection (see pool.go's runBisected) impractically
+		// slow.
+		cancel()
+		<-ready
+		waitErr = fmt.Errorf("engine exited before becoming ready")
+	}
+	cancel()
+	if waitErr != nil {
 		// A process that started but never became ready must not be
 		// left running: on the old per-request path the caller's ctx
 		// cancellation cleaned up here, but a warm engine's ctx is
@@ -212,7 +227,7 @@ func startEngine(ctx context.Context, step Step, ec execContext, readinessTimeou
 			_ = cmd.Process.Kill()
 		}
 		<-e.done
-		return nil, err
+		return nil, waitErr
 	}
 	return e, nil
 }

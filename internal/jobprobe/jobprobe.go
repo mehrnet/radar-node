@@ -134,33 +134,58 @@ func dialTCPDelay(ep endpoint, timeout time.Duration) *float64 {
 	return &ms
 }
 
-// requestThroughSOCKS performs one GET through the job's SOCKS
-// inbound, returning (elapsed, httpCode). Elapsed uses curl's
-// time_total semantics -- connect through the tunnel plus response
-// headers plus the fully-drained body -- since that is what the
-// writeout figures the module reports were always measured against.
-func requestThroughSOCKS(ctx context.Context, socksAddr, target string) (time.Duration, int, error) {
+// socksTunnel is one attempt's HTTP client over the job's SOCKS
+// inbound. Keeping the transport for both requests is what makes the
+// second one genuinely warm: the HTTP client reuses the same SOCKS
+// connection, so xray forwards both requests over the same proxied
+// stream even when mux is disabled for Reality or XHTTP -- reusing the
+// local stream avoids a second outbound handshake entirely, not just a
+// second target-side TLS handshake.
+type socksTunnel struct {
+	transport *http.Transport
+}
+
+func newSOCKSTunnel(socksAddr string) (*socksTunnel, error) {
 	dialer, err := proxy.SOCKS5("tcp", socksAddr, nil, proxy.Direct)
 	if err != nil {
-		return 0, 0, fmt.Errorf("socks dialer: %w", err)
+		return nil, fmt.Errorf("socks dialer: %w", err)
 	}
 	contextDialer, ok := dialer.(proxy.ContextDialer)
 	if !ok {
-		return 0, 0, errors.New("socks dialer does not support contexts")
+		return nil, errors.New("socks dialer does not support contexts")
 	}
-	transport := &http.Transport{DialContext: contextDialer.DialContext, Proxy: nil}
-	start := time.Now()
+	return &socksTunnel{transport: &http.Transport{
+		DialContext:         contextDialer.DialContext,
+		Proxy:               nil,
+		MaxIdleConns:        1,
+		MaxIdleConnsPerHost: 1,
+		IdleConnTimeout:     2 * time.Minute,
+	}}, nil
+}
+
+// request performs one GET through the tunnel, returning (elapsed,
+// httpCode). Elapsed uses curl's time_total semantics -- connect
+// through the tunnel plus response headers plus the fully-drained body
+// -- since that is what the writeout figures the module reports were
+// always measured against. RoundTrip (not Client.Do) deliberately
+// leaves redirects alone: a 3xx is a successful reachability answer.
+func (t *socksTunnel) request(ctx context.Context, target string) (time.Duration, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return 0, 0, err
 	}
-	resp, err := transport.RoundTrip(req)
+	start := time.Now()
+	resp, err := t.transport.RoundTrip(req)
 	if err != nil {
 		return 0, 0, err
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 	return time.Since(start), resp.StatusCode, nil
+}
+
+func (t *socksTunnel) close() {
+	t.transport.CloseIdleConnections()
 }
 
 // jsonNumber renders a float with the same %.3f shape the awk
@@ -234,6 +259,7 @@ func Run(args []string, stdout io.Writer) error {
 
 	attempts := make([]targetAttempt, 0, len(targets))
 	var successTarget string
+	var successTunnel *socksTunnel
 	var realDelay float64
 	for i, candidate := range targets {
 		var attemptTimeout time.Duration
@@ -252,14 +278,21 @@ func Run(args []string, stdout io.Writer) error {
 		if attemptTimeout <= 0 {
 			break
 		}
+		tunnel, tunErr := newSOCKSTunnel(socksAddr)
+		if tunErr != nil {
+			attempts = append(attempts, targetAttempt{target: candidate, err: tunErr})
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
-		elapsed, code, err := requestThroughSOCKS(ctx, socksAddr, candidate)
+		elapsed, code, err := tunnel.request(ctx, candidate)
 		cancel()
 		if err == nil && code >= 200 && code < 400 {
 			successTarget = candidate
+			successTunnel = tunnel
 			realDelay = float64(elapsed) / float64(time.Millisecond)
 			break
 		}
+		tunnel.close()
 		if err == nil {
 			err = fmt.Errorf("target returned HTTP %d", code)
 		}
@@ -269,6 +302,7 @@ func Run(args []string, stdout io.Writer) error {
 	if successTarget == "" {
 		return fmt.Errorf("jobprobe: %s", formatAttempts(attempts))
 	}
+	defer successTunnel.close()
 
 	// The second request gets whatever remains before the overall
 	// deadline, with a small floor so a nearly-exhausted fallback
@@ -280,7 +314,11 @@ func Run(args []string, stdout io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), remaining)
 	defer cancel()
-	httpElapsed, httpCode, err := requestThroughSOCKS(ctx, socksAddr, successTarget)
+	// Same tunnel/transport as the successful first attempt: with the
+	// first response fully drained above, the transport reuses that
+	// connection, making this a genuinely warm request through the
+	// same proxied stream.
+	httpElapsed, httpCode, err := successTunnel.request(ctx, successTarget)
 	if err != nil {
 		return fmt.Errorf("jobprobe: second request through tunnel (%s): %w", successTarget, err)
 	}

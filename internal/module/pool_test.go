@@ -69,6 +69,8 @@ while True:
 	mustWrite(t, runScript, `
 import socket, sys
 target, port = sys.argv[1], int(sys.argv[2])
+with open("`+filepath.Join(dir, "runs.log")+`", "a") as log:
+    log.write(target + "\n")
 if target == "fail":
     sys.exit(1)
 s = socket.create_connection(("127.0.0.1", port), timeout=2)
@@ -176,6 +178,222 @@ pool:
 	}
 }
 
+func TestPoolChecker_CheckBatch_DeduplicatesIdenticalJobs(t *testing.T) {
+	m, buildLog := poolFixture(t, 10, 2)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+
+	// Same target/timeout/params, different Seq: one physical job.
+	results := checker.CheckBatch(context.Background(), []probe.Options{
+		jobOpts("dup", 1),
+		jobOpts("dup", 2),
+		jobOpts("other", 3),
+	})
+	if len(results) != 3 {
+		t.Fatalf("results = %d, want one per input", len(results))
+	}
+	for i, wantSeq := range []int{1, 2, 3} {
+		if !results[i].Ok {
+			t.Fatalf("result %d failed: %+v", i, results[i])
+		}
+		if results[i].Seq != wantSeq {
+			t.Fatalf("result %d Seq = %d, want %d", i, results[i].Seq, wantSeq)
+		}
+	}
+	if results[0].LatencyMs != results[1].LatencyMs {
+		t.Fatalf("duplicate results should share the measurement: %v vs %v", results[0].LatencyMs, results[1].LatencyMs)
+	}
+	if results[0].Extra["saw_target"] != "dup" || results[1].Extra["saw_target"] != "dup" {
+		t.Fatalf("duplicate results should both carry the canonical run's extra: %v / %v", results[0].Extra, results[1].Extra)
+	}
+
+	runs, err := os.ReadFile(filepath.Join(filepath.Dir(buildLog), "runs.log"))
+	if err != nil {
+		t.Fatalf("read runs log: %v", err)
+	}
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(string(runs)), "\n") {
+		counts[line]++
+	}
+	if counts["dup"] != 1 {
+		t.Fatalf("duplicate config ran %d times, want 1 (all runs: %v)", counts["dup"], counts)
+	}
+	if counts["other"] != 1 {
+		t.Fatalf("distinct config ran %d times, want 1 (all runs: %v)", counts["other"], counts)
+	}
+}
+
+// bisectFixture is poolFixture with a start step that refuses to run
+// when any job's target is "bad" -- the shape one poisoned config
+// gives xray (it exits during startup, so the port never opens).
+func bisectFixture(t *testing.T) module.Module {
+	t.Helper()
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+
+	buildScript := filepath.Join(dir, "build.py")
+	mustWrite(t, buildScript, `
+import shutil, sys
+shutil.copy(sys.argv[1], sys.argv[2])
+`)
+	startScript := filepath.Join(dir, "start.py")
+	mustWrite(t, startScript, `
+import sys, json, socket, threading, time
+
+with open(sys.argv[1]) as f:
+    jobs = json.load(f)
+if any(j.get("target") == "bad" for j in jobs):
+    sys.exit(1)
+
+def serve(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(5)
+    while True:
+        conn, _ = s.accept()
+        conn.close()
+
+for j in jobs:
+    threading.Thread(target=serve, args=(j["alloc_port"],), daemon=True).start()
+while True:
+    time.sleep(1)
+`)
+	runScript := filepath.Join(dir, "run.py")
+	mustWrite(t, runScript, `
+import socket, sys
+target, port = sys.argv[1], int(sys.argv[2])
+s = socket.create_connection(("127.0.0.1", port), timeout=2)
+s.close()
+print('{"latency_ms": 1}')
+`)
+
+	return loadOne(t, `
+name: bisect-mod
+run:
+  command: ["python3", "`+runScript+`", "{{target}}", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 2
+  build_config:
+    command: ["python3", "`+buildScript+`", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["python3", "`+startScript+`", "{{config_path}}"]
+`)
+}
+
+func TestPoolChecker_CheckBatch_BisectionIsolatesABadConfig(t *testing.T) {
+	checker := module.NewChecker(bisectFixture(t)).(probe.BatchChecker)
+	opts := []probe.Options{
+		jobOpts("a", 1),
+		jobOpts("bad", 2),
+		jobOpts("c", 3),
+		jobOpts("d", 4),
+	}
+	start := time.Now()
+	results := checker.CheckBatch(context.Background(), opts)
+	elapsed := time.Since(start)
+
+	if !results[0].Ok || !results[2].Ok || !results[3].Ok {
+		t.Fatalf("healthy siblings should still report: %+v", results)
+	}
+	if results[1].Ok {
+		t.Fatalf("the poisoned job should fail, got %+v", results[1])
+	}
+	if !strings.Contains(results[1].Error, "pool start") {
+		t.Fatalf("expected the bad job's own start error, got %q", results[1].Error)
+	}
+	// Three failed starts (the whole batch, then [a,bad]'s two halves,
+	// then [bad] alone) would each cost the 2.5s readiness timeout
+	// without the exit-before-ready fast path.
+	if elapsed > 5*time.Second {
+		t.Fatalf("bisection took %v; the start step's exit should fail fast, not wait out readiness", elapsed)
+	}
+}
+
+func TestPoolChecker_CheckBatch_RetriesTransientBuildConfigFailure(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	buildLog := filepath.Join(dir, "build.log")
+
+	buildScript := filepath.Join(dir, "build.py")
+	mustWrite(t, buildScript, `
+import os, shutil, sys
+with open("`+buildLog+`", "a") as log:
+    log.write("build\n")
+attempts = 0
+try:
+    attempts = int(open("`+attemptsPath+`").read())
+except FileNotFoundError:
+    pass
+with open("`+attemptsPath+`", "w") as f:
+    f.write(str(attempts + 1))
+if attempts == 0:
+    sys.exit(1)
+shutil.copy(sys.argv[1], sys.argv[2])
+`)
+	startScript := filepath.Join(dir, "start.py")
+	mustWrite(t, startScript, `
+import sys, json, socket, threading, time
+with open(sys.argv[1]) as f:
+    jobs = json.load(f)
+def serve(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(5)
+    while True:
+        conn, _ = s.accept()
+        conn.close()
+for j in jobs:
+    threading.Thread(target=serve, args=(j["alloc_port"],), daemon=True).start()
+while True:
+    time.sleep(1)
+`)
+	runScript := filepath.Join(dir, "run.py")
+	mustWrite(t, runScript, `
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=2)
+s.close()
+print('{"latency_ms": 1}')
+`)
+
+	m := loadOne(t, `
+name: retry-mod
+run:
+  command: ["python3", "`+runScript+`", "{{target}}", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 2
+  build_config:
+    command: ["python3", "`+buildScript+`", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["python3", "`+startScript+`", "{{config_path}}"]
+`)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+	results := checker.CheckBatch(context.Background(), []probe.Options{jobOpts("a", 1), jobOpts("b", 2)})
+	for i, r := range results {
+		if !r.Ok {
+			t.Fatalf("job %d should succeed after the build retry: %+v", i, r)
+		}
+	}
+	log, err := os.ReadFile(buildLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(log), "build"); got != 2 {
+		t.Fatalf("build_config ran %d times, want exactly 2 (one failure + one retry, no bisection)", got)
+	}
+}
+
 func TestPoolChecker_CheckBatch_TestsEveryJobAgainstItsOwnPort(t *testing.T) {
 	m, _ := poolFixture(t, 10, 2)
 	checker := module.NewChecker(m).(probe.BatchChecker)
@@ -208,7 +426,10 @@ func TestPoolChecker_CheckBatch_SplitsIntoMultipleSequentialInstances(t *testing
 
 	opts := make([]probe.Options, 5)
 	for i := range opts {
-		opts[i] = jobOpts("t", i+1)
+		// Distinct targets: identical configs are deliberately
+		// deduplicated now, and this test is about instance splitting,
+		// not dedupe.
+		opts[i] = jobOpts(fmt.Sprintf("t-%d", i+1), i+1)
 	}
 	results := checker.CheckBatch(context.Background(), opts)
 
@@ -319,8 +540,8 @@ func TestPoolChecker_CheckBatch_SpacesJobsSharingADestination(t *testing.T) {
 	t.Cleanup(func() { destgate.Configure(0, 0) })
 
 	opts := []probe.Options{
-		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "shared-host:443"},
-		{Target: "t", Timeout: 5 * time.Second, Seq: 2, Destination: "shared-host:443"},
+		{Target: "t-1", Timeout: 5 * time.Second, Seq: 1, Destination: "shared-host:443"},
+		{Target: "t-2", Timeout: 5 * time.Second, Seq: 2, Destination: "shared-host:443"},
 	}
 	start := time.Now()
 	results := checker.CheckBatch(context.Background(), opts)
@@ -349,8 +570,8 @@ func TestPoolChecker_CheckBatch_DoesNotSpaceJobsWithDifferentDestinations(t *tes
 	t.Cleanup(func() { destgate.Configure(0, 0) })
 
 	opts := []probe.Options{
-		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "host-a:443"},
-		{Target: "t", Timeout: 5 * time.Second, Seq: 2, Destination: "host-b:443"},
+		{Target: "t-1", Timeout: 5 * time.Second, Seq: 1, Destination: "host-a:443"},
+		{Target: "t-2", Timeout: 5 * time.Second, Seq: 2, Destination: "host-b:443"},
 	}
 	start := time.Now()
 	results := checker.CheckBatch(context.Background(), opts)
@@ -383,8 +604,8 @@ func TestPoolChecker_CheckBatch_JobWhoseWaitTimesOutIsSkippedNotFailed(t *testin
 	t.Cleanup(func() { destgate.Configure(0, 0) })
 
 	opts := []probe.Options{
-		{Target: "t", Timeout: 5 * time.Second, Seq: 1, Destination: "oversubscribed-host:443"},
-		{Target: "t", Timeout: 5 * time.Second, Seq: 2, Destination: "oversubscribed-host:443"},
+		{Target: "t-1", Timeout: 5 * time.Second, Seq: 1, Destination: "oversubscribed-host:443"},
+		{Target: "t-2", Timeout: 5 * time.Second, Seq: 2, Destination: "oversubscribed-host:443"},
 	}
 	results := checker.CheckBatch(context.Background(), opts)
 

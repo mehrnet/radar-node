@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,14 +113,30 @@ func (c *PoolChecker) CheckBatch(ctx context.Context, opts []probe.Options) []pr
 		return results
 	}
 
-	pending := make([]pendingJob, 0, len(opts))
+	// Identical options (same target, timeout and params -- everything
+	// but Seq) are one physical job: two subscriptions can carry the
+	// same proxy, and a probe_count above 1 repeats the same check on
+	// purpose. Test the canonical one once and fan the result back out
+	// to every original index with that index's own Seq. Billing is
+	// unaffected: the agent still reports one result per option and
+	// radar stores one check per probe.
+	groups := make(map[string][]pendingJob, len(opts))
+	order := make([]string, 0, len(opts))
 	for i, o := range opts {
 		o.Timeout = c.m.withMinTimeout(o.Timeout)
 		if err := validateRequest(c.m.Request, o.Params); err != nil {
 			results[i] = probe.Invalid(c.Type(), o.Target, o.Seq, err.Error())
 			continue
 		}
-		pending = append(pending, pendingJob{idx: i, key: jobKey(o), o: o})
+		key := jobKey(o)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], pendingJob{idx: i, key: key, o: o})
+	}
+	pending := make([]pendingJob, 0, len(order))
+	for _, key := range order {
+		pending = append(pending, groups[key][0])
 	}
 	if len(pending) == 0 {
 		return results
@@ -145,7 +163,34 @@ func (c *PoolChecker) CheckBatch(ctx context.Context, opts []probe.Options) []pr
 		}
 		c.runSlot(ctx, slot, pending[start:end], live, results)
 	}
+
+	// Fan duplicates out. A shallow struct copy plus a cloned Extra
+	// map keeps each result independent for the caller while sharing
+	// what the canonical run actually measured.
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		canonical := results[group[0].idx]
+		for _, duplicate := range group[1:] {
+			copied := canonical
+			copied.Seq = duplicate.o.Seq
+			copied.Extra = cloneExtra(canonical.Extra)
+			results[duplicate.idx] = copied
+		}
+	}
 	return results
+}
+
+func cloneExtra(extra map[string]any) map[string]any {
+	if extra == nil {
+		return nil
+	}
+	out := make(map[string]any, len(extra))
+	for key, value := range extra {
+		out[key] = value
+	}
+	return out
 }
 
 // pendingJob is one validated, not-yet-slotted job: its index in the
@@ -235,9 +280,13 @@ func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob,
 		// retired; the final releaseSlot tears it down and clears it,
 		// and this rebuild takes its place under a fresh slot entry.
 	}
-	built, err := c.buildAndStartLocked(jobs, key)
+	built, err := c.buildAndStart(jobs, key)
 	if err != nil {
 		c.mu.Unlock()
+		if shouldBisect(err, len(chunk)) {
+			c.runBisected(ctx, chunk, results)
+			return
+		}
 		for _, j := range jobs {
 			results[j.idx] = probe.Fail(c.Type(), j.opts.Target, j.opts.Seq, err)
 		}
@@ -249,6 +298,91 @@ func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob,
 
 	c.testJobs(ctx, jobs, results)
 	c.releaseSlot(slot)
+}
+
+// shouldBisect reports whether a build/start failure is plausibly
+// caused by one job in the chunk rather than by the environment.
+// Bisecting an environment failure (a missing interpreter, a readiness
+// timeout while the engine is still running) just repeats the same
+// failure many times at increasing cost.
+func shouldBisect(err error, chunkSize int) bool {
+	if chunkSize <= 1 {
+		return false
+	}
+	var buildErr *engineBuildError
+	if !errors.As(err, &buildErr) {
+		return true
+	}
+	message := buildErr.err.Error()
+	if buildErr.phase == "build_config" {
+		if strings.Contains(message, "not found") ||
+			strings.Contains(message, "exit status 127") ||
+			strings.Contains(message, "executable file not found") {
+			return false
+		}
+		return true
+	}
+	// A readiness timeout with the engine still alive is not a single
+	// bad job; splitting would multiply the wait instead of isolating
+	// anything. An engine that exits before becoming ready is exactly
+	// the shape a poisoned config produces.
+	if errors.Is(buildErr.err, context.DeadlineExceeded) || strings.Contains(message, "did not become ready") {
+		return false
+	}
+	return true
+}
+
+// runBisected isolates a bad job after a chunk's engine failed to
+// build or start. It rebuilds the chunk as a private, non-warm
+// instance; if that also fails, it splits the chunk in half and
+// recurses, so one malformed config costs only its own result and
+// every healthy sibling still reports. This runs only on the failure
+// path -- the happy path keeps one warm instance.
+func (c *PoolChecker) runBisected(ctx context.Context, chunk []pendingJob, results []probe.Result) {
+	jobs := make([]poolJob, len(chunk))
+	c.mu.Lock()
+	for i, p := range chunk {
+		port, ok := c.ports[p.key]
+		if !ok {
+			// A concurrent CheckBatch that didn't include this job may
+			// have released its pin between runSlot's failure and this
+			// call.
+			var err error
+			port, err = portalloc.Alloc()
+			if err != nil {
+				for _, q := range chunk {
+					results[q.idx] = probe.Fail(c.Type(), q.o.Target, q.o.Seq, fmt.Errorf("allocate port: %w", err))
+				}
+				c.mu.Unlock()
+				return
+			}
+			c.ports[p.key] = port
+		}
+		jobs[i] = poolJob{idx: p.idx, opts: p.o, port: port}
+	}
+	c.mu.Unlock()
+	c.runEphemeral(ctx, jobs, results)
+}
+
+func (c *PoolChecker) runEphemeral(ctx context.Context, jobs []poolJob, results []probe.Result) {
+	built, err := c.buildAndStart(jobs, hashJobs(jobs))
+	if err != nil {
+		if len(jobs) > 1 && shouldBisect(err, len(jobs)) {
+			mid := len(jobs) / 2
+			c.runEphemeral(ctx, jobs[:mid], results)
+			c.runEphemeral(ctx, jobs[mid:], results)
+			return
+		}
+		for _, j := range jobs {
+			results[j.idx] = probe.Fail(c.Type(), j.opts.Target, j.opts.Seq, err)
+		}
+		return
+	}
+	c.testJobs(ctx, jobs, results)
+	// Private instance, never entered into c.slots -- release its
+	// process and temp files directly. teardownLocked only touches the
+	// instance it is given, so no c.mu is needed for this one.
+	c.teardownLocked(built)
 }
 
 // releaseSlot drops one tester's reference to a slot's instance,
@@ -307,10 +441,24 @@ func (c *PoolChecker) teardownLocked(w *warmInstance) {
 	_ = os.Remove(w.configPath)
 }
 
-// buildAndStartLocked is the cold path: write jobs_json, run
-// build_config, start the engine on its own long-lived context and
-// wait for readiness. Callers must hold c.mu.
-func (c *PoolChecker) buildAndStartLocked(jobs []poolJob, key string) (*warmInstance, error) {
+// engineBuildError carries which half of buildAndStart failed, so the
+// failure path can tell a transient/environmental error (retry or fail
+// the batch) from one that may be caused by a single bad job (bisect).
+type engineBuildError struct {
+	phase string
+	err   error
+}
+
+func (e *engineBuildError) Error() string { return fmt.Sprintf("pool %s: %v", e.phase, e.err) }
+func (e *engineBuildError) Unwrap() error { return e.err }
+
+// buildAndStart is the cold path: write jobs_json, run build_config,
+// start the engine on its own long-lived context and wait for
+// readiness. It touches only the given jobs and private temp files --
+// runSlot calls it under c.mu alongside the slot bookkeeping, while
+// the bisection path (runEphemeral) deliberately calls it without the
+// lock so one failing chunk cannot block unrelated slots.
+func (c *PoolChecker) buildAndStart(jobs []poolJob, key string) (*warmInstance, error) {
 	jobsPath, cleanupJobs, err := writeJobsJSON(jobs)
 	if err != nil {
 		return nil, fmt.Errorf("write jobs_json: %w", err)
@@ -326,12 +474,23 @@ func (c *PoolChecker) buildAndStartLocked(jobs []poolJob, key string) (*warmInst
 	}
 	ec := execContext{JobsJSONPath: jobsPath, ConfigPath: configPath}
 
-	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelBuild()
-	if _, err := runStep(buildCtx, *c.m.Pool.BuildConfig, ec); err != nil {
+	runBuild := func() error {
+		buildCtx, cancelBuild := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelBuild()
+		_, err := runStep(buildCtx, *c.m.Pool.BuildConfig, ec)
+		return err
+	}
+	// One retry for a transient subprocess/IO failure before treating
+	// the whole chunk as poisoned -- bisection is only worth its cost
+	// once a failure is reproducible.
+	buildErr := runBuild()
+	if buildErr != nil {
+		buildErr = runBuild()
+	}
+	if buildErr != nil {
 		cleanupJobs()
 		cleanupConfig()
-		return nil, fmt.Errorf("pool build_config: %w", err)
+		return nil, &engineBuildError{phase: "build_config", err: buildErr}
 	}
 
 	// The engine's context is deliberately NOT the request's: a warm
@@ -349,7 +508,7 @@ func (c *PoolChecker) buildAndStartLocked(jobs []poolJob, key string) (*warmInst
 		cancelEngine()
 		cleanupJobs()
 		cleanupConfig()
-		return nil, fmt.Errorf("pool start: %w", err)
+		return nil, &engineBuildError{phase: "start", err: err}
 	}
 
 	return &warmInstance{

@@ -170,8 +170,10 @@ func TestExtractEndpointBothShapesAndMissing(t *testing.T) {
 func TestRunEndToEndThroughSOCKS(t *testing.T) {
 	socksAddr, accepted := socksServer(t)
 	var hits int
+	var remotes []string
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
+		remotes = append(remotes, r.RemoteAddr)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -195,8 +197,11 @@ func TestRunEndToEndThroughSOCKS(t *testing.T) {
 	if hits != 2 {
 		t.Fatalf("expected exactly two through-tunnel requests, got %d", hits)
 	}
-	if accepted.Load() != 2 {
-		t.Fatalf("expected two SOCKS connections, got %d", accepted.Load())
+	if accepted.Load() != 1 {
+		t.Fatalf("expected one reused SOCKS connection for both requests, got %d", accepted.Load())
+	}
+	if len(remotes) != 2 || remotes[0] != remotes[1] {
+		t.Fatalf("second request did not reuse the tunnel connection: %v", remotes)
 	}
 
 	var payload map[string]any
@@ -369,6 +374,7 @@ func TestFirstRequestTimesOutAgainstAWedgedEngine(t *testing.T) {
 func TestRunFallsBackWhenThePrimaryTargetFails(t *testing.T) {
 	socksAddr, accepted := socksServer(t)
 	var primaryHits, fallbackHits int
+	var fallbackRemotes []string
 	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		primaryHits++
 		w.WriteHeader(http.StatusInternalServerError)
@@ -376,6 +382,7 @@ func TestRunFallsBackWhenThePrimaryTargetFails(t *testing.T) {
 	defer primary.Close()
 	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fallbackHits++
+		fallbackRemotes = append(fallbackRemotes, r.RemoteAddr)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer fallback.Close()
@@ -397,8 +404,11 @@ func TestRunFallsBackWhenThePrimaryTargetFails(t *testing.T) {
 	if fallbackHits != 2 {
 		t.Fatalf("fallback hits = %d, want 2 (first + second request)", fallbackHits)
 	}
-	if accepted.Load() != 3 {
-		t.Fatalf("SOCKS connections = %d, want 3", accepted.Load())
+	if accepted.Load() != 2 {
+		t.Fatalf("SOCKS connections = %d, want 2 (one failed attempt, one reused successful one)", accepted.Load())
+	}
+	if len(fallbackRemotes) != 2 || fallbackRemotes[0] != fallbackRemotes[1] {
+		t.Fatalf("fallback's second request did not reuse its tunnel: %v", fallbackRemotes)
 	}
 
 	var payload map[string]any
