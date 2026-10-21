@@ -31,8 +31,16 @@ type Checker struct {
 // only a PoolChecker additionally satisfies probe.BatchChecker, which
 // is all the scheduler needs to tell them apart.
 func NewChecker(m Module) probe.Checker {
+	return NewCheckerWithLimits(m, PoolLimits{})
+}
+
+// NewCheckerWithLimits is NewChecker with node-level caps applied to a
+// pooled module's own concurrency settings. Non-pooled modules ignore
+// limits; their check concurrency is already bounded by the agent's
+// own --concurrency semaphore.
+func NewCheckerWithLimits(m Module, limits PoolLimits) probe.Checker {
 	if m.Pool != nil {
-		return newPoolChecker(m)
+		return newPoolChecker(m, limits)
 	}
 	return Checker{m: m}
 }

@@ -122,6 +122,16 @@ agent flags:
                           (http://, https://, socks5://, socks5h://)
   --scheduler-tick duration    how often to check cached probes for due-ness (default "2s")
   --concurrency int       max probes running at once (default 64)
+  --pool-concurrency int  cap a pooled module's own test_concurrency
+                          (0 = the module's value)
+  --pool-max-jobs int     cap a pooled module's max_jobs_per_instance
+                          (0 = the module's value)
+  --domain-strategy value  force outbound DNS resolution onto one address
+                          family: as_is | use_ipv4 | use_ip | use_ipv6
+                          (default: leave module configs unchanged)
+  --spool-dir path        persist results to disk before posting and replay
+                          them after an API outage (default: disabled)
+  --spool-max-bytes n     cap the result spool (default 16 MiB)
   --destination-interval duration  min spacing between checks against the
                           same real destination, node-wide (default "10s")
   --destination-max-wait duration  longest a check will wait for a busy
@@ -250,6 +260,11 @@ func runAgent(args []string) error {
 		apiProxy            string
 		schedulerTick       time.Duration
 		concurrency         int
+		poolConcurrency     int
+		poolMaxJobs         int
+		domainStrategy      string
+		spoolDir            string
+		spoolMaxBytes       int64
 		destinationInterval time.Duration
 		destinationMaxWait  time.Duration
 		modulesDir          string
@@ -262,6 +277,11 @@ func runAgent(args []string) error {
 	fs.StringVar(&apiProxy, "api-proxy", "", "")
 	fs.DurationVar(&schedulerTick, "scheduler-tick", 2*time.Second, "")
 	fs.IntVar(&concurrency, "concurrency", 64, "")
+	fs.IntVar(&poolConcurrency, "pool-concurrency", 0, "")
+	fs.IntVar(&poolMaxJobs, "pool-max-jobs", 0, "")
+	fs.StringVar(&domainStrategy, "domain-strategy", "", "")
+	fs.StringVar(&spoolDir, "spool-dir", "", "")
+	fs.Int64Var(&spoolMaxBytes, "spool-max-bytes", 0, "")
 	fs.DurationVar(&destinationInterval, "destination-interval", 10*time.Second, "")
 	fs.DurationVar(&destinationMaxWait, "destination-max-wait", 30*time.Second, "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
@@ -286,6 +306,11 @@ func runAgent(args []string) error {
 		Version:             version,
 		SchedulerTick:       schedulerTick,
 		Concurrency:         concurrency,
+		PoolConcurrency:     poolConcurrency,
+		PoolMaxJobs:         poolMaxJobs,
+		DomainStrategy:      domainStrategy,
+		SpoolDir:            spoolDir,
+		SpoolMaxBytes:       spoolMaxBytes,
 		DestinationInterval: destinationInterval,
 		DestinationMaxWait:  destinationMaxWait,
 		ModulesDir:          modulesDir,

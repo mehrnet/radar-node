@@ -39,7 +39,7 @@ func TestBuildConfigRemapsInboundsAndTagsRoutes(t *testing.T) {
 		}}}
 	]`)
 
-	merged := buildConfig(jobs)
+	merged := buildConfig(jobs, "")
 	if len(merged.Inbounds) != 2 {
 		t.Fatalf("inbounds = %d, want 2", len(merged.Inbounds))
 	}
@@ -72,7 +72,7 @@ func TestBuildConfigSkipsXHTTPMuxAndFragmentsReality(t *testing.T) {
 		}}}
 	]`)
 
-	merged := buildConfig(jobs)
+	merged := buildConfig(jobs, "")
 	xhttp := findOutbound(merged.Outbounds, "job-0-out-0")
 	if xhttp == nil {
 		t.Fatalf("missing xhttp outbound: %+v", merged.Outbounds)
@@ -106,6 +106,66 @@ func TestBuildConfigSkipsXHTTPMuxAndFragmentsReality(t *testing.T) {
 	}
 }
 
+func TestBuildConfigAppliesDomainStrategyEverywhere(t *testing.T) {
+	jobs := decodeJobs(t, `[
+		{"index":0,"alloc_port":30101,"params":{"socks_port":10808,"config":{
+			"inbounds":[{"port":10808,"protocol":"socks"}],
+			"outbounds":[{"protocol":"vless","streamSettings":{"network":"xhttp","security":"tls"}}]
+		}}},
+		{"index":1,"alloc_port":30102,"params":{"socks_port":10808,"config":{
+			"inbounds":[{"port":10808,"protocol":"socks"}],
+			"outbounds":[{"protocol":"vless","streamSettings":{"network":"tcp","security":"reality","sockopt":{"mark":1}}}]
+		}}}
+	]`)
+
+	merged := buildConfig(jobs, "UseIPv4")
+	for _, tag := range []string{"job-0-out-0", "job-1-out-0", "job-1-frag"} {
+		out := findOutbound(merged.Outbounds, tag)
+		if out == nil {
+			t.Fatalf("missing outbound %s: %+v", tag, merged.Outbounds)
+		}
+		stream, _ := out["streamSettings"].(map[string]any)
+		sockopt, _ := stream["sockopt"].(map[string]any)
+		if sockopt["domainStrategy"] != "UseIPv4" {
+			t.Fatalf("%s domainStrategy = %v, want UseIPv4 (outbound %+v)", tag, sockopt["domainStrategy"], out)
+		}
+	}
+	realitySockopt := findOutbound(merged.Outbounds, "job-1-out-0")["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
+	if realitySockopt["dialerProxy"] != "job-1-frag" || realitySockopt["mark"] != float64(1) {
+		t.Fatalf("existing sockopt keys lost: %+v", realitySockopt)
+	}
+}
+
+func TestDomainStrategyFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+		err   bool
+	}{
+		{"", "", false},
+		{"use_ipv4", "UseIPv4", false},
+		{"UseIPv4", "UseIPv4", false},
+		{"use_ip", "UseIP", false},
+		{"use_ipv6", "UseIPv6", false},
+		{"as_is", "AsIs", false},
+		{"nonsense", "", true},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("RADAR_DOMAIN_STRATEGY", tc.value)
+			got, err := domainStrategyFromEnv()
+			if tc.err {
+				if err == nil {
+					t.Fatalf("expected an error for %q", tc.value)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("domainStrategyFromEnv(%q) = %q, %v; want %q", tc.value, got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildConfigSkipsMalformedJobs(t *testing.T) {
 	jobs := decodeJobs(t, `[
 		{"index":0,"alloc_port":30201,"params":{"socks_port":10808,"config":{"inbounds":[],"outbounds":[{"protocol":"vless"}]}}},
@@ -114,7 +174,7 @@ func TestBuildConfigSkipsMalformedJobs(t *testing.T) {
 		{"index":3,"alloc_port":30204,"params":{"socks_port":10808,"config":{"inbounds":[{"port":10808}],"outbounds":[{"protocol":"vless"}]}}}
 	]`)
 
-	merged := buildConfig(jobs)
+	merged := buildConfig(jobs, "")
 	if len(merged.Inbounds) != 1 || merged.Inbounds[0]["tag"] != "job-3-in" {
 		t.Fatalf("only the well-formed job should survive: %+v", merged.Inbounds)
 	}

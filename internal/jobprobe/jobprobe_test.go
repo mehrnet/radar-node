@@ -479,3 +479,24 @@ func TestRunFailsWhenEveryTargetReturnsAnErrorStatus(t *testing.T) {
 		t.Fatalf("error should name both bad statuses, got %v", err)
 	}
 }
+
+func TestDialNetworkFollowsDomainStrategy(t *testing.T) {
+	for _, tc := range []struct {
+		strategy string
+		want     string
+	}{
+		{"", "tcp"},
+		{"UseIPv4", "tcp4"},
+		{"use_ipv4", "tcp4"},
+		{"UseIPv6", "tcp6"},
+		{"use_ipv6", "tcp6"},
+		{"UseIP", "tcp"},
+	} {
+		t.Run(tc.strategy, func(t *testing.T) {
+			t.Setenv("RADAR_DOMAIN_STRATEGY", tc.strategy)
+			if got := dialNetwork(); got != tc.want {
+				t.Fatalf("dialNetwork() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

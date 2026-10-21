@@ -121,11 +121,26 @@ func extractEndpoint(paramsPath string) (endpoint, bool) {
 	return endpoint{}, false
 }
 
+// dialNetwork follows the agent's node-level address-family choice for
+// the diagnostic raw dial. The through-tunnel target is resolved by
+// xray itself, which poolconfig already constrains with the same
+// setting.
+func dialNetwork() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RADAR_DOMAIN_STRATEGY"))) {
+	case "useipv4", "use_ipv4":
+		return "tcp4"
+	case "useipv6", "use_ipv6":
+		return "tcp6"
+	default:
+		return "tcp"
+	}
+}
+
 // dialTCPDelay makes the best-effort raw dial and returns its
 // milliseconds, or nil for any failure -- never fails the run.
 func dialTCPDelay(ep endpoint, timeout time.Duration) *float64 {
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ep.Address, fmt.Sprint(ep.Port)), timeout)
+	conn, err := net.DialTimeout(dialNetwork(), net.JoinHostPort(ep.Address, fmt.Sprint(ep.Port)), timeout)
 	if err != nil {
 		return nil
 	}

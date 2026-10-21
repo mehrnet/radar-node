@@ -50,24 +50,40 @@ type Registry map[string]entry
 // action-based module -- in-process, no subprocess overhead, exactly
 // like the old hardcoded native checks.
 func Default() (Registry, error) {
+	return DefaultWithLimits(module.PoolLimits{})
+}
+
+// DefaultWithLimits is Default with node-level caps applied to every
+// pooled module loaded, including modules loaded later through
+// LoadModulesWithLimits. The `probe` command keeps using Default(), so
+// a one-off CLI probe is never artificially capped.
+func DefaultWithLimits(limits module.PoolLimits) (Registry, error) {
 	r := Registry{}
-	if err := r.loadFS(DefaultFiles); err != nil {
+	if err := r.loadFSWithLimits(DefaultFiles, limits); err != nil {
 		return nil, fmt.Errorf("load embedded default modules: %w", err)
 	}
 	return r, nil
 }
 
 func (r Registry) add(m module.Module) {
-	r[m.Name] = entry{checker: module.NewChecker(m), rawYAML: m.RawYAML, fileHash: m.FileHash, manifest: m.ToManifest(), version: m.Version, url: m.URL}
+	r.addWithLimits(m, module.PoolLimits{})
+}
+
+func (r Registry) addWithLimits(m module.Module, limits module.PoolLimits) {
+	r[m.Name] = entry{checker: module.NewCheckerWithLimits(m, limits), rawYAML: m.RawYAML, fileHash: m.FileHash, manifest: m.ToManifest(), version: m.Version, url: m.URL}
 }
 
 func (r Registry) loadFS(fsys fs.FS) error {
+	return r.loadFSWithLimits(fsys, module.PoolLimits{})
+}
+
+func (r Registry) loadFSWithLimits(fsys fs.FS, limits module.PoolLimits) error {
 	modules, err := module.LoadFS(fsys)
 	if err != nil {
 		return err
 	}
 	for _, m := range modules {
-		r.add(m)
+		r.addWithLimits(m, limits)
 	}
 	return nil
 }
@@ -83,6 +99,12 @@ func (r Registry) loadFS(fsys fs.FS) error {
 // no-op, not an error, so --modules-dir is optional everywhere it's
 // exposed as a flag.
 func (r Registry) LoadModules(dir, toolsDir string) error {
+	return r.LoadModulesWithLimits(dir, toolsDir, module.PoolLimits{})
+}
+
+// LoadModulesWithLimits is LoadModules with the same node-level pool
+// caps DefaultWithLimits applies to the embedded modules.
+func (r Registry) LoadModulesWithLimits(dir, toolsDir string, limits module.PoolLimits) error {
 	if dir == "" {
 		return nil
 	}
@@ -91,7 +113,7 @@ func (r Registry) LoadModules(dir, toolsDir string) error {
 		return fmt.Errorf("load modules from %s: %w", dir, err)
 	}
 	for _, m := range modules {
-		r.add(m.ResolveDirPlaceholders(dir, toolsDir))
+		r.addWithLimits(m.ResolveDirPlaceholders(dir, toolsDir), limits)
 	}
 	return nil
 }

@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // Run is the `radar-node poolconfig` entry point. Deliberately exits
@@ -62,7 +63,11 @@ func Run(args []string, _ io.Writer) error {
 		return fmt.Errorf("poolconfig: parse jobs: %w", err)
 	}
 
-	encoded, err := json.Marshal(buildConfig(jobs))
+	strategy, err := domainStrategyFromEnv()
+	if err != nil {
+		return fmt.Errorf("poolconfig: %w", err)
+	}
+	encoded, err := json.Marshal(buildConfig(jobs, strategy))
 	if err != nil {
 		return fmt.Errorf("poolconfig: encode config: %w", err)
 	}
@@ -94,7 +99,50 @@ type routing struct {
 	Rules []map[string]any `json:"rules"`
 }
 
-func buildConfig(jobs []job) mergedConfig {
+// domainStrategyFromEnv reads the agent's node-level address-family
+// choice (RADAR_DOMAIN_STRATEGY, set from --domain-strategy). Empty
+// means "leave every outbound's own setting alone".
+func domainStrategyFromEnv() (string, error) {
+	value := strings.TrimSpace(os.Getenv("RADAR_DOMAIN_STRATEGY"))
+	switch strings.ToLower(value) {
+	case "":
+		return "", nil
+	case "as_is", "asis":
+		return "AsIs", nil
+	case "use_ipv4", "useipv4":
+		return "UseIPv4", nil
+	case "use_ip", "useip":
+		return "UseIP", nil
+	case "use_ipv6", "useipv6":
+		return "UseIPv6", nil
+	default:
+		return "", fmt.Errorf("unknown RADAR_DOMAIN_STRATEGY %q", value)
+	}
+}
+
+// applyDomainStrategy forces an outbound's server/target resolution
+// onto the node-level address family. On a cellular vantage with a
+// broken or partial IPv6 path, an AAAA answer must not make a healthy
+// proxy look dead. Existing sockopt keys (dialerProxy, etc.) are
+// preserved.
+func applyDomainStrategy(outbound map[string]any, strategy string) {
+	if strategy == "" {
+		return
+	}
+	stream, _ := outbound["streamSettings"].(map[string]any)
+	if stream == nil {
+		stream = map[string]any{}
+	}
+	sockopt, _ := stream["sockopt"].(map[string]any)
+	if sockopt == nil {
+		sockopt = map[string]any{}
+	}
+	sockopt["domainStrategy"] = strategy
+	stream["sockopt"] = sockopt
+	outbound["streamSettings"] = stream
+}
+
+func buildConfig(jobs []job, domainStrategy string) mergedConfig {
 	merged := mergedConfig{
 		Inbounds:  []map[string]any{},
 		Outbounds: []map[string]any{},
@@ -118,6 +166,7 @@ func buildConfig(jobs []job) mergedConfig {
 		for i, outbound := range j.Params.Config.Outbounds {
 			tag := fmt.Sprintf("job-%d-out-%d", j.Index, i)
 			outbound["tag"] = tag
+			applyDomainStrategy(outbound, domainStrategy)
 			if primaryTag == "" {
 				primaryTag = tag
 				stream, _ := outbound["streamSettings"].(map[string]any)
@@ -136,7 +185,7 @@ func buildConfig(jobs []job) mergedConfig {
 					sockopt["dialerProxy"] = fragTag
 					stream["sockopt"] = sockopt
 					outbound["streamSettings"] = stream
-					merged.Outbounds = append(merged.Outbounds, map[string]any{
+					frag := map[string]any{
 						"tag":      fragTag,
 						"protocol": "freedom",
 						"settings": map[string]any{
@@ -146,7 +195,9 @@ func buildConfig(jobs []job) mergedConfig {
 								"interval": "10-20",
 							},
 						},
-					})
+					}
+					applyDomainStrategy(frag, domainStrategy)
+					merged.Outbounds = append(merged.Outbounds, frag)
 				}
 			}
 			merged.Outbounds = append(merged.Outbounds, outbound)

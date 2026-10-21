@@ -42,6 +42,29 @@ type Step struct {
 	Timeout time.Duration `yaml:"timeout,omitempty"`
 }
 
+// PoolLimits lowers a pooled module's own concurrency and batch-size
+// settings for a resource-constrained node. A zero field means "use
+// the module's own value"; a positive field only ever lowers it, never
+// raises it.
+type PoolLimits struct {
+	TestConcurrency    int
+	MaxJobsPerInstance int
+}
+
+func (l PoolLimits) testConcurrency(moduleValue int) int {
+	if l.TestConcurrency > 0 && l.TestConcurrency < moduleValue {
+		return l.TestConcurrency
+	}
+	return moduleValue
+}
+
+func (l PoolLimits) maxJobsPerInstance(moduleValue int) int {
+	if l.MaxJobsPerInstance > 0 && l.MaxJobsPerInstance < moduleValue {
+		return l.MaxJobsPerInstance
+	}
+	return moduleValue
+}
+
 // PoolSpec turns a module into a pooled/batched prober instead of one
 // subprocess per check: BuildConfig/Start/Stop replace Prepare/
 // Teardown as the *instance*-level lifecycle (one engine process

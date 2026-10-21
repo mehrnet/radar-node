@@ -58,7 +58,8 @@ import (
 // declares one) or by SIGKILL on teardown. Close() stops every warm
 // engine and is what the agent's shutdown path calls.
 type PoolChecker struct {
-	m Module
+	m      Module
+	limits PoolLimits
 
 	mu    sync.Mutex
 	slots map[int]*warmInstance
@@ -83,11 +84,19 @@ type warmInstance struct {
 	stopped    bool
 }
 
-func newPoolChecker(m Module) *PoolChecker {
-	return &PoolChecker{m: m, slots: map[int]*warmInstance{}, ports: map[string]int{}}
+func newPoolChecker(m Module, limits PoolLimits) *PoolChecker {
+	return &PoolChecker{m: m, limits: limits, slots: map[int]*warmInstance{}, ports: map[string]int{}}
 }
 
 func (c *PoolChecker) Type() string { return c.m.Name }
+
+func (c *PoolChecker) testConcurrency() int {
+	return c.limits.testConcurrency(c.m.Pool.TestConcurrency)
+}
+
+func (c *PoolChecker) maxJobsPerInstance() int {
+	return c.limits.maxJobsPerInstance(c.m.Pool.MaxJobsPerInstance)
+}
 
 // Check runs opts as a batch of one -- through the same warm-instance
 // machinery a real batch goes through, so even a single triggered
@@ -155,7 +164,7 @@ func (c *PoolChecker) CheckBatch(ctx context.Context, opts []probe.Options) []pr
 		live[p.key] = true
 	}
 
-	maxJobs := c.m.Pool.MaxJobsPerInstance
+	maxJobs := c.maxJobsPerInstance()
 	for start, slot := 0, 0; start < len(pending); start, slot = start+maxJobs, slot+1 {
 		end := start + maxJobs
 		if end > len(pending) {
@@ -566,7 +575,7 @@ type jobJSON struct {
 // every job in the instance identically, since none of them ever got
 // tested; a per-job failure during testing only fails that one job.
 func (c *PoolChecker) testJobs(ctx context.Context, jobs []poolJob, out []probe.Result) {
-	sem := make(chan struct{}, c.m.Pool.TestConcurrency)
+	sem := make(chan struct{}, c.testConcurrency())
 	var wg sync.WaitGroup
 	for _, j := range jobs {
 		wg.Add(1)

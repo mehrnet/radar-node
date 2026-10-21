@@ -26,6 +26,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/apiclient"
 	"github.com/mehrnet/radar-node/internal/destgate"
 	"github.com/mehrnet/radar-node/internal/journal"
+	"github.com/mehrnet/radar-node/internal/module"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
 	"github.com/mehrnet/radar-node/internal/wire"
@@ -63,6 +64,22 @@ type Config struct {
 	// all.
 	SchedulerTick time.Duration
 	Concurrency   int
+	// PoolConcurrency and PoolMaxJobs lower a pooled module's own
+	// test_concurrency / max_jobs_per_instance for resource-constrained
+	// nodes. Zero keeps the module's value.
+	PoolConcurrency int
+	PoolMaxJobs     int
+	// DomainStrategy is the node-level address-family choice exported
+	// to module child processes as RADAR_DOMAIN_STRATEGY (e.g. UseIPv4
+	// on a cellular vantage with a broken IPv6 path). Empty leaves each
+	// outbound's own setting unchanged.
+	DomainStrategy string
+	// SpoolDir enables durable result delivery: every batch is written
+	// here before it is POSTed and replayed after an API failure. Empty
+	// keeps the old fire-and-forget behavior. SpoolMaxBytes bounds the
+	// directory's total size; zero uses the default.
+	SpoolDir      string
+	SpoolMaxBytes int64
 	// DestinationInterval is the minimum spacing internal/destgate
 	// enforces between two connection attempts aimed at the same real
 	// destination, node-wide, regardless of which probe/group/
@@ -105,6 +122,11 @@ type agent struct {
 	cache       *probeCache
 	clock       *clockSync
 	concurrency int
+	spool       *resultSpool
+	// Scheduler-owned retry state for a failed spool drain. Only the
+	// scheduler goroutine touches these.
+	spoolBackoff     time.Duration
+	spoolNextAttempt time.Time
 	// node_status starts optimistic; the first heartbeat/results
 	// response corrects it. An atomic.Value rather than a mutex so the
 	// scheduler can gate execution on it with no lock contention.
@@ -124,16 +146,39 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.Concurrency <= 0 {
 		return fmt.Errorf("--concurrency must be positive")
 	}
+	if cfg.PoolConcurrency < 0 {
+		return fmt.Errorf("--pool-concurrency must not be negative")
+	}
+	if cfg.PoolMaxJobs < 0 {
+		return fmt.Errorf("--pool-max-jobs must not be negative")
+	}
+	if cfg.SpoolMaxBytes < 0 {
+		return fmt.Errorf("--spool-max-bytes must not be negative")
+	}
+	spool, err := newResultSpool(cfg.SpoolDir, cfg.SpoolMaxBytes)
+	if err != nil {
+		return err
+	}
+	domainStrategy, err := normalizeDomainStrategy(cfg.DomainStrategy)
+	if err != nil {
+		return err
+	}
+	if domainStrategy != "" {
+		if err := os.Setenv("RADAR_DOMAIN_STRATEGY", domainStrategy); err != nil {
+			return fmt.Errorf("set RADAR_DOMAIN_STRATEGY: %w", err)
+		}
+	}
 
 	client, err := apiclient.New(cfg.APIURL, cfg.APIKey, cfg.ProxyURL)
 	if err != nil {
 		return err
 	}
-	reg, err := registry.Default()
+	limits := module.PoolLimits{TestConcurrency: cfg.PoolConcurrency, MaxJobsPerInstance: cfg.PoolMaxJobs}
+	reg, err := registry.DefaultWithLimits(limits)
 	if err != nil {
 		return err
 	}
-	if err := reg.LoadModules(cfg.ModulesDir, cfg.ToolsDir); err != nil {
+	if err := reg.LoadModulesWithLimits(cfg.ModulesDir, cfg.ToolsDir, limits); err != nil {
 		return err
 	}
 	destgate.Configure(cfg.DestinationInterval, cfg.DestinationMaxWait)
@@ -153,6 +198,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cache:       newProbeCache(),
 		clock:       &clockSync{},
 		concurrency: cfg.Concurrency,
+		spool:       spool,
 	}
 	a.status.Store(wire.NodeStatusActive)
 
@@ -614,16 +660,20 @@ func (a *agent) runDueProbes(ctx context.Context) {
 	due := a.cache.dueProbes(now)
 	triggers := a.cache.drainPendingTriggers()
 	if len(due) == 0 && len(triggers) == 0 {
+		if _, _, _, err := a.drainSpool(ctx); err != nil {
+			journal.Error("agent", "spool replay failed", "err", err)
+		}
 		return
 	}
 
 	// Claim immediately, before executing anything -- so a fast
 	// subsequent tick can't re-select the same probe while this run is
-	// still in flight. If reporting later fails, this occurrence is
-	// simply lost (an interval probe is due again next interval); that
-	// is the accepted failure mode, not silent double-execution.
-	// Triggers don't touch lastRunAt at all -- they're independent of
-	// due-ness bookkeeping, see applyTriggeredEvents.
+	// still in flight. With a spool enabled the result is durable even
+	// if reporting fails; without one, a failed post still loses this
+	// occurrence (an interval probe is due again next interval), which
+	// is the original accepted failure mode. Triggers don't touch
+	// lastRunAt at all -- they're independent of due-ness bookkeeping,
+	// see applyTriggeredEvents.
 	for _, pr := range due {
 		a.cache.markRun(pr.ID, now)
 	}
@@ -633,22 +683,49 @@ func (a *agent) runDueProbes(ctx context.Context) {
 	if len(results) == 0 {
 		return
 	}
+	a.reportResults(ctx, due, triggers, results)
+}
 
-	reportCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	resp, err := a.client.PostResults(reportCtx, wire.ResultsRequest{
-		NodeID:  a.nodeID,
-		BatchID: newBatchID(),
-		SentAt:  time.Now().UTC().Format(time.RFC3339Nano),
-		Results: results,
-	})
+// reportResults posts one tick's results, going through the durable
+// spool when one is configured. A spool is written before the network
+// attempt, so an API outage or process exit between execution and
+// delivery cannot lose the batch; replay is deduplicated server-side.
+func (a *agent) reportResults(ctx context.Context, due []wire.ProbeSnapshot, triggers []pendingTrigger, results []wire.Result) {
+	sentAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if a.spool == nil {
+		resp, err := a.postResults(ctx, results, sentAt)
+		if err != nil {
+			journal.Error("agent", "post results failed", "err", err)
+			return
+		}
+		journal.Info("agent", "tick complete",
+			"probes_run", len(due), "triggered", len(triggers), "results", len(results),
+			"accepted", resp.Accepted, "rejected", resp.Rejected)
+		return
+	}
+	if _, err := a.spool.enqueue(results, sentAt); err != nil {
+		// A broken spool must not stop a working network path: try the
+		// direct post, but make the durability failure loud.
+		journal.Error("agent", "spool results failed; posting directly", "err", err)
+		resp, postErr := a.postResults(ctx, results, sentAt)
+		if postErr != nil {
+			journal.Error("agent", "post results failed", "err", postErr)
+			return
+		}
+		journal.Info("agent", "tick complete",
+			"probes_run", len(due), "triggered", len(triggers), "results", len(results),
+			"accepted", resp.Accepted, "rejected", resp.Rejected)
+		return
+	}
+	delivered, accepted, rejected, err := a.drainSpool(ctx)
 	if err != nil {
-		journal.Error("agent", "post results failed", "err", err)
+		journal.Error("agent", "deliver results failed (left in spool)", "err", err,
+			"probes_run", len(due), "triggered", len(triggers), "results", len(results), "delivered", delivered)
 		return
 	}
 	journal.Info("agent", "tick complete",
 		"probes_run", len(due), "triggered", len(triggers), "results", len(results),
-		"accepted", resp.Accepted, "rejected", resp.Rejected)
+		"delivered", delivered, "accepted", accepted, "rejected", rejected)
 }
 
 // checkJob is one (probe, seq) check due to run this tick, before
