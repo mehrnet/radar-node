@@ -260,17 +260,18 @@ func TestRunReportsNullTCPDelayWithoutEndpoint(t *testing.T) {
 
 func TestTimeoutFractions(t *testing.T) {
 	// 5000ms: 250ms dial (concurrent), 2250ms for the probe's own
-	// target, fallbacks may run until 3500ms, 4750ms overall.
+	// target, fallbacks may run until 3000ms, 4250ms overall -- the
+	// 15% margin at the end is for scheduling delay under load.
 	if got := durationFraction(5*time.Second, dialFraction); got != 250*time.Millisecond {
 		t.Fatalf("dial fraction: %v", got)
 	}
 	if got := durationFraction(5*time.Second, primaryFraction); got != 2250*time.Millisecond {
 		t.Fatalf("primary fraction: %v", got)
 	}
-	if got := durationFraction(5*time.Second, fallbackPhaseEndFraction); got != 3500*time.Millisecond {
+	if got := durationFraction(5*time.Second, fallbackPhaseEndFraction); got != 3000*time.Millisecond {
 		t.Fatalf("fallback phase end: %v", got)
 	}
-	if got := durationFraction(5*time.Second, totalFraction); got != 4750*time.Millisecond {
+	if got := durationFraction(5*time.Second, totalFraction); got != 4250*time.Millisecond {
 		t.Fatalf("total fraction: %v", got)
 	}
 }

@@ -30,8 +30,12 @@
 // attempts share whatever remains up to fallbackPhaseEndFraction,
 // divided dynamically so a fast failure leaves more time for the next
 // target, and the second request gets the rest -- all capped at
-// totalFraction to leave process-spawn margin before the executor's
-// own timeout kills the job.
+// totalFraction to leave real margin before the executor's own timeout
+// SIGKILLs the job. Production observed "signal: killed" at a 95% cap
+// on a node running many concurrent jobs: scheduling delay alone ate
+// the remaining 5%, so the cap is deliberately back at 85% (the old
+// script's own 20%-margin reasoning, adjusted for jobprobe's smaller
+// spawn overhead).
 package jobprobe
 
 import (
@@ -54,8 +58,8 @@ import (
 const (
 	dialFraction             = 0.05
 	primaryFraction          = 0.45
-	fallbackPhaseEndFraction = 0.70
-	totalFraction            = 0.95
+	fallbackPhaseEndFraction = 0.60
+	totalFraction            = 0.85
 )
 
 // Neutral, tiny-response targets used when the probe's configured
