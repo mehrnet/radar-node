@@ -206,6 +206,12 @@ func TestRunEndToEndThroughSOCKS(t *testing.T) {
 	if payload["http_code"].(float64) != 200 {
 		t.Fatalf("http_code = %v", payload["http_code"])
 	}
+	if payload["target_url"] != origin.URL+"/probe" {
+		t.Fatalf("target_url = %v", payload["target_url"])
+	}
+	if payload["target_attempts"].(float64) != 1 {
+		t.Fatalf("target_attempts = %v", payload["target_attempts"])
+	}
 	for _, key := range []string{"latency_ms", "http_delay_ms", "real_delay_ms", "tcp_delay_ms"} {
 		v, ok := payload[key].(float64)
 		if !ok {
@@ -252,14 +258,20 @@ func TestRunReportsNullTCPDelayWithoutEndpoint(t *testing.T) {
 	}
 }
 
-func TestTimeoutFractionsMatchTheScript(t *testing.T) {
-	// 5000ms * 0.15 = 750ms dial; * 0.325 = 1625ms per request --
-	// the 0.8 total with 0.2 margin xray-run.sh -8 documents.
-	if got := time.Duration(float64(5000*time.Millisecond) * dialFraction); got != 750*time.Millisecond {
+func TestTimeoutFractions(t *testing.T) {
+	// 5000ms: 250ms dial (concurrent), 2250ms for the probe's own
+	// target, fallbacks may run until 3500ms, 4750ms overall.
+	if got := durationFraction(5*time.Second, dialFraction); got != 250*time.Millisecond {
 		t.Fatalf("dial fraction: %v", got)
 	}
-	if got := time.Duration(float64(5000*time.Millisecond) * requestFraction); got != 1625*time.Millisecond {
-		t.Fatalf("request fraction: %v", got)
+	if got := durationFraction(5*time.Second, primaryFraction); got != 2250*time.Millisecond {
+		t.Fatalf("primary fraction: %v", got)
+	}
+	if got := durationFraction(5*time.Second, fallbackPhaseEndFraction); got != 3500*time.Millisecond {
+		t.Fatalf("fallback phase end: %v", got)
+	}
+	if got := durationFraction(5*time.Second, totalFraction); got != 4750*time.Millisecond {
+		t.Fatalf("total fraction: %v", got)
 	}
 }
 
@@ -345,9 +357,114 @@ func TestFirstRequestTimesOutAgainstAWedgedEngine(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected failure against a wedged engine")
 	}
-	// 2000ms * 0.325 = 650ms budget; allow generous slack for spawn
-	// and scheduling, but nothing like the pre-fix "forever".
+	// 2000ms * 0.45 = 900ms for the first target, then a bounded
+	// fallback phase; allow generous slack for spawn and scheduling,
+	// but nothing like the pre-fix "forever".
 	if elapsed > 5*time.Second {
-		t.Fatalf("first request took %v against a wedged engine -- budget is 650ms", elapsed)
+		t.Fatalf("first request took %v against a wedged engine -- primary budget is 900ms", elapsed)
+	}
+}
+
+func TestRunFallsBackWhenThePrimaryTargetFails(t *testing.T) {
+	socksAddr, accepted := socksServer(t)
+	var primaryHits, fallbackHits int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryHits++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer fallback.Close()
+
+	params := writeParams(t, `{"config":{"outbounds":[{"protocol":"freedom"}]}}`)
+	var out strings.Builder
+	if err := Run([]string{
+		"--socks-port", mustPort(t, socksAddr),
+		"--target", primary.URL + "/probe",
+		"--fallback-targets", fallback.URL + "/fallback",
+		"--timeout-ms", "5000",
+		"--params-file", params,
+	}, &out); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if primaryHits != 1 {
+		t.Fatalf("primary hits = %d, want 1", primaryHits)
+	}
+	if fallbackHits != 2 {
+		t.Fatalf("fallback hits = %d, want 2 (first + second request)", fallbackHits)
+	}
+	if accepted.Load() != 3 {
+		t.Fatalf("SOCKS connections = %d, want 3", accepted.Load())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(out.String()), &payload); err != nil {
+		t.Fatalf("output is not valid JSON: %q (%v)", out.String(), err)
+	}
+	if payload["target_url"] != fallback.URL+"/fallback" {
+		t.Fatalf("target_url = %v", payload["target_url"])
+	}
+	if payload["target_attempts"].(float64) != 2 {
+		t.Fatalf("target_attempts = %v", payload["target_attempts"])
+	}
+	if payload["http_code"].(float64) != 204 {
+		t.Fatalf("http_code = %v", payload["http_code"])
+	}
+}
+
+func TestRunAccepts3xx(t *testing.T) {
+	socksAddr, _ := socksServer(t)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/elsewhere")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer origin.Close()
+
+	params := writeParams(t, `{"config":{"outbounds":[{"protocol":"freedom"}]}}`)
+	var out strings.Builder
+	if err := Run([]string{
+		"--socks-port", mustPort(t, socksAddr),
+		"--target", origin.URL,
+		"--timeout-ms", "5000",
+		"--params-file", params,
+	}, &out); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), `"http_code": 302`) {
+		t.Fatalf("expected 302 through the tunnel, got %q", out.String())
+	}
+}
+
+func TestRunFailsWhenEveryTargetReturnsAnErrorStatus(t *testing.T) {
+	socksAddr, _ := socksServer(t)
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer bad.Close()
+	alsoBad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer alsoBad.Close()
+
+	params := writeParams(t, `{"config":{"outbounds":[{"protocol":"freedom"}]}}`)
+	var out strings.Builder
+	err := Run([]string{
+		"--socks-port", mustPort(t, socksAddr),
+		"--target", bad.URL,
+		"--fallback-targets", alsoBad.URL,
+		"--timeout-ms", "2000",
+		"--params-file", params,
+	}, &out)
+	if err == nil {
+		t.Fatalf("expected failure when every target answers an error status, got %q", out.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a failed run must emit no partial JSON, got %q", out.String())
+	}
+	if !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "HTTP 502") {
+		t.Fatalf("error should name both bad statuses, got %v", err)
 	}
 }

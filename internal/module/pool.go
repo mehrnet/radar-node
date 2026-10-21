@@ -113,6 +113,7 @@ func (c *PoolChecker) CheckBatch(ctx context.Context, opts []probe.Options) []pr
 
 	pending := make([]pendingJob, 0, len(opts))
 	for i, o := range opts {
+		o.Timeout = c.m.withMinTimeout(o.Timeout)
 		if err := validateRequest(c.m.Request, o.Params); err != nil {
 			results[i] = probe.Invalid(c.Type(), o.Target, o.Seq, err.Error())
 			continue

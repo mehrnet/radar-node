@@ -63,6 +63,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		return r
 	}
 
+	opts.Timeout = c.m.withMinTimeout(opts.Timeout)
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 

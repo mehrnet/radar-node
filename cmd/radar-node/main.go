@@ -21,6 +21,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/jobprobe"
 	"github.com/mehrnet/radar-node/internal/moduleinstall"
 	"github.com/mehrnet/radar-node/internal/output"
+	"github.com/mehrnet/radar-node/internal/poolconfig"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
 )
@@ -64,6 +65,11 @@ func main() {
 		// its existence and fall back to their old chain on binaries
 		// that predate it.
 		err = runJobProbe(os.Args[2:])
+	case "poolconfig":
+		// Module-script helper, not for humans: builds a pooled
+		// module's merged engine config without requiring python3 (see
+		// internal/poolconfig's own doc comment).
+		err = poolconfig.Run(os.Args[2:], os.Stdout)
 	case "version", "-v", "--version":
 		fmt.Println("radar-node", version)
 		return
@@ -94,6 +100,8 @@ Usage:
   radar-node agent [flags]
   radar-node init [-C path]
   radar-node jobprobe [flags]   (module-script helper, not for direct use)
+  radar-node poolconfig --jobs <path> --out <path>
+                                (pooled module config builder, not for direct use)
 
 probe flags:
   --type string       tcp | udp | dns | icmp | http | system | <module name> (default "tcp")

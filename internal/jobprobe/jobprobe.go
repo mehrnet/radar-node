@@ -10,16 +10,28 @@
 // `radar-node jobprobe ...` and fall back to their old chain on nodes
 // whose radar-node predates the subcommand.
 //
-// The measurement contract is xray-run.sh's own, reproduced exactly:
-// three figures per check, matching 3x-ui's three-way split --
-// tcp_delay_ms (raw dial to the proxy server, best-effort), and
-// real_delay_ms / http_delay_ms (first and second request through the
-// job's SOCKS inbound, the second riding the mux-warmed connection;
-// http_delay_ms is also this module's latency_ms). Timeout budgeting
-// follows the same 0.15 + 0.325 + 0.325 = 0.8 split of timeout_ms the
-// script documents -- the remaining 0.2 is margin, now process-spawn
-// margin that mostly no longer exists but is kept so timing semantics
-// are byte-identical to the script being replaced.
+// The measurement contract is xray-run.sh's own: three figures per
+// check, matching 3x-ui's three-way split -- tcp_delay_ms (raw dial to
+// the proxy server, best-effort), and real_delay_ms / http_delay_ms
+// (first and second request through the job's SOCKS inbound;
+// http_delay_ms is also this module's latency_ms).
+//
+// A check tries the probe's own target first and, if that attempt
+// fails at the transport level or returns a status outside 2xx/3xx,
+// falls back to a small set of neutral connectivity targets (the same
+// ones control-api's O3 cellular probe uses). A blocked or broken
+// target must not read as "this proxy is down" -- the tunnel itself
+// may be perfectly healthy. The target that answered is reported as
+// target_url.
+//
+// Timeout budgeting: the raw dial runs concurrently with the first
+// through-tunnel attempt, so it never eats the measurement's budget.
+// The probe's own target gets primaryFraction of timeout_ms; fallback
+// attempts share whatever remains up to fallbackPhaseEndFraction,
+// divided dynamically so a fast failure leaves more time for the next
+// target, and the second request gets the rest -- all capped at
+// totalFraction to leave process-spawn margin before the executor's
+// own timeout kills the job.
 package jobprobe
 
 import (
@@ -38,13 +50,23 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-// Fractional split of timeout_ms across the three sequential steps --
-// see the package comment. Kept as named constants so the arithmetic
-// is greppable against xray-run.sh's own documented split.
+// Fractions of the job's full timeout_ms -- see the package comment.
 const (
-	dialFraction    = 0.15
-	requestFraction = 0.325
+	dialFraction             = 0.05
+	primaryFraction          = 0.45
+	fallbackPhaseEndFraction = 0.70
+	totalFraction            = 0.95
 )
+
+// Neutral, tiny-response targets used when the probe's configured
+// target cannot be reached or does not answer 2xx/3xx. Same set the
+// O3 cellular probe tries after its own latency target.
+var defaultFallbackTargets = []string{
+	"https://www.google.com/generate_204",
+	"https://www.youtube.com/generate_204",
+	"https://www.ytimg.com/generate_204",
+	"https://abs.twimg.com/favicons/favicon.ico",
+}
 
 // endpoint is the {address, port} a module job's config dials
 // outbound -- the same extraction xray-run.sh's python3 block did:
@@ -158,6 +180,7 @@ func Run(args []string, stdout io.Writer) error {
 	target := fs.String("target", "", "URL to request through the tunnel")
 	timeoutMs := fs.Int("timeout-ms", 5000, "the job's full timeout budget in milliseconds")
 	paramsFile := fs.String("params-file", "", "path to the job's params JSON")
+	fallbackTargets := fs.String("fallback-targets", "", "comma-separated targets to try when the primary fails (default: built-in neutral set)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -180,41 +203,125 @@ func Run(args []string, stdout io.Writer) error {
 	}
 	socksAddr := fmt.Sprintf("127.0.0.1:%d", *socksPort)
 
-	var tcpDelay *float64
+	start := time.Now()
+	overallDeadline := start.Add(durationFraction(timeout, totalFraction))
+	fallbackDeadline := start.Add(durationFraction(timeout, fallbackPhaseEndFraction))
+
+	// The raw dial is diagnostic only; run it alongside the first
+	// through-tunnel attempt so a slow dial cannot consume the
+	// measurement's own budget.
+	dialDone := make(chan *float64, 1)
 	if ep, ok := extractEndpoint(*paramsFile); ok {
-		tcpDelay = dialTCPDelay(ep, time.Duration(float64(timeout)*dialFraction))
+		go func() { dialDone <- dialTCPDelay(ep, durationFraction(timeout, dialFraction)) }()
+	} else {
+		dialDone <- nil
 	}
 
-	// Both requests carry the same fractional budget. The first one
-	// originally ran on a bare context.Background() -- unbounded -- on
-	// the theory that the caller's outer timeout would kill the whole
-	// process anyway. That theory has a hole a production incident
-	// walked straight through: a warm engine that accepts its inbound
-	// TCP connection and then never responds leaves the request parked
-	// in the transport forever, and "somebody will SIGKILL me" is not
-	// a timeout strategy -- it makes the caller's deadline the only
-	// thing between one wedged engine and a stalled scheduler tick.
-	ctx1, cancel1 := context.WithTimeout(context.Background(), time.Duration(float64(timeout)*requestFraction))
-	defer cancel1()
-	realElapsed, _, err := requestThroughSOCKS(ctx1, socksAddr, *target)
-	if err != nil {
-		return fmt.Errorf("jobprobe: first request through tunnel: %w", err)
+	fallbacks := defaultFallbackTargets
+	if *fallbackTargets != "" {
+		fallbacks = nil
+		for _, entry := range strings.Split(*fallbackTargets, ",") {
+			if trimmed := strings.TrimSpace(entry); trimmed != "" {
+				fallbacks = append(fallbacks, trimmed)
+			}
+		}
 	}
-	realDelay := float64(realElapsed) / float64(time.Millisecond)
+	targets := probeTargets(*target, fallbacks)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(float64(timeout)*requestFraction))
+	attempts := make([]targetAttempt, 0, len(targets))
+	var successTarget string
+	var realDelay float64
+	for i, candidate := range targets {
+		var attemptTimeout time.Duration
+		if i == 0 {
+			attemptTimeout = durationFraction(timeout, primaryFraction)
+		} else {
+			remaining := time.Until(fallbackDeadline)
+			if remaining <= 0 {
+				break
+			}
+			// Divide what is left evenly among the fallbacks still to
+			// try: a fast failure leaves each later target more time
+			// than a slow one does.
+			attemptTimeout = remaining / time.Duration(len(targets)-i)
+		}
+		if attemptTimeout <= 0 {
+			break
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), attemptTimeout)
+		elapsed, code, err := requestThroughSOCKS(ctx, socksAddr, candidate)
+		cancel()
+		if err == nil && code >= 200 && code < 400 {
+			successTarget = candidate
+			realDelay = float64(elapsed) / float64(time.Millisecond)
+			break
+		}
+		if err == nil {
+			err = fmt.Errorf("target returned HTTP %d", code)
+		}
+		attempts = append(attempts, targetAttempt{target: candidate, err: err})
+	}
+	tcpDelay := <-dialDone
+	if successTarget == "" {
+		return fmt.Errorf("jobprobe: %s", formatAttempts(attempts))
+	}
+
+	// The second request gets whatever remains before the overall
+	// deadline, with a small floor so a nearly-exhausted fallback
+	// phase does not reduce it to zero (the executor's own timeout
+	// still bounds the process).
+	remaining := time.Until(overallDeadline)
+	if floor := durationFraction(timeout, 0.1); remaining < floor {
+		remaining = floor
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), remaining)
 	defer cancel()
-	httpElapsed, httpCode, err := requestThroughSOCKS(ctx, socksAddr, *target)
+	httpElapsed, httpCode, err := requestThroughSOCKS(ctx, socksAddr, successTarget)
 	if err != nil {
-		return fmt.Errorf("jobprobe: second request through tunnel: %w", err)
+		return fmt.Errorf("jobprobe: second request through tunnel (%s): %w", successTarget, err)
 	}
 	httpDelay := float64(httpElapsed) / float64(time.Millisecond)
+	encodedTarget, _ := json.Marshal(successTarget)
 
 	// Field order matches xray-run.sh's own printf so diffs between
 	// node versions running either implementation stay readable;
 	// latency_ms aliases http_delay_ms, the module's declared default.
 	_, err = fmt.Fprintf(stdout,
-		`{"latency_ms": %s, "http_code": %d, "http_delay_ms": %s, "real_delay_ms": %s, "tcp_delay_ms": %s}`+"\n",
-		jsonNumber(&httpDelay), httpCode, jsonNumber(&httpDelay), jsonNumber(&realDelay), jsonNumber(tcpDelay))
+		`{"latency_ms": %s, "http_code": %d, "http_delay_ms": %s, "real_delay_ms": %s, "tcp_delay_ms": %s, "target_url": %s, "target_attempts": %d}`+"\n",
+		jsonNumber(&httpDelay), httpCode, jsonNumber(&httpDelay), jsonNumber(&realDelay), jsonNumber(tcpDelay), encodedTarget, len(attempts)+1)
 	return err
+}
+
+type targetAttempt struct {
+	target string
+	err    error
+}
+
+func durationFraction(total time.Duration, fraction float64) time.Duration {
+	return time.Duration(float64(total) * fraction)
+}
+
+func probeTargets(primary string, fallbacks []string) []string {
+	targets := []string{primary}
+	seen := map[string]bool{primary: true}
+	for _, target := range fallbacks {
+		if target == "" || seen[target] {
+			continue
+		}
+		seen[target] = true
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func formatAttempts(attempts []targetAttempt) string {
+	parts := make([]string, 0, len(attempts))
+	for _, attempt := range attempts {
+		parts = append(parts, fmt.Sprintf("%s: %v", attempt.target, attempt.err))
+	}
+	message := "all targets failed (" + strings.Join(parts, "; ") + ")"
+	if len(message) > 600 {
+		message = message[:600] + "..."
+	}
+	return message
 }

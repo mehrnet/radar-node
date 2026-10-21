@@ -153,6 +153,16 @@ type Module struct {
 	// keeps its normal meaning of "the run.command step", just invoked
 	// once per job instead of once per check.
 	Pool *PoolSpec `yaml:"pool,omitempty"`
+	// MinTimeoutMs raises any check of this module to at least this
+	// timeout, regardless of the probe's own configured timeout_ms.
+	// For engine-backed modules (xray), the platform's 5s default is
+	// too tight for a cold TLS/REALITY handshake from a distant
+	// vantage point -- a probe on a slow path would fail every tick
+	// even though the proxy works. The probe's configured value still
+	// wins when it is higher; this only sets the floor. 0 means no
+	// floor. Older agents ignore the field (yaml decoding is not
+	// strict), so a module using it stays installable fleet-wide.
+	MinTimeoutMs int `yaml:"min_timeout_ms,omitempty"`
 	// Request/Response declare this module's data form: which params
 	// a probe must/may supply, and what a successful result's Extra
 	// carries. Request is enforced before every run (see
@@ -254,9 +264,23 @@ func (d InstallDependency) ResolveURL(goos, arch string) string {
 
 var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
+// withMinTimeout applies this module's own timeout floor (see
+// MinTimeoutMs) to one check's configured budget. A higher probe
+// value always wins; this only raises the floor.
+func (m Module) withMinTimeout(timeout time.Duration) time.Duration {
+	minimum := time.Duration(m.MinTimeoutMs) * time.Millisecond
+	if minimum > timeout {
+		return minimum
+	}
+	return timeout
+}
+
 func (m *Module) validate() error {
 	if !nameRe.MatchString(m.Name) {
 		return fmt.Errorf("name %q must match %s", m.Name, nameRe.String())
+	}
+	if m.MinTimeoutMs < 0 {
+		return fmt.Errorf("module %q: min_timeout_ms must not be negative", m.Name)
 	}
 	if err := validateFieldSchema(m.Request, m.Name, "request"); err != nil {
 		return err
