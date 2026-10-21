@@ -723,6 +723,11 @@ func (a *agent) reportResults(ctx context.Context, due []wire.ProbeSnapshot, tri
 			"probes_run", len(due), "triggered", len(triggers), "results", len(results), "delivered", delivered)
 		return
 	}
+	if delivered == 0 {
+		journal.Warn("agent", "results queued in spool; delivery deferred",
+			"probes_run", len(due), "triggered", len(triggers), "results", len(results))
+		return
+	}
 	journal.Info("agent", "tick complete",
 		"probes_run", len(due), "triggered", len(triggers), "results", len(results),
 		"delivered", delivered, "accepted", accepted, "rejected", rejected)
