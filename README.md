@@ -22,7 +22,7 @@ extraction pipeline (see "Generic fetch and field extraction" under
 HTTP API at all, public or your own paid/private one, and define your own
 named data points from whatever it returns.
 
-## Install (Linux/macOS)
+## Install (Linux/macOS/OpenWrt)
 
 Register a node in the [radar UI](https://radar.mehrnet.com) first -- it
 gives you a one-time `node_id` and `api_key`. Then, on the machine that
@@ -35,9 +35,20 @@ curl -fsSL https://radar.mehrnet.com/install/node.sh \
 
 This downloads the right release asset for your OS/arch, verifies its
 checksum, and installs `radar-node` as a persistent service -- systemd on
-Linux, launchd on macOS -- so it survives reboots with no further steps. Run
-as root for a system-wide service, or as a regular user for a user-scoped
-one (see `--help` below).
+Linux, procd on OpenWrt, launchd on macOS -- so it survives reboots with no
+further steps. Run as root for a system-wide service, or as a regular user
+for a user-scoped one (see `--help` below).
+
+On an ARMv7 OpenWrt router, install `curl` and CA certificates first
+(`opkg update && opkg install curl ca-bundle`), then add `--low-power` to
+cap the node for the device (8 concurrent checks, 4 pooled xray jobs, at
+most 128 jobs per xray instance) and enable the result spool under
+`/var/lib/radar-node/spool`. On a cellular vantage, `--domain-strategy=use_ipv4`
+also forces xray's outbound resolution to IPv4. Keep auto-update off for
+this node in the radar UI during the migration; re-run the installer (or
+push it from the controller) for updates. `linux/arm` is ARMv7. Service
+output goes to logd (`logread -e radar-node`); the `radar-node logs`
+journald helper is not available on OpenWrt.
 
 Behind a proxy? Add `--proxy=<url>` (`http://`, `https://`, `socks5://`, or
 `socks5h://`) -- it's used both for the installer's own downloads and for
@@ -146,6 +157,11 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--api-proxy` | proxy for the agent's own `radar-api` traffic (`http://`, `https://`, `socks5://`, `socks5h://`) |
 | `--scheduler-tick` | how often to check cached probes for due-ness (default `2s`) |
 | `--concurrency` | max probes running at once (default `64`) |
+| `--pool-concurrency` | cap a pooled module's own `test_concurrency` (0 = the module's value) |
+| `--pool-max-jobs` | cap a pooled module's own `max_jobs_per_instance` (0 = the module's value) |
+| `--domain-strategy` | force outbound DNS resolution onto one address family: `as_is`, `use_ipv4`, `use_ip`, `use_ipv6` (default: leave module configs unchanged) |
+| `--spool-dir` | persist each results batch to this directory before posting, and replay pending batches after an API outage (default: disabled) |
+| `--spool-max-bytes` | cap the result spool's total size (default `16 MiB`) |
 | `--destination-interval` | min spacing between any two checks against the same real destination, node-wide, regardless of which probe/group/subscription/account asked for either -- overrides a probe's own `interval_seconds` when its destination is shared and busy (default `10s`, `0` disables) |
 | `--destination-max-wait` | longest a single check will wait for its own destination to clear before giving up and failing that one check -- its own budget, separate from the check's own `timeout_ms`, so a heavily-shared destination (many probes resolving to one host) doesn't leave every check but the first permanently failing before it ever gets a real attempt (default `30s`) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |

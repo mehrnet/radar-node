@@ -20,8 +20,8 @@
 # policy allowlists radar.mehrnet.com (it already needs to reach this
 # origin's API) but not GitHub can fully install/update regardless.
 # Installs the binary and sets up radar-node as a persistent service
-# (systemd on Linux, launchd on macOS) so the copy-pasted command
-# above is the only step a user ever has to take.
+# (systemd on Linux, procd on OpenWrt, launchd on macOS) so the
+# copy-pasted command above is the only step a user ever has to take.
 set -e
 
 BIN_NAME="radar-node"
@@ -34,6 +34,17 @@ API_KEY=""
 API_URL="$API_URL_DEFAULT"
 PROXY=""
 UNINSTALL=0
+
+# Agent resource/delivery knobs. Empty means "leave the agent's own
+# default"; --low-power fills the router-safe values below unless the
+# caller supplied them explicitly.
+LOW_POWER=0
+CONCURRENCY=""
+POOL_CONCURRENCY=""
+POOL_MAX_JOBS=""
+SPOOL_DIR=""
+SPOOL_MAX_BYTES=""
+DOMAIN_STRATEGY=""
 
 # Optional bundled engine modules (see install/modules/ and
 # https://github.com/mehrnet/static-builds) -- off unless explicitly
@@ -62,6 +73,17 @@ Options:
                      agent's radar-api traffic (http://, https://, socks5://, socks5h://)
   --uninstall        stop and fully remove radar-node from this machine (no
                       other flag is needed -- this ignores --node_id/--api_key)
+  --low-power        resource profile for small/routers: --concurrency 8,
+                     --pool-concurrency 4, --pool-max-jobs 128, and a result
+                     spool under /var/lib/radar-node/spool (root) unless set
+  --concurrency=N    max probes running at once
+  --pool-concurrency=N  cap a pooled module's own test_concurrency
+  --pool-max-jobs=N  cap a pooled module's own max_jobs_per_instance
+  --spool-dir=PATH   persist results here before posting and replay after
+                     API outages (default: disabled unless --low-power)
+  --spool-max-bytes=N  cap the result spool (default 16 MiB)
+  --domain-strategy=S  force outbound DNS resolution: as_is | use_ipv4 |
+                     use_ip | use_ipv6 (use_ipv4 is useful on cellular)
   -h, --help         show this help
 
 Optional bundled engine modules (each fetches a statically-built binary
@@ -98,6 +120,13 @@ for arg in "$@"; do
     --api_url=*) API_URL="${arg#*=}" ;;
     --proxy=*) PROXY="${arg#*=}" ;;
     --uninstall) UNINSTALL=1 ;;
+    --low-power) LOW_POWER=1 ;;
+    --concurrency=*) CONCURRENCY="${arg#*=}" ;;
+    --pool-concurrency=*) POOL_CONCURRENCY="${arg#*=}" ;;
+    --pool-max-jobs=*) POOL_MAX_JOBS="${arg#*=}" ;;
+    --spool-dir=*) SPOOL_DIR="${arg#*=}" ;;
+    --spool-max-bytes=*) SPOOL_MAX_BYTES="${arg#*=}" ;;
+    --domain-strategy=*) DOMAIN_STRATEGY="${arg#*=}" ;;
     --install-module=*)
       m="${arg#*=}"
       case "$m" in xray|wireguard|openvpn) ;; *) err "unknown module: $m (supported: xray, wireguard, openvpn)" ;; esac
@@ -112,6 +141,11 @@ for arg in "$@"; do
     *) err "unknown argument: $arg (see --help)" ;;
   esac
 done
+
+case "$DOMAIN_STRATEGY" in
+  ""|as_is|asis|use_ipv4|useipv4|use_ip|useip|use_ipv6|useipv6) ;;
+  *) err "--domain-strategy must be one of as_is, use_ipv4, use_ip, use_ipv6" ;;
+esac
 
 # $1 = space-separated list (INSTALL_MODULES or REMOVE_MODULES), $2 =
 # module name -- both lists start with a leading space (built via
@@ -135,7 +169,12 @@ case "$os_raw" in
   *) err "unsupported OS: $os_raw -- radar-node ships linux/darwin/windows releases; for windows grab a release asset manually from ${RELEASES_BASE}/radar-node/" ;;
 esac
 
-# Root gets a real system service (systemd/launchd) so the node
+OPENWRT=0
+if [ "$OS" = "linux" ] && [ -f /etc/openwrt_release ] && [ -f /etc/rc.common ]; then
+  OPENWRT=1
+fi
+
+# Root gets a real system service (systemd/procd/launchd) so the node
 # survives reboots with zero further action; a non-root install still
 # works, just user-scoped. Needed by --uninstall, the "reuse an
 # existing install's credentials" check below, and the real install
@@ -171,7 +210,14 @@ if [ "$UNINSTALL" != "1" ]; then
 fi
 
 if [ "$UNINSTALL" = "1" ]; then
-  if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+  if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ]; then
+    if [ -x /etc/init.d/radar-node ]; then
+      /etc/init.d/radar-node stop >/dev/null 2>&1 || true
+      /etc/init.d/radar-node disable >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/init.d/radar-node
+    rm -rf /var/lib/radar-node
+  elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
     if [ "$IS_ROOT" = "1" ]; then
       systemctl stop radar-node >/dev/null 2>&1 || true
       systemctl disable radar-node >/dev/null 2>&1 || true
@@ -212,8 +258,12 @@ fi
 # nothing to reuse, so both stay required in that case.
 # ---------------------------------------------------------------------
 if [ "$OS" = "linux" ]; then
-  existing_unit="/etc/systemd/system/radar-node.service"
-  [ "$IS_ROOT" = "1" ] || existing_unit="${HOME}/.config/systemd/user/radar-node.service"
+  if [ "$OPENWRT" = "1" ]; then
+    existing_unit="/etc/init.d/radar-node"
+  else
+    existing_unit="/etc/systemd/system/radar-node.service"
+    [ "$IS_ROOT" = "1" ] || existing_unit="${HOME}/.config/systemd/user/radar-node.service"
+  fi
 elif [ "$OS" = "darwin" ]; then
   existing_unit="/Library/LaunchDaemons/${label}.plist"
   [ "$IS_ROOT" = "1" ] || existing_unit="${HOME}/Library/LaunchAgents/${label}.plist"
@@ -226,6 +276,12 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_api_key="$(sed -n 's/.*--api-key "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_api_url="$(sed -n 's/.*--api-url "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_proxy="$(sed -n 's/.*--api-proxy "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_concurrency="$(sed -n 's/.*--concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_pool_concurrency="$(sed -n 's/.*--pool-concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_pool_max_jobs="$(sed -n 's/.*--pool-max-jobs \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_spool_dir="$(sed -n 's/.*--spool-dir "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_spool_max_bytes="$(sed -n 's/.*--spool-max-bytes \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_domain_strategy="$(sed -n 's/.*--domain-strategy "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
   else
     existing_api_key="$(awk '/<string>--api-key<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
     existing_api_url="$(awk '/<string>--api-url<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
@@ -239,12 +295,18 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
   fi
   [ "$API_URL" = "$API_URL_DEFAULT" ] && [ -n "$existing_api_url" ] && API_URL="$existing_api_url"
   [ -z "$PROXY" ] && [ -n "$existing_proxy" ] && PROXY="$existing_proxy"
+  if [ -z "$CONCURRENCY" ] && [ -n "$existing_concurrency" ]; then CONCURRENCY="$existing_concurrency"; fi
+  if [ -z "$POOL_CONCURRENCY" ] && [ -n "$existing_pool_concurrency" ]; then POOL_CONCURRENCY="$existing_pool_concurrency"; fi
+  if [ -z "$POOL_MAX_JOBS" ] && [ -n "$existing_pool_max_jobs" ]; then POOL_MAX_JOBS="$existing_pool_max_jobs"; fi
+  if [ -z "$SPOOL_DIR" ] && [ -n "$existing_spool_dir" ]; then SPOOL_DIR="$existing_spool_dir"; fi
+  if [ -z "$SPOOL_MAX_BYTES" ] && [ -n "$existing_spool_max_bytes" ]; then SPOOL_MAX_BYTES="$existing_spool_max_bytes"; fi
+  if [ -z "$DOMAIN_STRATEGY" ] && [ -n "$existing_domain_strategy" ]; then DOMAIN_STRATEGY="$existing_domain_strategy"; fi
 fi
 
 [ -n "$NODE_ID" ] || { usage; err "--node_id is required (no existing installation found at ${existing_unit:-<none>} to reuse it from)"; }
 [ -n "$API_KEY" ] || { usage; err "--api_key is required (no existing installation found at ${existing_unit:-<none>} to reuse it from)"; }
 
-command -v curl >/dev/null 2>&1 || err "curl is required"
+command -v curl >/dev/null 2>&1 || err "curl is required (on OpenWrt: opkg update && opkg install curl ca-bundle)"
 command -v tar >/dev/null 2>&1 || err "tar is required"
 
 # ---------------------------------------------------------------------
@@ -375,6 +437,7 @@ arch_raw="$(uname -m)"
 case "$arch_raw" in
   x86_64|amd64) ARCH=amd64 ;;
   arm64|aarch64) ARCH=arm64 ;;
+  armv7l|armv7|arm) ARCH=arm ;;  # 32-bit ARMv7 (OpenWrt routers)
   *) err "unsupported architecture: $arch_raw" ;;
 esac
 
@@ -427,7 +490,9 @@ cleanup_and_recover() {
   rm -rf "$WORKDIR"
   if [ "$status" -ne 0 ] && [ -n "${existing_unit:-}" ] && [ -f "$existing_unit" ]; then
     log "install failed -- attempting to bring the previous installation back up"
-    if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+    if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ] && [ -x /etc/init.d/radar-node ]; then
+      /etc/init.d/radar-node start >/dev/null 2>&1 || true
+    elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
       if [ "$IS_ROOT" = "1" ]; then
         systemctl start radar-node >/dev/null 2>&1 || true
       else
@@ -633,7 +698,11 @@ fi
 # holding the old binary open is stopped first -- best-effort, since
 # on a first install there's nothing to stop yet.
 # ---------------------------------------------------------------------
-if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ]; then
+  if [ -x /etc/init.d/radar-node ]; then
+    /etc/init.d/radar-node stop >/dev/null 2>&1 || true
+  fi
+elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
   if [ "$IS_ROOT" = "1" ]; then
     systemctl stop radar-node >/dev/null 2>&1 || true
   else
@@ -748,9 +817,72 @@ for m in xray wireguard openvpn; do
   fi
 done
 
+if [ "$LOW_POWER" = "1" ]; then
+  [ -n "$CONCURRENCY" ] || CONCURRENCY=8
+  [ -n "$POOL_CONCURRENCY" ] || POOL_CONCURRENCY=4
+  [ -n "$POOL_MAX_JOBS" ] || POOL_MAX_JOBS=128
+  if [ -z "$SPOOL_DIR" ]; then
+    if [ "$IS_ROOT" = "1" ]; then
+      SPOOL_DIR="/var/lib/radar-node/spool"
+    else
+      SPOOL_DIR="${HOME}/.local/state/radar-node/spool"
+    fi
+  fi
+fi
+
 API_KEY_COMBINED="${NODE_ID}:${API_KEY}"
 EXTRA_ARGS=""
-[ -n "$PROXY" ] && EXTRA_ARGS="--api-proxy \"$PROXY\""
+if [ -n "$PROXY" ]; then
+  EXTRA_ARGS="--api-proxy \"$PROXY\""
+fi
+if [ -n "$CONCURRENCY" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --concurrency ${CONCURRENCY}"
+fi
+if [ -n "$POOL_CONCURRENCY" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --pool-concurrency ${POOL_CONCURRENCY}"
+fi
+if [ -n "$POOL_MAX_JOBS" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --pool-max-jobs ${POOL_MAX_JOBS}"
+fi
+if [ -n "$SPOOL_DIR" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --spool-dir \"${SPOOL_DIR}\""
+fi
+if [ -n "$SPOOL_MAX_BYTES" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --spool-max-bytes ${SPOOL_MAX_BYTES}"
+fi
+if [ -n "$DOMAIN_STRATEGY" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --domain-strategy \"${DOMAIN_STRATEGY}\""
+fi
+
+start_procd() {
+  init_file="/etc/init.d/radar-node"
+  cat > "$init_file" <<EOF
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command ${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url "${API_URL}" --api-key "${API_KEY_COMBINED}" --modules-dir "${MODULES_DIR}" --tools-dir "${TOOLS_DIR}" ${EXTRA_ARGS}
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+EOF
+  chmod 700 "$init_file"
+  /etc/init.d/radar-node enable >/dev/null 2>&1 || true
+  if /etc/init.d/radar-node restart >/dev/null 2>&1; then
+    log "radar-node is running under procd ($init_file)"
+  else
+    /etc/init.d/radar-node stop >/dev/null 2>&1 || true
+    /etc/init.d/radar-node disable >/dev/null 2>&1 || true
+    rm -f "$init_file"
+    log "procd is present but the service did not start, skipping service setup"
+    print_manual_run
+  fi
+}
 
 start_systemd() {
   unit_dir="$1"   # /etc/systemd/system or ~/.config/systemd/user
@@ -849,10 +981,16 @@ EOF
 
 print_manual_run() {
   log "run it yourself:"
-  log "  ${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url \"${API_URL}\" --api-key \"${API_KEY_COMBINED}\" --modules-dir \"${MODULES_DIR}\" --tools-dir \"${TOOLS_DIR}\"${PROXY:+ --api-proxy \"$PROXY\"}"
+  log "  ${INSTALL_BIN_DIR}/${BIN_NAME} agent --api-url \"${API_URL}\" --api-key \"${API_KEY_COMBINED}\" --modules-dir \"${MODULES_DIR}\" --tools-dir \"${TOOLS_DIR}\"${EXTRA_ARGS:+ $EXTRA_ARGS}"
 }
 
-if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ]; then
+  if [ "$IS_ROOT" = "1" ]; then
+    start_procd
+  else
+    print_manual_run
+  fi
+elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
   if [ "$IS_ROOT" = "1" ]; then
     start_systemd "/etc/systemd/system" ""
   else
