@@ -220,31 +220,6 @@ func (s *Store) MarkProbesRun(ctx context.Context, ids []string, at time.Time) e
 	return nil
 }
 
-func updateExistingProbeSnapshotTx(ctx context.Context, tx *sql.Tx, snapshot wire.ProbeSnapshot) error {
-	var params []byte
-	var err error
-	if len(snapshot.Params) > 0 {
-		params, err = json.Marshal(snapshot.Params)
-		if err != nil {
-			return fmt.Errorf("store: encode trigger probe params: %w", err)
-		}
-	}
-	_, err = tx.ExecContext(ctx, `
-		UPDATE probes
-		   SET target = ?, prober = ?, probe_count = ?, timeout_ms = ?,
-		       schedule_type = ?, interval_seconds = ?, starts_at_ms = ?,
-		       ends_at_ms = ?, params_json = ?, status = ?
-		 WHERE id = ?`,
-		snapshot.Target, snapshot.Prober, snapshot.ProbeCount, snapshot.TimeoutMs,
-		snapshot.ScheduleType, snapshot.IntervalSeconds, snapshot.StartsAt,
-		snapshot.EndsAt, params, snapshot.Status, snapshot.ID,
-	)
-	if err != nil {
-		return fmt.Errorf("store: update trigger probe snapshot: %w", err)
-	}
-	return nil
-}
-
 // Rebuild recreates every projection from the journal. It is used by
 // recovery tooling and tests; results themselves are already durable
 // rows in the journal.
@@ -305,10 +280,6 @@ func (s *Store) Rebuild(ctx context.Context) error {
 				return fmt.Errorf("store: decode trigger event: %w", err)
 			}
 			if err := queueTriggerTx(ctx, tx, event, seq, atMS); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			if err := updateExistingProbeSnapshotTx(ctx, tx, event.Probe); err != nil {
 				_ = rows.Close()
 				return err
 			}

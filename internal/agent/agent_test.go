@@ -738,6 +738,59 @@ func TestRun_RestoresAssignmentAndScheduleFromLocalStore(t *testing.T) {
 	}
 }
 
+func TestRun_DoesNotScheduleRestoredProbesBeforeFirstHeartbeat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "radar.db")
+	local, err := store.Open(dbPath, store.Options{Origin: "node_test"})
+	if err != nil {
+		t.Fatalf("open local store: %v", err)
+	}
+	now := time.Now()
+	if err := local.SaveAssignment(context.Background(), "hash_gate", []wire.ProbeSnapshot{{
+		ID: "probe_gate", Target: "127.0.0.1:1", Prober: "tcp", ProbeCount: 1,
+		TimeoutMs: 100, ScheduleType: "interval", IntervalSeconds: 1,
+		StartsAt: now.Add(-time.Hour).UnixMilli(), Status: wire.ProbeStatusActive,
+	}}); err != nil {
+		t.Fatalf("SaveAssignment: %v", err)
+	}
+	if err := local.Close(); err != nil {
+		t.Fatalf("close local store: %v", err)
+	}
+
+	var posted atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/nodes/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/v1/nodes/results", func(w http.ResponseWriter, r *http.Request) {
+		posted.Add(1)
+		http.Error(w, "unexpected results", http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL: srv.URL, APIKey: "node_test:secret",
+			SchedulerTick: 20 * time.Millisecond, Concurrency: 2, DBPath: dbPath,
+		})
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if posted.Load() != 0 {
+		t.Fatalf("agent posted %d result batches before its first successful heartbeat", posted.Load())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent.Run did not exit after context cancellation")
+	}
+}
+
 func TestRun_PersistsResultsToLocalStore(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

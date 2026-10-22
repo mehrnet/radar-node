@@ -160,6 +160,42 @@ func TestProbeCache_TriggeredEvent_DuplicateRunIDNotRequeuedAcrossResync(t *test
 	}
 }
 
+// A redelivered or restored trigger can carry an older snapshot than
+// the current assignment. It must run with that snapshot (the trigger
+// was fired against it) without replacing the scheduled definition,
+// which the server may never resend while the assignment hash matches.
+func TestProbeCache_TriggerSnapshotDoesNotOverwriteScheduledDefinition(t *testing.T) {
+	c := newProbeCache()
+	now := time.Now()
+	current := wire.ProbeSnapshot{
+		ID: "probe_1", Target: "current.example:443", Status: wire.ProbeStatusActive,
+		ScheduleType: "interval", IntervalSeconds: 30, StartsAt: now.Add(-time.Hour).UnixMilli(),
+	}
+	older := current
+	older.Target = "old.example:443"
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{current})
+
+	c.applyTriggeredEvents([]wire.Event{{EventType: "triggered", RunID: "run_live", Probe: older}})
+	if got, ok := c.get("probe_1"); !ok || got.Target != current.Target {
+		t.Fatalf("live trigger overwrote the scheduled definition: got %+v", got)
+	}
+	triggers := c.drainPendingTriggers()
+	if len(triggers) != 1 || triggers[0].Probe.Target != older.Target {
+		t.Fatalf("expected the trigger to keep its own snapshot, got %+v", triggers)
+	}
+
+	if queued := c.queueTriggers([]pendingTrigger{{ProbeID: "probe_1", RunID: "run_restored", Probe: older}}); queued != 1 {
+		t.Fatalf("queueTriggers queued %d, want 1", queued)
+	}
+	if got, ok := c.get("probe_1"); !ok || got.Target != current.Target {
+		t.Fatalf("restored trigger overwrote the scheduled definition: got %+v", got)
+	}
+	triggers = c.drainPendingTriggers()
+	if len(triggers) != 1 || triggers[0].Probe.Target != older.Target {
+		t.Fatalf("expected the restored trigger to keep its own snapshot, got %+v", triggers)
+	}
+}
+
 func TestProbeCache_IntervalProbe_DueAgainAfterInterval(t *testing.T) {
 	c := newProbeCache()
 	now := time.Now()
@@ -216,6 +252,30 @@ func TestProbeCache_ReplaceAssignment_PreservesLastRunAt(t *testing.T) {
 	}
 	if c.lastKnownHash() != "hash2" {
 		t.Fatalf("expected lastKnownHash to update to 'hash2', got %q", c.lastKnownHash())
+	}
+}
+
+func TestProbeCache_ReplaceAssignmentKeepingHash(t *testing.T) {
+	c := newProbeCache()
+	now := time.Now()
+	c.replaceAssignment("hash_persisted", []wire.ProbeSnapshot{{
+		ID: "probe_old", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
+		StartsAt: now.Add(-time.Minute).UnixMilli(),
+	}})
+
+	c.replaceAssignmentKeepingHash([]wire.ProbeSnapshot{{
+		ID: "probe_new", Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 30,
+		StartsAt: now.Add(-time.Minute).UnixMilli(),
+	}})
+
+	if c.lastKnownHash() != "hash_persisted" {
+		t.Fatalf("expected the persisted hash to be retained for retry, got %q", c.lastKnownHash())
+	}
+	if _, ok := c.get("probe_new"); !ok {
+		t.Fatal("expected the live assignment to include probe_new")
+	}
+	if _, ok := c.get("probe_old"); ok {
+		t.Fatal("expected probe_old to be removed from the live assignment")
 	}
 }
 

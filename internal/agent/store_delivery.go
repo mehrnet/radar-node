@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"time"
 
@@ -9,6 +10,34 @@ import (
 	"github.com/mehrnet/radar-node/internal/store"
 	"github.com/mehrnet/radar-node/internal/wire"
 )
+
+const (
+	dbMaintenanceInitialDelay = 5 * time.Second
+	dbMaintenanceInterval     = time.Hour
+	dbMaintenanceRetry        = 5 * time.Minute
+	dbMaintenanceBudgetRetry  = 15 * time.Minute
+)
+
+// restorePendingTriggers loads the durable queue. It is retried from
+// the heartbeat loop until it succeeds, so one transient local read
+// failure cannot leave persisted triggers permanently stranded.
+func (a *agent) restorePendingTriggers(ctx context.Context) bool {
+	if a.store == nil {
+		return true
+	}
+	triggers, err := a.store.PendingTriggers(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			journal.Warn("agent", "restore pending triggers failed; will retry", "err", err)
+		}
+		return false
+	}
+	if queued := a.cache.queueTriggers(agentTriggers(triggers)); queued > 0 {
+		journal.Info("agent", "restored pending triggers", "triggers", queued)
+	}
+	a.triggersRestored.Store(true)
+	return true
+}
 
 // applyTriggeredEvents persists heartbeat triggers before letting them
 // reach the scheduler. If persistence fails the trigger is still run
@@ -71,14 +100,15 @@ func (a *agent) drainStore(ctx context.Context) (delivered, accepted, rejected i
 	if a.store == nil {
 		return 0, 0, 0, nil
 	}
-	if !a.spoolNextAttempt.IsZero() && time.Now().Before(a.spoolNextAttempt) {
+	if !a.deliveryNextAttempt.IsZero() && time.Now().Before(a.deliveryNextAttempt) {
 		return 0, 0, 0, nil
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, spoolDrainBudget)
+	drainCtx, cancel := context.WithTimeout(ctx, deliveryDrainBudget)
 	defer cancel()
 	for drainCtx.Err() == nil {
 		batch, err := a.store.PendingResults(drainCtx, 500)
 		if err != nil {
+			a.backoffDelivery()
 			return delivered, accepted, rejected, err
 		}
 		if len(batch) == 0 {
@@ -95,18 +125,24 @@ func (a *agent) drainStore(ctx context.Context) (delivered, accepted, rejected i
 		}
 		resp, postErr := a.postResults(drainCtx, results, "")
 		if postErr != nil {
-			a.spoolBackoff = nextSpoolBackoff(a.spoolBackoff)
-			a.spoolNextAttempt = time.Now().Add(a.spoolBackoff)
+			a.backoffDelivery()
 			return delivered, accepted, rejected, postErr
 		}
+		if resp == nil {
+			a.backoffDelivery()
+			return delivered, accepted, rejected, errors.New("radar-api returned an empty results response")
+		}
 		if err := a.store.MarkOutcomes(drainCtx, outcomesFor(batch, resp)); err != nil {
+			// The POST succeeded but the local DB could not settle it;
+			// back off so a broken DB doesn't trigger a duplicate POST
+			// every scheduler tick.
+			a.backoffDelivery()
 			return delivered, accepted, rejected, err
 		}
 		delivered += len(batch)
 		accepted += resp.Accepted
 		rejected += resp.Rejected
-		a.spoolBackoff = 0
-		a.spoolNextAttempt = time.Time{}
+		a.clearDeliveryBackoff()
 		if len(batch) < 500 {
 			break
 		}
@@ -143,34 +179,54 @@ func ackKey(runID string, seq int) string {
 	return runID + "\x00" + strconv.Itoa(seq)
 }
 
-// maintain bounds the local database hourly. It runs on the scheduler
-// goroutine but only after the tick's probe work, and each prune is
-// chunked so a small device is never wedged by one huge delete.
-func (a *agent) maintain(ctx context.Context) {
-	if a.store == nil || ctx.Err() != nil {
+// maintenanceLoop keeps retention and rollups off the scheduler
+// goroutine: a large vacuum must never delay probe execution. The
+// store's single connection still serializes the actual writes.
+func (a *agent) maintenanceLoop(ctx context.Context) {
+	if a.store == nil {
 		return
 	}
-	if !a.lastMaintenance.IsZero() && time.Since(a.lastMaintenance) < time.Hour {
-		return
-	}
-	a.lastMaintenance = time.Now()
-	stats, err := a.store.Maintain(ctx, store.MaintainOptions{Retention: a.dbRetention, MaxBytes: a.dbMaxBytes})
-	if err != nil {
-		if ctx.Err() == nil {
-			journal.Error("agent", "local store maintenance failed", "err", err)
+	timer := time.NewTimer(dbMaintenanceInitialDelay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
 		}
-		return
+		stats, err := a.store.Maintain(ctx, store.MaintainOptions{Retention: a.dbRetention, MaxBytes: a.dbMaxBytes})
+		next := dbMaintenanceInterval
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			journal.Error("agent", "local store maintenance failed", "err", err)
+			next = dbMaintenanceRetry
+		} else {
+			if stats.DeletedRows > 0 || stats.DeletedRollups > 0 || stats.RolledUpResults > 0 || stats.VacuumedPages > 0 || stats.OverBudget {
+				journal.Info("agent", "local store maintenance",
+					"deleted_rows", stats.DeletedRows, "deleted_rollups", stats.DeletedRollups,
+					"rolled_up_results", stats.RolledUpResults, "vacuumed_pages", stats.VacuumedPages,
+					"live_bytes", stats.LiveBytes, "db_bytes", stats.DBBytes, "wal_bytes", stats.WALBytes,
+					"over_budget", stats.OverBudget)
+			}
+			if stats.OverBudget {
+				journal.Warn("agent", "local store is over its byte budget; pending results are never pruned", "live_bytes", stats.LiveBytes, "max_bytes", a.dbMaxBytes)
+				next = dbMaintenanceBudgetRetry
+			}
+		}
+		timer.Reset(next)
 	}
-	if stats.DeletedRows > 0 || stats.DeletedRollups > 0 || stats.RolledUpResults > 0 || stats.VacuumedPages > 0 || stats.OverBudget {
-		journal.Info("agent", "local store maintenance",
-			"deleted_rows", stats.DeletedRows, "deleted_rollups", stats.DeletedRollups,
-			"rolled_up_results", stats.RolledUpResults, "vacuumed_pages", stats.VacuumedPages,
-			"live_bytes", stats.LiveBytes, "db_bytes", stats.DBBytes, "wal_bytes", stats.WALBytes,
-			"over_budget", stats.OverBudget)
-	}
-	if stats.OverBudget {
-		journal.Warn("agent", "local store is over its byte budget; pending results are never pruned", "live_bytes", stats.LiveBytes, "max_bytes", a.dbMaxBytes)
-	}
+}
+
+func (a *agent) backoffDelivery() {
+	a.deliveryBackoff = nextDeliveryBackoff(a.deliveryBackoff)
+	a.deliveryNextAttempt = time.Now().Add(a.deliveryBackoff)
+}
+
+func (a *agent) clearDeliveryBackoff() {
+	a.deliveryBackoff = 0
+	a.deliveryNextAttempt = time.Time{}
 }
 
 func cachedStates(states []store.ProbeState) []cachedProbeState {

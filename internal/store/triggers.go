@@ -47,22 +47,28 @@ func (s *Store) RecordTrigger(ctx context.Context, event wire.Event) (bool, erro
 	if seen {
 		return false, nil
 	}
-	seq, err := nextOriginSeq(ctx, tx, s.origin, 1)
+	originSeq, err := nextOriginSeq(ctx, tx, s.origin, 1)
 	if err != nil {
 		return false, err
 	}
 	atMS := time.Now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO journal (kind, origin, origin_seq, at_ms, run_id, probe_id, payload)
 		VALUES ('trigger', ?, ?, ?, ?, ?, ?)`,
-		s.origin, seq, atMS, event.RunID, event.Probe.ID, payload,
-	); err != nil {
+		s.origin, originSeq, atMS, event.RunID, event.Probe.ID, payload,
+	)
+	if err != nil {
 		return false, fmt.Errorf("store: insert trigger event: %w", err)
 	}
-	if err := queueTriggerTx(ctx, tx, event, seq, atMS); err != nil {
-		return false, err
+	// The pending queue protects its journal row from pruning, which
+	// keys on the rowid seq -- not on origin_seq, which can have gaps
+	// (e.g. a batch containing duplicate results reserves sequence
+	// numbers it never inserts).
+	eventSeq, err := result.LastInsertId()
+	if err != nil {
+		return false, fmt.Errorf("store: trigger event seq: %w", err)
 	}
-	if err := updateExistingProbeSnapshotTx(ctx, tx, event.Probe); err != nil {
+	if err := queueTriggerTx(ctx, tx, event, eventSeq, atMS); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -123,21 +129,32 @@ func (s *Store) PendingTriggers(ctx context.Context) ([]PendingTrigger, error) {
 	defer rows.Close()
 
 	var triggers []PendingTrigger
+	var corrupt []PendingTrigger
 	for rows.Next() {
 		var (
 			trigger  PendingTrigger
 			snapshot []byte
 		)
 		if err := rows.Scan(&trigger.ProbeID, &trigger.RunID, &trigger.EventSeq, &snapshot); err != nil {
+			_ = rows.Close()
 			return nil, fmt.Errorf("store: scan pending trigger: %w", err)
 		}
 		if err := json.Unmarshal(snapshot, &trigger.Probe); err != nil {
-			return nil, fmt.Errorf("store: decode trigger probe %s: %w", trigger.ProbeID, err)
+			corrupt = append(corrupt, trigger)
+			continue
 		}
 		triggers = append(triggers, trigger)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return nil, fmt.Errorf("store: pending trigger rows: %w", err)
+	}
+	_ = rows.Close()
+	// A corrupt snapshot must not wedge the queue forever. Drop the
+	// pending row so the server's redelivery (which still carries the
+	// trigger) can insert a fresh one.
+	for _, trigger := range corrupt {
+		_, _ = s.db.ExecContext(ctx, "DELETE FROM pending_triggers WHERE probe_id = ? AND run_id = ?", trigger.ProbeID, trigger.RunID)
 	}
 	return triggers, nil
 }
@@ -156,13 +173,12 @@ func (s *Store) CompleteTriggers(ctx context.Context, triggers []PendingTrigger)
 
 	nowMS := time.Now().UnixMilli()
 	for _, trigger := range triggers {
-		deleted, err := tx.ExecContext(ctx, "DELETE FROM pending_triggers WHERE probe_id = ? AND run_id = ?", trigger.ProbeID, trigger.RunID)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM pending_triggers WHERE probe_id = ? AND run_id = ?", trigger.ProbeID, trigger.RunID); err != nil {
 			return fmt.Errorf("store: delete pending trigger: %w", err)
 		}
-		if affected, _ := deleted.RowsAffected(); affected == 0 {
-			continue
-		}
+		// Record completion even when the trigger was only applied in
+		// memory (its initial persistence failed): otherwise a later
+		// server redelivery could execute it a second time.
 		seq, err := nextOriginSeq(ctx, tx, s.origin, 1)
 		if err != nil {
 			return err

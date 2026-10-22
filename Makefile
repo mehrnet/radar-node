@@ -3,13 +3,18 @@ BIN      := radar-node
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test lint fmt cross clean install
+.PHONY: build test test-race lint fmt cross clean install
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN) ./cmd/radar-node
 
 test:
 	go test ./...
+
+# The SQLite store and the agent's delivery/maintenance loops are the
+# concurrent parts of the node; keep them race-clean in CI.
+test-race:
+	CGO_ENABLED=1 go test -race ./internal/store ./internal/agent
 
 lint: fmt
 	go vet ./...

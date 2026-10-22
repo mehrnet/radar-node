@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -14,9 +13,11 @@ import (
 )
 
 type RecordSummary struct {
-	Inserted   int
-	Duplicates int
-	Skipped    int
+	Inserted       int
+	Duplicates     int
+	Skipped        int
+	InvalidLatency int
+	InvalidExtra   int
 }
 
 // RecordResults appends local results to the journal and marks them
@@ -61,13 +62,13 @@ func (s *Store) RecordResults(ctx context.Context, results []wire.Result) (Recor
 			checkSeq = 1
 		}
 		atMS := observedAtMS(result.ObservedAt, nowMS)
-		latencyUS, err := latencyMicros(result.LatencyMs)
-		if err != nil {
-			return summary, err
+		latencyUS, latencyOK := latencyMicros(result.LatencyMs)
+		if !latencyOK {
+			summary.InvalidLatency++
 		}
-		extra, err := extraJSON(result.Extra)
-		if err != nil {
-			return summary, fmt.Errorf("store: encode result extra: %w", err)
+		extra, extraOK := extraJSON(result.Extra)
+		if !extraOK {
+			summary.InvalidExtra++
 		}
 		ok := 0
 		if result.Ok {
@@ -232,27 +233,6 @@ func (s *Store) MarkAttempts(ctx context.Context, seqs []int64) error {
 	return nil
 }
 
-func nextOriginSeq(ctx context.Context, tx *sql.Tx, origin string, count int) (int64, error) {
-	if count < 1 {
-		return 0, errors.New("store: sequence count must be positive")
-	}
-	var next int64
-	err := tx.QueryRowContext(ctx, "SELECT next_seq FROM sequences WHERE origin = ?", origin).Scan(&next)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO sequences (origin, next_seq) VALUES (?, ?)", origin, int64(count)+1); err != nil {
-			return 0, fmt.Errorf("store: initialize origin sequence: %w", err)
-		}
-		return 1, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("store: read origin sequence: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, "UPDATE sequences SET next_seq = ? WHERE origin = ?", next+int64(count), origin); err != nil {
-		return 0, fmt.Errorf("store: advance origin sequence: %w", err)
-	}
-	return next, nil
-}
-
 func observedAtMS(raw string, fallbackMS int64) int64 {
 	parsed, err := time.Parse(time.RFC3339Nano, raw)
 	if err != nil || parsed.IsZero() {
@@ -261,29 +241,31 @@ func observedAtMS(raw string, fallbackMS int64) int64 {
 	return parsed.UnixMilli()
 }
 
-func latencyMicros(ms *float64) (any, error) {
+func latencyMicros(ms *float64) (any, bool) {
 	if ms == nil {
-		return nil, nil
+		return nil, true
 	}
-	if math.IsNaN(*ms) || math.IsInf(*ms, 0) {
-		return nil, errors.New("store: non-finite latency")
+	if math.IsNaN(*ms) || math.IsInf(*ms, 0) || *ms < 0 {
+		return nil, false
 	}
-	value := int64(math.Round(*ms * 1000))
-	if value < 0 {
-		value = 0
+	value := math.Round(*ms * 1000)
+	// The multiply can overflow to +Inf for a huge finite input; an
+	// out-of-range float-to-int conversion would store nonsense.
+	if math.IsInf(value, 0) || value >= float64(math.MaxInt64) {
+		return nil, false
 	}
-	return value, nil
+	return int64(value), true
 }
 
-func extraJSON(extra map[string]any) ([]byte, error) {
+func extraJSON(extra map[string]any) ([]byte, bool) {
 	if len(extra) == 0 {
-		return nil, nil
+		return nil, true
 	}
 	encoded, err := json.Marshal(extra)
 	if err != nil {
-		return nil, err
+		return nil, false
 	}
-	return encoded, nil
+	return encoded, true
 }
 
 func nullableString(value string) any {

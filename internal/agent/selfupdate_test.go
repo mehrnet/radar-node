@@ -2,6 +2,8 @@ package agent
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,6 +77,12 @@ func TestSelfUpdateCommandFor_ProcdWaitsOutRespawnAndStopsService(t *testing.T) 
 	if !strings.Contains(script, "sleep 1") {
 		t.Fatalf("expected a settle pause after stop, got %q", script)
 	}
+	if !strings.Contains(script, "sleep 600") || !strings.Contains(script, procdInitScript+" start") {
+		t.Fatalf("expected a watchdog that restarts the service if the installer hangs, got %q", script)
+	}
+	if !strings.Contains(script, "pidof radar-node") {
+		t.Fatalf("expected the watchdog to avoid starting a second agent, got %q", script)
+	}
 }
 
 func TestSelfUpdateCommandFor_NeverUsesSystemdRunOffLinux(t *testing.T) {
@@ -85,6 +93,34 @@ func TestSelfUpdateCommandFor_NeverUsesSystemdRunOffLinux(t *testing.T) {
 	}
 	if strings.Contains(launch.cmd.Path, "systemd-run") {
 		t.Fatalf("expected no systemd-run outside linux, got %q", launch.cmd.Path)
+	}
+}
+
+// The procd wrapper nests a multi-line installer script inside another
+// shell script; string interpolation can produce something that only
+// fails at the worst possible moment (mid-update, after the service
+// has been stopped). Parse it here instead.
+func TestSelfUpdateCommandFor_ProcdWrapperHasValidShellSyntax(t *testing.T) {
+	installCmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", []string{"--install-module=xray"})
+	launch := selfUpdateCommandFor("linux", 0, 4242, func(string) (string, error) {
+		return "/usr/bin/systemd-run", nil
+	}, true, installCmd)
+	if len(launch.cmd.Args) != 3 || launch.cmd.Args[1] != "-c" {
+		t.Fatalf("expected sh -c <script>, got %v", launch.cmd.Args)
+	}
+	f, err := os.CreateTemp("", "selfupdate-wrapper-*.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString(launch.cmd.Args[2]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-n", f.Name()).CombinedOutput(); err != nil {
+		t.Fatalf("procd updater wrapper has invalid shell syntax: %v\n%s\nscript was:\n%s", err, out, launch.cmd.Args[2])
 	}
 }
 

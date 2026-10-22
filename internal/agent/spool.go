@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,9 +17,9 @@ import (
 
 const (
 	defaultSpoolMaxBytes int64 = 16 << 20
-	spoolDrainBudget           = 20 * time.Second
-	spoolRetryInitial          = 5 * time.Second
-	spoolRetryMax              = time.Minute
+	deliveryDrainBudget        = 20 * time.Second
+	deliveryRetryInitial       = 5 * time.Second
+	deliveryRetryMax           = time.Minute
 )
 
 // spoolBatch is one results submission persisted before it is sent.
@@ -181,12 +182,16 @@ func (a *agent) postResults(ctx context.Context, results []wire.Result, sentAt s
 	if sentAt == "" {
 		sentAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	return a.client.PostResults(reportCtx, wire.ResultsRequest{
+	resp, err := a.client.PostResults(reportCtx, wire.ResultsRequest{
 		NodeID:  a.nodeID,
 		BatchID: newBatchID(),
 		SentAt:  sentAt,
 		Results: results,
 	})
+	if err == nil && resp == nil {
+		return nil, errors.New("radar-api returned an empty results response")
+	}
+	return resp, err
 }
 
 // drainSpool posts pending batches oldest-first until the queue is
@@ -199,7 +204,7 @@ func (a *agent) drainSpool(ctx context.Context) (delivered, accepted, rejected i
 	if a.spool == nil {
 		return 0, 0, 0, nil
 	}
-	if !a.spoolNextAttempt.IsZero() && time.Now().Before(a.spoolNextAttempt) {
+	if !a.deliveryNextAttempt.IsZero() && time.Now().Before(a.deliveryNextAttempt) {
 		return 0, 0, 0, nil
 	}
 	entries, err := a.spool.pending()
@@ -210,7 +215,7 @@ func (a *agent) drainSpool(ctx context.Context) (delivered, accepted, rejected i
 		return 0, 0, 0, nil
 	}
 
-	drainCtx, cancel := context.WithTimeout(ctx, spoolDrainBudget)
+	drainCtx, cancel := context.WithTimeout(ctx, deliveryDrainBudget)
 	defer cancel()
 	for _, entry := range entries {
 		if drainCtx.Err() != nil {
@@ -224,27 +229,29 @@ func (a *agent) drainSpool(ctx context.Context) (delivered, accepted, rejected i
 		}
 		resp, postErr := a.postResults(drainCtx, batch.Results, batch.SentAt)
 		if postErr != nil {
-			a.spoolBackoff = nextSpoolBackoff(a.spoolBackoff)
-			a.spoolNextAttempt = time.Now().Add(a.spoolBackoff)
+			a.backoffDelivery()
 			return delivered, accepted, rejected, postErr
+		}
+		if resp == nil {
+			a.backoffDelivery()
+			return delivered, accepted, rejected, errors.New("radar-api returned an empty results response")
 		}
 		a.spool.remove(entry.path)
 		delivered += len(batch.Results)
 		accepted += resp.Accepted
 		rejected += resp.Rejected
-		a.spoolBackoff = 0
-		a.spoolNextAttempt = time.Time{}
+		a.clearDeliveryBackoff()
 	}
 	return delivered, accepted, rejected, nil
 }
 
-func nextSpoolBackoff(previous time.Duration) time.Duration {
+func nextDeliveryBackoff(previous time.Duration) time.Duration {
 	if previous <= 0 {
-		return spoolRetryInitial
+		return deliveryRetryInitial
 	}
 	next := previous * 2
-	if next > spoolRetryMax {
-		return spoolRetryMax
+	if next > deliveryRetryMax {
+		return deliveryRetryMax
 	}
 	return next
 }

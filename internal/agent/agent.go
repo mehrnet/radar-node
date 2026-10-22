@@ -113,13 +113,13 @@ type Config struct {
 	ToolsDir string
 }
 
-// agent bundles everything the two concurrent loops (heartbeat --
-// which also carries probe-definition sync, see heartbeatLoop --
-// and scheduler) share, so neither needs a long, overlapping
-// positional parameter list just to thread the same handful of
-// dependencies through -- client/nodeID/reg in particular were
-// previously repeated across nearly every function signature in this
-// package.
+// agent bundles everything the concurrent loops (heartbeat -- which
+// also carries probe-definition sync, see heartbeatLoop -- scheduler,
+// and local-store maintenance) share, so none needs a long,
+// overlapping positional parameter list just to thread the same
+// handful of dependencies through -- client/nodeID/reg in particular
+// were previously repeated across nearly every function signature in
+// this package.
 type agent struct {
 	client      *apiclient.Client
 	nodeID      string
@@ -135,20 +135,29 @@ type agent struct {
 	store       *store.Store
 	// Scheduler-owned retry state for a failed delivery drain. Only the
 	// scheduler goroutine touches these.
-	spoolBackoff     time.Duration
-	spoolNextAttempt time.Time
-	// Local database bounds; maintained on the scheduler goroutine.
-	dbRetention     time.Duration
-	dbMaxBytes      int64
-	lastMaintenance time.Time
+	deliveryBackoff     time.Duration
+	deliveryNextAttempt time.Time
+	// Local database bounds; used by the maintenance loop.
+	dbRetention time.Duration
+	dbMaxBytes  int64
+	// ready flips after the first heartbeat that confirms this node's
+	// current status. Restored probes must not run until then,
+	// otherwise a node suspended while offline could race its first
+	// heartbeat and execute a few checks.
+	ready atomic.Bool
+	// triggersRestored flips once the pending-trigger queue has been
+	// read from disk. If that read fails at startup, the heartbeat
+	// loop retries it instead of leaving already-persisted triggers
+	// stranded behind RecordTrigger's dedup check.
+	triggersRestored atomic.Bool
 	// node_status starts optimistic; the first heartbeat/results
 	// response corrects it. An atomic.Value rather than a mutex so the
 	// scheduler can gate execution on it with no lock contention.
 	status atomic.Value
 }
 
-// Run blocks until ctx is cancelled, running the heartbeat and
-// scheduler loops concurrently.
+// Run blocks until ctx is cancelled, running the heartbeat, scheduler,
+// and (when SQLite is enabled) maintenance loops concurrently.
 func Run(ctx context.Context, cfg Config) error {
 	nodeID, _, ok := strings.Cut(cfg.APIKey, ":")
 	if !ok || nodeID == "" {
@@ -265,12 +274,7 @@ func Run(ctx context.Context, cfg Config) error {
 			a.cache.restore(hash, cachedStates(states))
 			journal.Info("agent", "restored local assignment", "probes", len(states))
 		}
-		triggers, err := a.store.PendingTriggers(ctx)
-		if err != nil {
-			journal.Error("agent", "restore pending triggers failed", "err", err)
-		} else if queued := a.cache.queueTriggers(agentTriggers(triggers)); queued > 0 {
-			journal.Info("agent", "restored pending triggers", "triggers", queued)
-		}
+		a.restorePendingTriggers(ctx)
 		if stats, err := a.store.Stats(ctx); err == nil {
 			journal.Info("agent", "local store ready",
 				"path", a.store.Path(), "journal", stats.JournalMode,
@@ -289,8 +293,15 @@ func Run(ctx context.Context, cfg Config) error {
 		defer wg.Done()
 		a.schedulerLoop(ctx, cfg.SchedulerTick)
 	}()
+	if a.store != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			a.maintenanceLoop(ctx)
+		}()
+	}
 	wg.Wait()
-	// Both loops are done (ctx cancelled): stop every warm pooled
+	// All loops are done (ctx cancelled): stop every warm pooled
 	// engine the scheduler was keeping alive -- the graceful half of
 	// engine cleanup, Pdeathsig being the ungraceful half.
 	reg.Shutdown()
@@ -333,6 +344,9 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 	// the common case (nothing changed since last time) never touches
 	// the upload path at all.
 	beat := func() {
+		if a.store != nil && !a.triggersRestored.Load() {
+			a.restorePendingTriggers(ctx)
+		}
 		resp, sentAt, receivedAt, err := send()
 		var rejected *apiclient.HeartbeatRejectedError
 		if errors.As(err, &rejected) {
@@ -346,7 +360,10 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			journal.Error("agent", "heartbeat failed", "err", err)
 			return
 		}
-		if resp.NodeStatus != "" {
+		// A heartbeat without a status has not confirmed that this
+		// node is still active; leave restored probes gated.
+		confirmed := resp.NodeStatus != ""
+		if confirmed {
 			a.status.Store(resp.NodeStatus)
 		}
 		if resp.HeartbeatIntervalSecs > 0 {
@@ -361,16 +378,25 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		// probes" (a genuinely empty assignment still carries a real,
 		// non-empty hash of its own).
 		if resp.ProbeHash != "" {
+			persisted := true
 			if a.store != nil {
 				if err := a.store.SaveAssignment(ctx, resp.ProbeHash, resp.Probes); err != nil {
-					journal.Error("agent", "persist probe assignment failed", "err", err)
+					journal.Error("agent", "persist probe assignment failed; will retry on a later heartbeat", "err", err)
+					persisted = false
 				}
 			}
-			a.cache.replaceAssignment(resp.ProbeHash, resp.Probes)
-			journal.Info("agent", "synced probe assignment", "probes", len(resp.Probes))
+			if persisted {
+				a.cache.replaceAssignment(resp.ProbeHash, resp.Probes)
+			} else {
+				a.cache.replaceAssignmentKeepingHash(resp.Probes)
+			}
+			journal.Info("agent", "synced probe assignment", "probes", len(resp.Probes), "persisted", persisted)
 		}
 		if len(resp.Events) > 0 {
 			a.applyTriggeredEvents(ctx, resp.Events)
+		}
+		if confirmed {
+			a.ready.Store(true)
 		}
 		switch resp.Command {
 		case "delete":
@@ -402,7 +428,7 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 // added specifically so this exact re-run-to-upgrade path doesn't hit
 // ETXTBSY). This process exiting is what lets that cp succeed; there
 // is deliberately no attempt to replace this binary in-process.
-// selfUpdateLogPath is where the detached installer's own stdout/
+// selfUpdateLogPattern is where the detached installer's own stdout/
 // stderr goes -- deliberately NOT this process's inherited os.Stdout.
 // A systemd service's stdout is a journal stream tied to that unit's
 // own lifecycle; once this process exits and the unit is marked
@@ -412,8 +438,11 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 // entirely -- observed in practice as install.sh silently appearing to
 // do nothing, with zero output anywhere, on every single attempt. A
 // plain, independent file survives regardless of what happens to the
-// parent unit.
-const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
+// parent unit. CreateTemp gives it an unpredictable name and 0600
+// permissions, unlike a fixed /tmp path that another local user could
+// pre-create as a symlink (and whose existing mode O_CREATE alone would
+// not tighten to 0600).
+const selfUpdateLogPattern = "radar-node-selfupdate-*.log"
 
 // selfUpdateExitCode is what reinstall() exits with to hand off to
 // the detached installer -- install.sh's own systemd unit template
@@ -515,6 +544,15 @@ func (a *agent) applyModuleActions(actions []string) {
 // buildInstallCommand's own doc comment for why this exists at all.
 const installFetchMaxAttempts = 5
 
+// shellQuote single-quotes a value for POSIX sh. Every value in the
+// generated installer command that is not a fixed literal (including
+// server-supplied module action suffixes) goes through this: the
+// command is ultimately executed by sh, so leaving it unquoted would
+// turn e.g. an action name into arbitrary shell code.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
 // buildInstallCommand is reinstall's own command-string logic, pulled
 // out into a pure function so the proxy handling is unit-testable
 // without spawning a real subprocess. proxyURL, if set, is threaded
@@ -545,23 +583,43 @@ const installFetchMaxAttempts = 5
 // update as a fresh pending action up to its own retry limit, the same
 // way it would for any other kind of update failure.
 func buildInstallCommand(nodeID, apiKey, apiURL, proxyURL string, extraFlags []string) string {
-	args := []string{"--node_id=" + nodeID, "--api_key=" + apiKey, "--api_url=" + apiURL}
+	args := []string{"--node_id=" + shellQuote(nodeID), "--api_key=" + shellQuote(apiKey), "--api_url=" + shellQuote(apiURL)}
 	curlProxyFlag := ""
 	if proxyURL != "" {
-		curlProxyFlag = "--proxy " + proxyURL + " "
-		args = append(args, "--proxy="+proxyURL)
+		curlProxyFlag = "--proxy " + shellQuote(proxyURL) + " "
+		args = append(args, "--proxy="+shellQuote(proxyURL))
 	}
-	args = append(args, extraFlags...)
-	return fmt.Sprintf(`set -e
+	for _, flag := range extraFlags {
+		args = append(args, shellQuote(flag))
+	}
+	return fmt.Sprintf(`_recover_service() {
+  if command -v pidof >/dev/null 2>&1 && pidof radar-node >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ -x /etc/init.d/radar-node ]; then
+    /etc/init.d/radar-node start >/dev/null 2>&1 && return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl start radar-node >/dev/null 2>&1 && return 0
+    systemctl --user start radar-node >/dev/null 2>&1 && return 0
+  fi
+  if command -v launchctl >/dev/null 2>&1; then
+    launchctl load -w /Library/LaunchDaemons/com.mehrnet.radar-node.plist >/dev/null 2>&1 && return 0
+    launchctl load -w "$HOME/Library/LaunchAgents/com.mehrnet.radar-node.plist" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+_script=""
+trap 'status=$?; if [ "$status" -ne 0 ]; then _recover_service || true; fi; if [ -n "$_script" ]; then rm -f "$_script"; fi; exit "$status"' EXIT
+set -e
 _script=$(mktemp)
 _attempt=1
 while :; do
-  if curl -fsSL %s%s -o "$_script"; then
+  if curl -fsSL --connect-timeout 10 --max-time 120 %s%s -o "$_script"; then
     break
   fi
   if [ "$_attempt" -ge %d ]; then
     echo "radar-node: failed to fetch install.sh after %d attempts" >&2
-    rm -f "$_script"
     exit 1
   fi
   echo "radar-node: install.sh fetch failed (attempt $_attempt/%d) -- retrying in $((_attempt * 2))s..." >&2
@@ -571,6 +629,7 @@ done
 sh "$_script" %s
 _status=$?
 rm -f "$_script"
+_script=""
 exit $_status`, curlProxyFlag, installScriptURL, installFetchMaxAttempts, installFetchMaxAttempts, installFetchMaxAttempts, strings.Join(args, " "))
 }
 
@@ -599,12 +658,14 @@ func (a *agent) reinstall(extraFlags ...string) {
 
 	launch := selfUpdateCommand(installCmd)
 	cmd := launch.cmd
-	logFile, err := os.OpenFile(selfUpdateLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	logPath := "stdout"
+	logFile, err := os.CreateTemp("", selfUpdateLogPattern)
 	if err != nil {
-		journal.Warn("agent", "self-update: could not open log file, falling back to this process's own stdout, which may not survive the restart that follows", "path", selfUpdateLogPath, "err", err)
+		journal.Warn("agent", "self-update: could not open log file, falling back to this process's own stdout, which may not survive the restart that follows", "err", err)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	} else {
+		logPath = logFile.Name()
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 	}
@@ -614,13 +675,16 @@ func (a *agent) reinstall(extraFlags ...string) {
 		// delay has elapsed, so stopping the service cannot take the
 		// updater down with it.
 		if err := cmd.Start(); err != nil {
-			journal.Error("agent", "self-update: launching the detached installer failed", "err", err, "log", selfUpdateLogPath)
+			if logFile != nil {
+				_ = logFile.Close()
+			}
+			journal.Error("agent", "self-update: launching the detached installer failed", "err", err, "log", logPath)
 			return
 		}
 		if logFile != nil {
 			_ = logFile.Close()
 		}
-		journal.Info("agent", "detached installer handed off, exiting so it can replace this process", "log", selfUpdateLogPath)
+		journal.Info("agent", "detached installer handed off, exiting so it can replace this process", "log", logPath)
 		os.Exit(selfUpdateExitCode)
 	}
 	// Run, not Start -- deliberately blocks here, but only on the
@@ -635,11 +699,15 @@ func (a *agent) reinstall(extraFlags ...string) {
 	// install.sh never producing a single line of output, on every
 	// attempt. Waiting for confirmation first removes that race
 	// instead of shrinking it.
-	if err := cmd.Run(); err != nil {
-		journal.Error("agent", "self-update: launching the installer failed", "err", err, "log", selfUpdateLogPath)
+	runErr := cmd.Run()
+	if logFile != nil {
+		_ = logFile.Close()
+	}
+	if runErr != nil {
+		journal.Error("agent", "self-update: launching the installer failed", "err", runErr, "log", logPath)
 		return
 	}
-	journal.Info("agent", "installer handed off, exiting so it can replace this process", "log", selfUpdateLogPath)
+	journal.Info("agent", "installer handed off, exiting so it can replace this process", "log", logPath)
 	os.Exit(selfUpdateExitCode)
 }
 
@@ -648,9 +716,10 @@ const (
 	// `respawn 3600 5 5`, i.e. five seconds after the agent's deliberate
 	// exit. Waiting past that window lets the old binary come back, then
 	// stops it, so the installer's cp cannot hit ETXTBSY.
-	procdRespawnWindowSeconds = 6
-	procdSettleSeconds        = 1
-	procdInitScript           = "/etc/init.d/radar-node"
+	procdRespawnWindowSeconds  = 6
+	procdSettleSeconds         = 1
+	procdUpdateWatchdogSeconds = 600
+	procdInitScript            = "/etc/init.d/radar-node"
 )
 
 type selfUpdateLaunch struct {
@@ -691,7 +760,8 @@ func selfUpdateCommandFor(goos string, euid int, pid int, lookPath func(string) 
 	if goos == "linux" {
 		if procd {
 			script := fmt.Sprintf(
-				"sleep %d\n%s stop >/dev/null 2>&1 || true\nsleep %d\n%s",
+				"( sleep %d; if ! command -v pidof >/dev/null 2>&1 || ! pidof radar-node >/dev/null 2>&1; then %s start >/dev/null 2>&1 || true; fi ) &\n_watchdog=$!\nsleep %d\n%s stop >/dev/null 2>&1 || true\nsleep %d\n( %s )\n_status=$?\nkill $_watchdog >/dev/null 2>&1 || true\nexit $_status",
+				procdUpdateWatchdogSeconds, procdInitScript,
 				procdRespawnWindowSeconds, procdInitScript, procdSettleSeconds, installCmd,
 			)
 			cmd := exec.Command("sh", "-c", script)
@@ -761,7 +831,9 @@ func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.maintain(ctx)
+			if !a.ready.Load() {
+				continue
+			}
 			if s, _ := a.status.Load().(string); s != wire.NodeStatusActive {
 				continue
 			}
@@ -827,12 +899,15 @@ func (a *agent) reportResults(ctx context.Context, due []wire.ProbeSnapshot, tri
 		if err != nil {
 			journal.Error("agent", "deliver results failed (left in local store)", "err", err,
 				"probes_run", len(due), "triggered", len(triggers), "results", len(results),
-				"inserted", summary.Inserted, "duplicates", summary.Duplicates, "delivered", delivered)
+				"inserted", summary.Inserted, "duplicates", summary.Duplicates,
+				"invalid_latency", summary.InvalidLatency, "invalid_extra", summary.InvalidExtra,
+				"delivered", delivered)
 			return true
 		}
 		journal.Info("agent", "tick complete",
 			"probes_run", len(due), "triggered", len(triggers), "results", len(results),
 			"inserted", summary.Inserted, "duplicates", summary.Duplicates,
+			"invalid_latency", summary.InvalidLatency, "invalid_extra", summary.InvalidExtra,
 			"delivered", delivered, "accepted", accepted, "rejected", rejected)
 		return true
 	}

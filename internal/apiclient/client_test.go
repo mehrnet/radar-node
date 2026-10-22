@@ -169,6 +169,34 @@ func isStatusError(err error, target **apiclient.StatusError) bool {
 	return ok
 }
 
+func TestSuccessfulResponsesRejectEmptyOrNullBodies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "empty", body: ""},
+		{name: "null", body: "null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c, err := apiclient.New(srv.URL, "node_1:secret", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.Heartbeat(context.Background(), wire.HeartbeatRequest{NodeID: "node_1"}); err == nil {
+				t.Fatal("heartbeat with a non-object 2xx body must fail")
+			}
+			if _, err := c.PostResults(context.Background(), wire.ResultsRequest{NodeID: "node_1"}); err == nil {
+				t.Fatal("results submission with a non-object 2xx body must fail")
+			}
+		})
+	}
+}
+
 func TestNew_UnsupportedProxyScheme(t *testing.T) {
 	if _, err := apiclient.New("http://example.com", "node_1:secret", "ftp://proxy.example.com"); err == nil {
 		t.Fatal("expected an error for an unsupported proxy scheme")

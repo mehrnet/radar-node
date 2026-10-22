@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -164,6 +165,62 @@ func TestRecordReplayAndPending(t *testing.T) {
 	}
 	if probes[0].Params["tls"] != true {
 		t.Errorf("params = %v", probes[0].Params)
+	}
+}
+
+func TestRecordResultsSanitizesInvalidFields(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	nan := math.NaN()
+	result := testResult("run_bad_fields", "p1", 1, time.Now())
+	result.LatencyMs = &nan
+	result.Extra = map[string]any{"value": math.NaN()}
+
+	summary, err := s.RecordResults(ctx, []wire.Result{result})
+	if err != nil {
+		t.Fatalf("RecordResults: %v", err)
+	}
+	if summary.Inserted != 1 || summary.InvalidLatency != 1 || summary.InvalidExtra != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	pending, err := s.PendingResults(ctx, 10)
+	if err != nil {
+		t.Fatalf("PendingResults: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending = %d, want 1", len(pending))
+	}
+	if pending[0].Result.LatencyMs != nil || pending[0].Result.Extra != nil {
+		t.Fatalf("invalid fields were not dropped: %+v", pending[0].Result)
+	}
+}
+
+func TestLatencyMicrosRejectsOverflow(t *testing.T) {
+	huge := math.MaxFloat64
+	if _, ok := latencyMicros(&huge); ok {
+		t.Fatal("a latency whose microsecond conversion overflows must be rejected")
+	}
+	normal := 12.5
+	if got, ok := latencyMicros(&normal); !ok || got != int64(12500) {
+		t.Fatalf("latencyMicros(12.5) = %v, %v; want 12500, true", got, ok)
+	}
+}
+
+func TestPendingResultsToleratesCorruptExtra(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.RecordResults(ctx, []wire.Result{testResult("run_corrupt_extra", "p1", 1, time.Now())}); err != nil {
+		t.Fatalf("RecordResults: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE journal SET extra = ? WHERE kind = 'result'", []byte("{not-json")); err != nil {
+		t.Fatalf("corrupt extra: %v", err)
+	}
+	pending, err := s.PendingResults(ctx, 10)
+	if err != nil {
+		t.Fatalf("PendingResults must not fail on a corrupt extra: %v", err)
+	}
+	if len(pending) != 1 || pending[0].Result.Extra != nil {
+		t.Fatalf("pending = %+v, want one result with nil extra", pending)
 	}
 }
 
@@ -358,6 +415,216 @@ func TestTriggerQueueAndCompletion(t *testing.T) {
 	}
 	if inserted {
 		t.Fatal("completed trigger should stay deduped after rebuild")
+	}
+}
+
+func TestPendingTriggersDropsCorruptSnapshot(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.SaveAssignment(ctx, "hash-1", []wire.ProbeSnapshot{testProbe("p1")}); err != nil {
+		t.Fatalf("SaveAssignment: %v", err)
+	}
+	if inserted, err := s.RecordTrigger(ctx, testTrigger("p1", "run_corrupt")); err != nil || !inserted {
+		t.Fatalf("RecordTrigger = %v, %v", inserted, err)
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE pending_triggers SET snapshot_json = ? WHERE probe_id = 'p1'", []byte("{bad-json")); err != nil {
+		t.Fatalf("corrupt snapshot: %v", err)
+	}
+	triggers, err := s.PendingTriggers(ctx)
+	if err != nil {
+		t.Fatalf("PendingTriggers: %v", err)
+	}
+	if len(triggers) != 0 {
+		t.Fatalf("pending triggers = %+v, want the corrupt row dropped", triggers)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM pending_triggers WHERE probe_id = 'p1'").Scan(&count); err != nil {
+		t.Fatalf("count pending: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("corrupt pending row was not deleted")
+	}
+	if inserted, err := s.RecordTrigger(ctx, testTrigger("p1", "run_corrupt")); err != nil || !inserted {
+		t.Fatalf("redelivery after corrupt row should queue again: inserted=%v err=%v", inserted, err)
+	}
+}
+
+func TestCompleteTriggersRecordsCompletionWithoutPendingRow(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if err := s.SaveAssignment(ctx, "hash-1", []wire.ProbeSnapshot{testProbe("p1")}); err != nil {
+		t.Fatalf("SaveAssignment: %v", err)
+	}
+	if inserted, err := s.RecordTrigger(ctx, testTrigger("p1", "run_memory_only")); err != nil || !inserted {
+		t.Fatalf("RecordTrigger = %v, %v", inserted, err)
+	}
+	// Simulate the trigger having only been applied in memory because
+	// its initial persistence failed.
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM pending_triggers WHERE probe_id = 'p1'"); err != nil {
+		t.Fatalf("delete pending: %v", err)
+	}
+	if err := s.CompleteTriggers(ctx, []PendingTrigger{{ProbeID: "p1", RunID: "run_memory_only"}}); err != nil {
+		t.Fatalf("CompleteTriggers: %v", err)
+	}
+	var completed int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM completed_triggers WHERE probe_id = 'p1' AND run_id = 'run_memory_only'").Scan(&completed); err != nil {
+		t.Fatalf("completed trigger: %v", err)
+	}
+	if completed != 1 {
+		t.Fatalf("completed trigger row = %d, want 1", completed)
+	}
+	if inserted, err := s.RecordTrigger(ctx, testTrigger("p1", "run_memory_only")); err != nil || inserted {
+		t.Fatalf("completed run should stay deduped: inserted=%v err=%v", inserted, err)
+	}
+}
+
+func TestTriggerSnapshotDoesNotOverwriteAssignmentProjection(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	current := testProbe("p1")
+	current.Target = "current.example:443"
+	if err := s.SaveAssignment(ctx, "hash-current", []wire.ProbeSnapshot{current}); err != nil {
+		t.Fatalf("SaveAssignment: %v", err)
+	}
+	event := testTrigger("p1", "run_old")
+	event.Probe.Target = "old.example:443"
+	if inserted, err := s.RecordTrigger(ctx, event); err != nil || !inserted {
+		t.Fatalf("RecordTrigger = %v, %v", inserted, err)
+	}
+	check := func(stage string) {
+		t.Helper()
+		var target string
+		if err := s.db.QueryRowContext(ctx, "SELECT target FROM probes WHERE id = 'p1'").Scan(&target); err != nil {
+			t.Fatalf("%s: read probe: %v", stage, err)
+		}
+		if target != current.Target {
+			t.Fatalf("%s: trigger snapshot overwrote the assignment projection: %q", stage, target)
+		}
+		triggers, err := s.PendingTriggers(ctx)
+		if err != nil {
+			t.Fatalf("%s: PendingTriggers: %v", stage, err)
+		}
+		if len(triggers) != 1 || triggers[0].Probe.Target != event.Probe.Target {
+			t.Fatalf("%s: pending trigger lost its own snapshot: %+v", stage, triggers)
+		}
+	}
+	check("record")
+	if err := s.Rebuild(ctx); err != nil {
+		t.Fatalf("Rebuild: %v", err)
+	}
+	check("rebuild")
+}
+
+func TestPendingTriggerEventSeqUsesJournalRowID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	valid := testResult("run_valid", "p1", 1, now)
+	skipped := valid
+	skipped.RunID = "" // reserves an origin sequence number without inserting
+	if _, err := s.RecordResults(ctx, []wire.Result{valid, skipped}); err != nil {
+		t.Fatalf("RecordResults: %v", err)
+	}
+	if inserted, err := s.RecordTrigger(ctx, testTrigger("p1", "run_trigger")); err != nil || !inserted {
+		t.Fatalf("RecordTrigger = %v, %v", inserted, err)
+	}
+
+	var (
+		rowSeq    int64
+		originSeq int64
+		eventSeq  int64
+	)
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT seq, origin_seq FROM journal WHERE kind = 'trigger' AND run_id = 'run_trigger'",
+	).Scan(&rowSeq, &originSeq); err != nil {
+		t.Fatalf("read trigger event: %v", err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT event_seq FROM pending_triggers WHERE probe_id = 'p1' AND run_id = 'run_trigger'",
+	).Scan(&eventSeq); err != nil {
+		t.Fatalf("read pending trigger: %v", err)
+	}
+	if originSeq == rowSeq {
+		t.Fatalf("test setup produced no sequence gap (rowid=%d, origin_seq=%d)", rowSeq, originSeq)
+	}
+	if eventSeq != rowSeq {
+		t.Fatalf("pending trigger event_seq = %d, want journal rowid %d (origin_seq was %d)", eventSeq, rowSeq, originSeq)
+	}
+
+	// A pending trigger's journal event is never eligible for pruning,
+	// however old it is.
+	if _, err := s.db.ExecContext(ctx, "UPDATE journal SET at_ms = ? WHERE seq = ?", now.Add(-48*time.Hour).UnixMilli(), rowSeq); err != nil {
+		t.Fatalf("age trigger event: %v", err)
+	}
+	if _, err := s.Maintain(ctx, MaintainOptions{Retention: time.Hour}); err != nil {
+		t.Fatalf("Maintain: %v", err)
+	}
+	var remaining int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM journal WHERE kind = 'trigger' AND run_id = 'run_trigger'").Scan(&remaining); err != nil {
+		t.Fatalf("count trigger event: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("pending trigger's journal event was pruned")
+	}
+}
+
+func TestOpenMigratesPendingTriggerEventSeq(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "radar.db")
+	ctx := context.Background()
+	s, err := Open(path, Options{Origin: testOrigin})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	now := time.Now()
+	valid := testResult("run_valid", "p1", 1, now)
+	skipped := valid
+	skipped.RunID = ""
+	if _, err := s.RecordResults(ctx, []wire.Result{valid, skipped}); err != nil {
+		t.Fatalf("RecordResults: %v", err)
+	}
+	if inserted, err := s.RecordTrigger(ctx, testTrigger("p1", "run_trigger")); err != nil || !inserted {
+		t.Fatalf("RecordTrigger = %v, %v", inserted, err)
+	}
+	var rowSeq, originSeq int64
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT seq, origin_seq FROM journal WHERE kind = 'trigger' AND run_id = 'run_trigger'",
+	).Scan(&rowSeq, &originSeq); err != nil {
+		t.Fatalf("read trigger event: %v", err)
+	}
+	if originSeq == rowSeq {
+		t.Fatalf("test setup produced no sequence gap")
+	}
+	// Reproduce the v1 representation and version.
+	if _, err := s.db.ExecContext(ctx, "UPDATE pending_triggers SET event_seq = ? WHERE probe_id = 'p1'", originSeq); err != nil {
+		t.Fatalf("corrupt pending event_seq: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
+		t.Fatalf("downgrade user_version: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := Open(path, Options{Origin: testOrigin})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	var eventSeq int64
+	if err := reopened.db.QueryRowContext(ctx,
+		"SELECT event_seq FROM pending_triggers WHERE probe_id = 'p1' AND run_id = 'run_trigger'",
+	).Scan(&eventSeq); err != nil {
+		t.Fatalf("read migrated pending trigger: %v", err)
+	}
+	if eventSeq != rowSeq {
+		t.Fatalf("migrated event_seq = %d, want %d", eventSeq, rowSeq)
+	}
+	var version int
+	if err := reopened.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", version, schemaVersion)
 	}
 }
 

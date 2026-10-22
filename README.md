@@ -188,6 +188,10 @@ attempt, delivered from a durable outbox, and retried after a crash or an
 API outage. The file is bound to the node identity it was created with;
 opening it under a different origin is refused.
 
+- Keep the file on persistent storage. On OpenWrt `/var` is usually a
+  tmpfs, so the installer defaults to `/etc/radar-node/radar.db` there and
+  warns when an explicitly configured path resolves to tmpfs or rootfs.
+
 - Results are stored once, as typed columns -- not duplicated as JSON in
   an event log. Probe assignments, triggers, and trigger completions are
   journaled alongside them, with small materialized tables for the

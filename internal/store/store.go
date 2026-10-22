@@ -155,6 +155,8 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 	switch {
 	case version == schemaVersion:
 		return nil
+	case version == 1:
+		return migrateV1ToV2(ctx, db)
 	case version == 0:
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -175,6 +177,43 @@ func initSchema(ctx context.Context, db *sql.DB) error {
 	default:
 		return fmt.Errorf("store: database schema %d is newer than this binary supports (%d)", version, schemaVersion)
 	}
+}
+
+// migrateV1ToV2 repoints the pending-trigger queue at journal rowids.
+// v1 stored the per-origin sequence there, but maintenance protects
+// pending trigger events by journal rowid; duplicate results create
+// gaps between the two, so a live trigger's event could be pruned.
+func migrateV1ToV2(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin schema migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE pending_triggers
+		   SET event_seq = (
+		       SELECT j.seq FROM journal j
+		        WHERE j.kind = 'trigger'
+		          AND j.probe_id = pending_triggers.probe_id
+		          AND j.run_id = pending_triggers.run_id
+		        ORDER BY j.seq DESC
+		        LIMIT 1
+		   )
+		 WHERE EXISTS (
+		       SELECT 1 FROM journal j
+		        WHERE j.kind = 'trigger'
+		          AND j.probe_id = pending_triggers.probe_id
+		          AND j.run_id = pending_triggers.run_id
+		 )`); err != nil {
+		return fmt.Errorf("store: migrate pending trigger seqs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("store: record schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit schema migration: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) initMeta(ctx context.Context, requestedOrigin string) error {
@@ -324,9 +363,9 @@ func resultFromRow(
 		result.LatencyMs = &ms
 	}
 	if len(extra) > 0 {
-		if err := json.Unmarshal(extra, &result.Extra); err != nil {
-			return wire.Result{}, fmt.Errorf("store: decode result extra: %w", err)
-		}
+		// A malformed extra field must not make one undelivered row
+		// impossible to drain forever; the typed fields are still valid.
+		_ = json.Unmarshal(extra, &result.Extra)
 	}
 	return result, nil
 }

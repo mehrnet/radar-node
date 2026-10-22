@@ -111,12 +111,15 @@ func (s *Store) Rollups(ctx context.Context, probeID string, fromMS, toMS int64,
 // advancing a cursor in the same transaction as each chunk's upserts.
 // It runs before retention pruning so raw results can be discarded
 // without losing their long-term aggregates.
+var errRollupCursorMoved = errors.New("store: rollup cursor moved")
+
 func (s *Store) rollupResults(ctx context.Context) (int64, error) {
 	after, err := s.metaInt(ctx, "rollup_seq")
 	if err != nil {
 		return 0, err
 	}
 	var total int64
+	moves := 0
 	for {
 		rows, err := s.readRollupChunk(ctx, after)
 		if err != nil {
@@ -159,7 +162,22 @@ func (s *Store) rollupResults(ctx context.Context) (int64, error) {
 				lastSeq = row.seq
 			}
 		}
-		if err := s.writeRollups(ctx, aggregated, lastSeq); err != nil {
+		err = s.writeRollups(ctx, aggregated, after, lastSeq)
+		if errors.Is(err, errRollupCursorMoved) {
+			// Another maintainer advanced the cursor while this chunk
+			// was being aggregated. Re-read from its cursor instead of
+			// writing a second copy of rows it already counted.
+			moves++
+			if moves > 5 {
+				return total, fmt.Errorf("store: rollup cursor kept moving: %w", err)
+			}
+			after, err = s.metaInt(ctx, "rollup_seq")
+			if err != nil {
+				return total, err
+			}
+			continue
+		}
+		if err != nil {
 			return total, err
 		}
 		total += int64(len(rows))
@@ -193,12 +211,27 @@ func (s *Store) readRollupChunk(ctx context.Context, after int64) ([]rollupRow, 
 	return out, nil
 }
 
-func (s *Store) writeRollups(ctx context.Context, aggregated map[rollupKey]*rollupAgg, cursor int64) error {
+func (s *Store) writeRollups(ctx context.Context, aggregated map[rollupKey]*rollupAgg, expectedCursor, nextCursor int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin rollups: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	var raw sql.NullString
+	err = tx.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = 'rollup_seq'").Scan(&raw)
+	current := int64(0)
+	if err == nil {
+		current, err = strconv.ParseInt(raw.String, 10, 64)
+		if err != nil {
+			return fmt.Errorf("store: parse rollup cursor: %w", err)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("store: read rollup cursor: %w", err)
+	}
+	if current != expectedCursor {
+		return errRollupCursorMoved
+	}
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO rollups (
@@ -232,7 +265,7 @@ func (s *Store) writeRollups(ctx context.Context, aggregated map[rollupKey]*roll
 			return fmt.Errorf("store: upsert rollup: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO meta (key, value) VALUES ('rollup_seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", strconv.FormatInt(cursor, 10)); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO meta (key, value) VALUES ('rollup_seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", strconv.FormatInt(nextCursor, 10)); err != nil {
 		return fmt.Errorf("store: advance rollup cursor: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

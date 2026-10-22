@@ -84,14 +84,14 @@ func TestRun_UploadsModulesOnHeartbeatRejectionThenSucceeds(t *testing.T) {
 	deadline := time.After(5 * time.Second)
 	for {
 		mu.Lock()
-		ok := accepted
+		done := accepted && heartbeatCount >= 2
 		mu.Unlock()
-		if ok {
+		if done {
 			break
 		}
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for the heartbeat to be accepted after a module upload")
+			t.Fatal("timed out waiting for the rejected heartbeat to retry after the module upload")
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

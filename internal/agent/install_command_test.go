@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -25,18 +26,18 @@ func TestBuildInstallCommand_NoProxy_OmitsBothProxyFlags(t *testing.T) {
 func TestBuildInstallCommand_WithProxy_AppliesToBothTheOuterCurlAndTheScriptArg(t *testing.T) {
 	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "socks5h://127.0.0.1:1080", nil)
 
-	if !strings.Contains(cmd, "curl -fsSL --proxy socks5h://127.0.0.1:1080 ") {
-		t.Fatalf("expected the outer curl fetching install.sh to carry --proxy before the script URL, got %q", cmd)
+	if !strings.Contains(cmd, "curl -fsSL --connect-timeout 10 --max-time 120 --proxy 'socks5h://127.0.0.1:1080' ") {
+		t.Fatalf("expected the outer curl fetching install.sh to carry bounded timeouts and --proxy before the script URL, got %q", cmd)
 	}
-	if !strings.Contains(cmd, "--proxy=socks5h://127.0.0.1:1080") {
+	if !strings.Contains(cmd, "--proxy='socks5h://127.0.0.1:1080'") {
 		t.Fatalf("expected install.sh's own --proxy= argument to still be present, got %q", cmd)
 	}
 }
 
 func TestBuildInstallCommand_IncludesExtraFlags(t *testing.T) {
 	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", []string{"--install-module=xray", "--remove-module=wireguard"})
-	if !strings.Contains(cmd, `sh "$_script" --node_id=node_x --api_key=secret --api_url=https://radar-api.example.com --install-module=xray --remove-module=wireguard`) {
-		t.Fatalf("expected extra flags appended to the script invocation, got %q", cmd)
+	if !strings.Contains(cmd, `sh "$_script" --node_id='node_x' --api_key='secret' --api_url='https://radar-api.example.com' '--install-module=xray' '--remove-module=wireguard'`) {
+		t.Fatalf("expected quoted extra flags appended to the script invocation, got %q", cmd)
 	}
 }
 
@@ -107,12 +108,61 @@ func TestBuildInstallCommand_ScriptReceivesArgsWithoutAStrayDoubleDash(t *testin
 	}
 }
 
+// Module action names come from the server, and the proxy URL/key/URL
+// come from configuration; none may be allowed to become shell syntax.
+func TestBuildInstallCommand_QuotesShellMetacharacters(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "#!/bin/sh\nfor a in \"$@\"; do echo \"arg:[$a]\"; done\n")
+	}))
+	defer srv.Close()
+
+	marker := filepath.Join(t.TempDir(), "pwned")
+	nodeID := "node'; touch " + marker + "; '"
+	apiKey := "secret$(touch " + marker + ")"
+	extra := "--install-module=xray; touch " + marker
+	cmd := buildInstallCommand(nodeID, apiKey, "https://radar-api.example.com", "", []string{extra})
+	cmd = strings.Replace(cmd, installScriptURL, srv.URL, 1)
+
+	out, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated command failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("shell metacharacters in installer arguments were executed\n%s", out)
+	}
+	for _, want := range []string{
+		"arg:[--node_id=" + nodeID + "]",
+		"arg:[--api_key=" + apiKey + "]",
+		"arg:[" + extra + "]",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Fatalf("expected %q to reach the installer as one literal argument, got:\n%s", want, out)
+		}
+	}
+}
+
 // buildInstallCommand builds a multi-line shell script via string
 // templating -- the one thing that kind of template can't guarantee on
 // its own is that the result actually parses as shell at all. `sh -n`
 // is a cheap, direct check for that, catching a broken template here
 // instead of it only surfacing much later as a cryptic runtime error
 // on a real node.
+func TestBuildInstallCommand_RecoversServiceWhenTheOuterFetchFails(t *testing.T) {
+	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "", nil)
+	for _, want := range []string{
+		"_recover_service()",
+		"pidof radar-node",
+		"trap 'status=$?; if [ \"$status\" -ne 0 ]; then _recover_service || true; fi;",
+		"/etc/init.d/radar-node start",
+		"systemctl start radar-node",
+		"systemctl --user start radar-node",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("expected recovery path %q in the updater script, got %q", want, cmd)
+		}
+	}
+}
+
 func TestBuildInstallCommand_GeneratesValidShellSyntax(t *testing.T) {
 	cmd := buildInstallCommand("node_x", "secret", "https://radar-api.example.com", "socks5h://127.0.0.1:1080", []string{"--install-module=xray"})
 	f, err := os.CreateTemp("", "syntax-check-*.sh")

@@ -83,6 +83,22 @@ func (c *probeCache) lastKnownHash() string {
 func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.replaceAssignmentLocked(probes)
+	c.contentHash = hash
+}
+
+// replaceAssignmentKeepingHash applies a new assignment to the live
+// cache without committing its hash. Used when persisting the hash to
+// the local store failed: the next heartbeat still advertises the old
+// hash, so the server sends the full assignment again and persistence
+// gets another chance instead of the database silently going stale.
+func (c *probeCache) replaceAssignmentKeepingHash(probes []wire.ProbeSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.replaceAssignmentLocked(probes)
+}
+
+func (c *probeCache) replaceAssignmentLocked(probes []wire.ProbeSnapshot) {
 	next := make(map[string]*cachedProbe, len(probes))
 	for _, snapshot := range probes {
 		entry := &cachedProbe{ProbeSnapshot: snapshot}
@@ -101,7 +117,6 @@ func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot)
 		next[snapshot.ID] = entry
 	}
 	c.probes = next
-	c.contentHash = hash
 }
 
 // cachedProbeState is one restored probe row, including the schedule
@@ -131,12 +146,12 @@ func (c *probeCache) restore(hash string, states []cachedProbeState) {
 // events -- entirely independent of replaceAssignment above (see
 // wire.Event's own doc comment: as of SpecVersion 2 "triggered" is the
 // only event type that still arrives this way, on every heartbeat
-// regardless of hash match). Each trigger also refreshes this probe's
-// own cached snapshot from the event's own embedded payload, so a
-// trigger fired the instant after an edit still runs the new
-// definition, not a stale cached one -- but never touches lastRunAt,
-// since a trigger is an independent one-off run, not part of this
-// probe's normal schedule/due-ness bookkeeping.
+// regardless of hash match). The queued run carries the event's own
+// embedded snapshot, so a trigger fired the instant after an edit runs
+// the new definition. It deliberately does not overwrite the probe's
+// cached scheduled definition: a redelivered or restored trigger can
+// be older than the current assignment, and a matching assignment hash
+// means the server will not resend the correct snapshot to repair it.
 //
 // Deduped by RunID against lastTriggerRunID and the pending queue --
 // radar-api delivers a "triggered" event on every heartbeat until this
@@ -169,7 +184,6 @@ func (c *probeCache) applyTriggeredEventLocked(ev wire.Event) bool {
 		if existing.lastTriggerRunID == ev.RunID {
 			return false
 		}
-		existing.ProbeSnapshot = ev.Probe
 		existing.lastTriggerRunID = ev.RunID
 	}
 	c.pendingTriggers = append(c.pendingTriggers, pendingTrigger{
@@ -180,9 +194,9 @@ func (c *probeCache) applyTriggeredEventLocked(ev wire.Event) bool {
 	return true
 }
 
-// queueTriggers restores durable triggers after a restart. It updates
-// snapshots for probes still in the assignment but does not add probes
-// the server no longer assigned.
+// queueTriggers restores durable triggers after a restart. Each keeps
+// its own snapshot and never overwrites the live scheduled definition;
+// probes the server no longer assigned are not added back.
 func (c *probeCache) queueTriggers(triggers []pendingTrigger) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -202,9 +216,6 @@ func (c *probeCache) queueTriggers(triggers []pendingTrigger) int {
 		if existing, ok := c.probes[trigger.ProbeID]; ok {
 			if existing.lastTriggerRunID == trigger.RunID {
 				continue
-			}
-			if trigger.Probe.ID != "" {
-				existing.ProbeSnapshot = trigger.Probe
 			}
 			existing.lastTriggerRunID = trigger.RunID
 		}

@@ -118,10 +118,25 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if resp.StatusCode >= 400 {
 		return &StatusError{Code: resp.StatusCode, Body: string(respBody)}
 	}
-	if out == nil || len(respBody) == 0 {
+	if out == nil {
 		return nil
 	}
-	return json.Unmarshal(respBody, out)
+	// Every endpoint that decodes a body expects a JSON object. An
+	// empty or null 2xx (a broken proxy, a captive portal, a server
+	// bug) must not become a zero-value "success": a zero results
+	// response would settle undelivered results as accepted, and a
+	// zero heartbeat would mark a restored assignment ready.
+	trimmed := bytes.TrimSpace(respBody)
+	if len(trimmed) == 0 {
+		return errors.New("radar-api returned a successful response with an empty body")
+	}
+	if bytes.Equal(trimmed, []byte("null")) {
+		return errors.New("radar-api returned a successful response with a null body")
+	}
+	if err := json.Unmarshal(trimmed, out); err != nil {
+		return fmt.Errorf("decode radar-api response: %w", err)
+	}
+	return nil
 }
 
 // StatusError is returned for any non-2xx radar-api response.

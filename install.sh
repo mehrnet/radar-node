@@ -443,9 +443,9 @@ check_clock_skew() {
 curl_get() {
   # $1 = url, $2 = output path
   if [ -n "$PROXY" ]; then
-    curl -fL --progress-bar --proxy "$PROXY" "$1" -o "$2"
+    curl -fL --connect-timeout 10 --max-time 300 --progress-bar --proxy "$PROXY" "$1" -o "$2"
   else
-    curl -fL --progress-bar "$1" -o "$2"
+    curl -fL --connect-timeout 10 --max-time 300 --progress-bar "$1" -o "$2"
   fi
 }
 
@@ -463,9 +463,9 @@ curl_get_with_type() {
   # $1 = url, $2 = output path, $3 = optional extra curl args
   # shellcheck disable=SC2086
   if [ -n "$PROXY" ]; then
-    curl -fL --progress-bar ${3:-} --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
+    curl -fL --connect-timeout 10 --max-time 300 --progress-bar ${3:-} --proxy "$PROXY" -w '%{content_type}' "$1" -o "$2"
   else
-    curl -fL --progress-bar ${3:-} -w '%{content_type}' "$1" -o "$2"
+    curl -fL --connect-timeout 10 --max-time 300 --progress-bar ${3:-} -w '%{content_type}' "$1" -o "$2"
   fi
 }
 
@@ -529,17 +529,21 @@ cleanup_and_recover() {
   status=$?
   rm -rf "$WORKDIR"
   if [ "$status" -ne 0 ] && [ -n "${existing_unit:-}" ] && [ -f "$existing_unit" ]; then
-    log "install failed -- attempting to bring the previous installation back up"
-    if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ] && [ -x /etc/init.d/radar-node ]; then
-      /etc/init.d/radar-node start >/dev/null 2>&1 || true
-    elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
-      if [ "$IS_ROOT" = "1" ]; then
-        systemctl start radar-node >/dev/null 2>&1 || true
-      else
-        systemctl --user start radar-node >/dev/null 2>&1 || true
+    if command -v pidof >/dev/null 2>&1 && pidof radar-node >/dev/null 2>&1; then
+      log "service is already running; not starting another instance"
+    else
+      log "install failed -- attempting to bring the previous installation back up"
+      if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ] && [ -x /etc/init.d/radar-node ]; then
+        /etc/init.d/radar-node start >/dev/null 2>&1 || true
+      elif [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+        if [ "$IS_ROOT" = "1" ]; then
+          systemctl start radar-node >/dev/null 2>&1 || true
+        else
+          systemctl --user start radar-node >/dev/null 2>&1 || true
+        fi
+      elif [ "$OS" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
+        launchctl load -w "$existing_unit" >/dev/null 2>&1 || true
       fi
-    elif [ "$OS" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-      launchctl load -w "$existing_unit" >/dev/null 2>&1 || true
     fi
   fi
   exit "$status"
@@ -896,6 +900,12 @@ if [ -n "$DB_PATH" ]; then
     mkdir -p "$db_dir" || err "could not create database directory ${db_dir}"
     chmod 700 "$db_dir" 2>/dev/null || true
   fi
+  db_fs="$(df -P "$db_dir" 2>/dev/null | awk 'NR==2 {print $1}')"
+  case "$db_fs" in
+    tmpfs|rootfs)
+      warn "database ${DB_PATH} is on ${db_fs}, which does not survive a reboot; move it to persistent storage (e.g. /etc/radar-node/radar.db on OpenWrt)"
+      ;;
+  esac
 fi
 
 API_KEY_COMBINED="${NODE_ID}:${API_KEY}"
@@ -951,10 +961,14 @@ EOF
     log "radar-node is running under procd ($init_file)"
   else
     /etc/init.d/radar-node stop >/dev/null 2>&1 || true
-    /etc/init.d/radar-node disable >/dev/null 2>&1 || true
-    rm -f "$init_file"
-    log "procd is present but the service did not start, skipping service setup"
+    # Keep the init script enabled: deleting it here used to leave an
+    # unattended update with no way back if the new binary could not
+    # start, because the installer still exited 0. Failing instead
+    # lets the caller's recovery trap retry the service, and leaves
+    # procd a definition to start on the next boot if it cannot.
+    log "procd is present but the service did not start; leaving the init script in place for recovery"
     print_manual_run
+    return 1
   fi
 }
 

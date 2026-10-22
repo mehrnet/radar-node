@@ -76,7 +76,7 @@ func TestDrainStoreSettlesAcksAndBacksOff(t *testing.T) {
 	if _, _, _, err := a.drainStore(context.Background()); err == nil {
 		t.Fatal("expected the first drain to fail")
 	}
-	if a.spoolNextAttempt.IsZero() {
+	if a.deliveryNextAttempt.IsZero() {
 		t.Fatal("failed drain did not arm a retry backoff")
 	}
 	if pending, _ := local.PendingResults(context.Background(), 10); len(pending) != 2 {
@@ -84,8 +84,8 @@ func TestDrainStoreSettlesAcksAndBacksOff(t *testing.T) {
 	}
 
 	fail.Store(false)
-	a.spoolNextAttempt = time.Time{}
-	a.spoolBackoff = 0
+	a.deliveryNextAttempt = time.Time{}
+	a.deliveryBackoff = 0
 	delivered, accepted, rejected, err := a.drainStore(context.Background())
 	if err != nil {
 		t.Fatalf("drain after recovery: %v", err)

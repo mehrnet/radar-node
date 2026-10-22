@@ -100,8 +100,8 @@ func TestNextSpoolBackoff(t *testing.T) {
 		{30 * time.Second, time.Minute},
 		{time.Minute, time.Minute},
 	} {
-		if got := nextSpoolBackoff(tc.in); got != tc.want {
-			t.Fatalf("nextSpoolBackoff(%v) = %v, want %v", tc.in, got, tc.want)
+		if got := nextDeliveryBackoff(tc.in); got != tc.want {
+			t.Fatalf("nextDeliveryBackoff(%v) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }
@@ -140,13 +140,13 @@ func TestDrainSpoolRetriesThenDeletes(t *testing.T) {
 	if pending, _ := spool.pending(); len(pending) != 1 {
 		t.Fatalf("pending after failed drain = %d, want 1", len(pending))
 	}
-	if a.spoolNextAttempt.IsZero() {
+	if a.deliveryNextAttempt.IsZero() {
 		t.Fatal("failed drain did not arm a retry backoff")
 	}
 
 	fail.Store(false)
-	a.spoolNextAttempt = time.Time{}
-	a.spoolBackoff = 0
+	a.deliveryNextAttempt = time.Time{}
+	a.deliveryBackoff = 0
 	delivered, accepted, rejected, err := a.drainSpool(context.Background())
 	if err != nil {
 		t.Fatalf("drain after recovery: %v", err)

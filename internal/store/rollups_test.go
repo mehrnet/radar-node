@@ -3,6 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +86,63 @@ func TestRollupsAreIncrementalAndIdempotent(t *testing.T) {
 	rows = readRollups(t, s)
 	if rows[0].checks != 3 || rows[0].ok != 2 || rows[0].latencyCount != 2 {
 		t.Fatalf("p1 after late result = %+v", rows[0])
+	}
+}
+
+func TestRollupsAreSafeUnderConcurrentMaintenance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "radar.db")
+	first, err := Open(path, Options{Origin: testOrigin})
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	defer first.Close()
+	second, err := Open(path, Options{Origin: testOrigin})
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	defer second.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	batch := make([]wire.Result, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		batch = append(batch, testResult(fmt.Sprintf("run_concurrent_%d", i), "p1", 1, now))
+	}
+	if _, err := first.RecordResults(ctx, batch); err != nil {
+		t.Fatalf("RecordResults: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i, local := range []*Store{first, second} {
+		wg.Add(1)
+		go func(index int, local *Store) {
+			defer wg.Done()
+			<-start
+			_, errs[index] = local.rollupResults(ctx)
+		}(i, local)
+	}
+	close(start)
+	wg.Wait()
+	// SQLite may reject one writer under contention; the other must
+	// still have produced exactly one copy of every row.
+	if errs[0] != nil && errs[1] != nil {
+		if _, retryErr := first.rollupResults(ctx); retryErr != nil {
+			t.Fatalf("both concurrent rollups failed (%v, %v), retry: %v", errs[0], errs[1], retryErr)
+		}
+	}
+
+	rollups, err := first.Rollups(ctx, "", 0, now.Add(time.Hour).UnixMilli(), 100)
+	if err != nil {
+		t.Fatalf("Rollups: %v", err)
+	}
+	var checks int64
+	for _, rollup := range rollups {
+		checks += rollup.Checks
+	}
+	if checks != 1000 {
+		t.Fatalf("rolled up %d checks, want exactly 1000 (concurrent double-count)", checks)
 	}
 }
 

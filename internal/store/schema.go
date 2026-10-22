@@ -1,7 +1,9 @@
 package store
 
-const schemaVersion = 1
+const schemaVersion = 2
 
+// schemaV1 is the base schema. Fresh databases at any later version
+// start from it and then run the incremental migrations.
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS meta (
 	key   TEXT PRIMARY KEY,
