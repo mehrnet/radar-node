@@ -31,6 +31,10 @@ type cachedProbe struct {
 type pendingTrigger struct {
 	ProbeID string
 	RunID   string
+	// Probe is the snapshot carried by the trigger itself. The probe may
+	// already have been removed from the standing assignment, so the
+	// trigger has to stay runnable on its own.
+	Probe wire.ProbeSnapshot
 }
 
 // probeCache is the node's local understanding of which probes it's
@@ -100,6 +104,29 @@ func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot)
 	c.contentHash = hash
 }
 
+// cachedProbeState is one restored probe row, including the schedule
+// and trigger bookkeeping that must survive a restart.
+type cachedProbeState struct {
+	Snapshot         wire.ProbeSnapshot
+	LastRunAt        time.Time
+	LastTriggerRunID string
+}
+
+func (c *probeCache) restore(hash string, states []cachedProbeState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := make(map[string]*cachedProbe, len(states))
+	for _, state := range states {
+		next[state.Snapshot.ID] = &cachedProbe{
+			ProbeSnapshot:    state.Snapshot,
+			lastRunAt:        state.LastRunAt,
+			lastTriggerRunID: state.LastTriggerRunID,
+		}
+	}
+	c.probes = next
+	c.contentHash = hash
+}
+
 // applyTriggeredEvents queues a run for each "triggered" entry in
 // events -- entirely independent of replaceAssignment above (see
 // wire.Event's own doc comment: as of SpecVersion 2 "triggered" is the
@@ -111,38 +138,114 @@ func (c *probeCache) replaceAssignment(hash string, probes []wire.ProbeSnapshot)
 // since a trigger is an independent one-off run, not part of this
 // probe's normal schedule/due-ness bookkeeping.
 //
-// Deduped by RunID against lastTriggerRunID -- radar-api's own server
-// side delivers a "triggered" event on *every* heartbeat regardless of
-// hash match, deleting the underlying row only once this node reports
-// results back under that RunID (see its own doc comment: "delivered
-// inline on every heartbeat... deleted synchronously the moment this
-// node reports results"). Any lag between a heartbeat delivering the
-// event and this node's first successful report of it -- a slow probe,
-// a delayed results flush, a batch of intervening heartbeats -- means
-// the exact same RunID can legitimately arrive more than once before
-// the server-side row is gone. Without this check, each redelivery
-// unconditionally queued another run, all sharing that one RunID; a
-// real production incident traced this to node results failing outright
-// (a (node_id, run_id, seq) uniqueness violation), taking down every
-// other, unrelated result batched alongside it, not just the triggered
-// probe's own.
+// Deduped by RunID against lastTriggerRunID and the pending queue --
+// radar-api delivers a "triggered" event on every heartbeat until this
+// node reports results under that RunID, so the same event legitimately
+// arrives more than once. Without the dedup, every redelivery queued
+// another run under the same RunID, which then failed on report as a
+// (node_id, run_id, seq) uniqueness violation.
 func (c *probeCache) applyTriggeredEvents(events []wire.Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, ev := range events {
-		if ev.EventType != "triggered" || ev.RunID == "" {
-			continue
-		}
-		if existing, ok := c.probes[ev.Probe.ID]; ok && existing.lastTriggerRunID == ev.RunID {
-			continue
-		}
-		entry := &cachedProbe{ProbeSnapshot: ev.Probe, lastTriggerRunID: ev.RunID}
-		if existing, ok := c.probes[ev.Probe.ID]; ok {
-			entry.lastRunAt = existing.lastRunAt
-		}
-		c.probes[ev.Probe.ID] = entry
-		c.pendingTriggers = append(c.pendingTriggers, pendingTrigger{ProbeID: ev.Probe.ID, RunID: ev.RunID})
+		c.applyTriggeredEventLocked(ev)
 	}
+}
+
+func (c *probeCache) applyTriggeredEvent(ev wire.Event) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.applyTriggeredEventLocked(ev)
+}
+
+func (c *probeCache) applyTriggeredEventLocked(ev wire.Event) bool {
+	if ev.EventType != "triggered" || ev.RunID == "" || ev.Probe.ID == "" {
+		return false
+	}
+	if c.hasPendingTriggerLocked(ev.Probe.ID, ev.RunID) {
+		return false
+	}
+	if existing, ok := c.probes[ev.Probe.ID]; ok {
+		if existing.lastTriggerRunID == ev.RunID {
+			return false
+		}
+		existing.ProbeSnapshot = ev.Probe
+		existing.lastTriggerRunID = ev.RunID
+	}
+	c.pendingTriggers = append(c.pendingTriggers, pendingTrigger{
+		ProbeID: ev.Probe.ID,
+		RunID:   ev.RunID,
+		Probe:   ev.Probe,
+	})
+	return true
+}
+
+// queueTriggers restores durable triggers after a restart. It updates
+// snapshots for probes still in the assignment but does not add probes
+// the server no longer assigned.
+func (c *probeCache) queueTriggers(triggers []pendingTrigger) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	queued := 0
+	for _, trigger := range triggers {
+		if trigger.ProbeID == "" || trigger.RunID == "" {
+			continue
+		}
+		if c.hasPendingTriggerLocked(trigger.ProbeID, trigger.RunID) {
+			continue
+		}
+		if trigger.Probe.ID == "" {
+			if existing, ok := c.probes[trigger.ProbeID]; ok {
+				trigger.Probe = existing.ProbeSnapshot
+			}
+		}
+		if existing, ok := c.probes[trigger.ProbeID]; ok {
+			if existing.lastTriggerRunID == trigger.RunID {
+				continue
+			}
+			if trigger.Probe.ID != "" {
+				existing.ProbeSnapshot = trigger.Probe
+			}
+			existing.lastTriggerRunID = trigger.RunID
+		}
+		c.pendingTriggers = append(c.pendingTriggers, trigger)
+		queued++
+	}
+	return queued
+}
+
+// requeueTriggers puts back a drained trigger whose results could not
+// be made durable. It deliberately ignores lastTriggerRunID: that field
+// is set when the trigger was queued, not when it was safely recorded.
+func (c *probeCache) requeueTriggers(triggers []pendingTrigger) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, trigger := range triggers {
+		if trigger.ProbeID == "" || trigger.RunID == "" {
+			continue
+		}
+		if c.hasPendingTriggerLocked(trigger.ProbeID, trigger.RunID) {
+			continue
+		}
+		c.pendingTriggers = append(c.pendingTriggers, trigger)
+	}
+}
+
+func (c *probeCache) markTriggerComplete(probeID, runID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if existing, ok := c.probes[probeID]; ok {
+		existing.lastTriggerRunID = runID
+	}
+}
+
+func (c *probeCache) hasPendingTriggerLocked(probeID, runID string) bool {
+	for _, trigger := range c.pendingTriggers {
+		if trigger.ProbeID == probeID && trigger.RunID == runID {
+			return true
+		}
+	}
+	return false
 }
 
 // drainPendingTriggers returns and clears every trigger queued since

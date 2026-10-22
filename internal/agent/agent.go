@@ -29,6 +29,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/module"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
+	"github.com/mehrnet/radar-node/internal/store"
 	"github.com/mehrnet/radar-node/internal/wire"
 )
 
@@ -80,6 +81,14 @@ type Config struct {
 	// directory's total size; zero uses the default.
 	SpoolDir      string
 	SpoolMaxBytes int64
+	// DBPath enables the SQLite journal: durable results plus retained
+	// probe/result history. It supersedes SpoolDir when set. DBMaxBytes
+	// and DBRetention bound the database; zero uses the store defaults.
+	DBPath      string
+	DBMaxBytes  int64
+	DBRetention time.Duration
+	// DBSync is "normal" (default) or "full"; see store.Options.Sync.
+	DBSync string
 	// DestinationInterval is the minimum spacing internal/destgate
 	// enforces between two connection attempts aimed at the same real
 	// destination, node-wide, regardless of which probe/group/
@@ -123,10 +132,15 @@ type agent struct {
 	clock       *clockSync
 	concurrency int
 	spool       *resultSpool
-	// Scheduler-owned retry state for a failed spool drain. Only the
+	store       *store.Store
+	// Scheduler-owned retry state for a failed delivery drain. Only the
 	// scheduler goroutine touches these.
 	spoolBackoff     time.Duration
 	spoolNextAttempt time.Time
+	// Local database bounds; maintained on the scheduler goroutine.
+	dbRetention     time.Duration
+	dbMaxBytes      int64
+	lastMaintenance time.Time
 	// node_status starts optimistic; the first heartbeat/results
 	// response corrects it. An atomic.Value rather than a mutex so the
 	// scheduler can gate execution on it with no lock contention.
@@ -155,9 +169,39 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.SpoolMaxBytes < 0 {
 		return fmt.Errorf("--spool-max-bytes must not be negative")
 	}
-	spool, err := newResultSpool(cfg.SpoolDir, cfg.SpoolMaxBytes)
-	if err != nil {
-		return err
+	if cfg.DBMaxBytes < 0 {
+		return fmt.Errorf("--db-max-bytes must not be negative")
+	}
+	if cfg.DBRetention < 0 {
+		return fmt.Errorf("--db-retention must not be negative")
+	}
+	var spool *resultSpool
+	var localStore *store.Store
+	var err error
+	if cfg.DBPath != "" {
+		opened, openErr := store.Open(cfg.DBPath, store.Options{Origin: nodeID, Sync: cfg.DBSync})
+		if openErr != nil {
+			journal.Error("agent", "local store unavailable, falling back", "path", cfg.DBPath, "err", openErr)
+			if cfg.SpoolDir == "" {
+				journal.Warn("agent", "continuing without durable result storage")
+			}
+		} else {
+			localStore = opened
+			if cfg.SpoolDir != "" {
+				journal.Warn("agent", "--spool-dir is ignored while the local database is enabled", "db", cfg.DBPath)
+			}
+			defer func() {
+				if err := localStore.Close(); err != nil {
+					journal.Warn("agent", "close local store failed", "err", err)
+				}
+			}()
+		}
+	}
+	if localStore == nil {
+		spool, err = newResultSpool(cfg.SpoolDir, cfg.SpoolMaxBytes)
+		if err != nil {
+			return err
+		}
 	}
 	domainStrategy, err := normalizeDomainStrategy(cfg.DomainStrategy)
 	if err != nil {
@@ -187,6 +231,14 @@ func Run(ctx context.Context, cfg Config) error {
 	if version == "" {
 		version = "dev"
 	}
+	dbRetention := cfg.DBRetention
+	if dbRetention == 0 {
+		dbRetention = store.DefaultRetention
+	}
+	dbMaxBytes := cfg.DBMaxBytes
+	if dbMaxBytes == 0 {
+		dbMaxBytes = store.DefaultMaxBytes
+	}
 	a := &agent{
 		client:      client,
 		nodeID:      nodeID,
@@ -199,8 +251,33 @@ func Run(ctx context.Context, cfg Config) error {
 		clock:       &clockSync{},
 		concurrency: cfg.Concurrency,
 		spool:       spool,
+		store:       localStore,
+		dbRetention: dbRetention,
+		dbMaxBytes:  dbMaxBytes,
 	}
 	a.status.Store(wire.NodeStatusActive)
+
+	if a.store != nil {
+		hash, states, err := a.store.LoadProbeStates(ctx)
+		if err != nil {
+			journal.Error("agent", "restore local assignment failed", "err", err)
+		} else if hash != "" {
+			a.cache.restore(hash, cachedStates(states))
+			journal.Info("agent", "restored local assignment", "probes", len(states))
+		}
+		triggers, err := a.store.PendingTriggers(ctx)
+		if err != nil {
+			journal.Error("agent", "restore pending triggers failed", "err", err)
+		} else if queued := a.cache.queueTriggers(agentTriggers(triggers)); queued > 0 {
+			journal.Info("agent", "restored pending triggers", "triggers", queued)
+		}
+		if stats, err := a.store.Stats(ctx); err == nil {
+			journal.Info("agent", "local store ready",
+				"path", a.store.Path(), "journal", stats.JournalMode,
+				"results", stats.Results, "pending", stats.PendingResults,
+				"rollups", stats.Rollups, "db_bytes", stats.DBBytes)
+		}
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -284,12 +361,16 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		// probes" (a genuinely empty assignment still carries a real,
 		// non-empty hash of its own).
 		if resp.ProbeHash != "" {
+			if a.store != nil {
+				if err := a.store.SaveAssignment(ctx, resp.ProbeHash, resp.Probes); err != nil {
+					journal.Error("agent", "persist probe assignment failed", "err", err)
+				}
+			}
 			a.cache.replaceAssignment(resp.ProbeHash, resp.Probes)
 			journal.Info("agent", "synced probe assignment", "probes", len(resp.Probes))
 		}
 		if len(resp.Events) > 0 {
-			a.cache.applyTriggeredEvents(resp.Events)
-			journal.Info("agent", "synced triggered events", "events", len(resp.Events))
+			a.applyTriggeredEvents(ctx, resp.Events)
 		}
 		switch resp.Command {
 		case "delete":
@@ -357,6 +438,11 @@ const selfUpdateLogPath = "/tmp/radar-node-selfupdate.log"
 // class of race is plausible there too, just not something reproduced
 // or fixed here -- Linux/systemd is where this was actually observed
 // in production.
+//
+// procd (OpenWrt) also has no exit-code exception; it respawns the old
+// agent after its five-second delay. The detached updater waits past
+// that window, stops the service itself, and only then replaces the
+// binary -- see selfUpdateCommandFor.
 const selfUpdateExitCode = 42
 
 func (a *agent) selfUpdate() {
@@ -511,7 +597,8 @@ func (a *agent) reinstall(extraFlags ...string) {
 	// per-attempt fetch/run output below harder to find, not easier.
 	journal.Info("agent", "re-running install script", "reason", reason)
 
-	cmd := selfUpdateCommand(installCmd)
+	launch := selfUpdateCommand(installCmd)
+	cmd := launch.cmd
 	logFile, err := os.OpenFile(selfUpdateLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		journal.Warn("agent", "self-update: could not open log file, falling back to this process's own stdout, which may not survive the restart that follows", "path", selfUpdateLogPath, "err", err)
@@ -521,19 +608,33 @@ func (a *agent) reinstall(extraFlags ...string) {
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
 	}
+	if launch.detached {
+		// procd has no transient-unit equivalent. This child is in its
+		// own session and stops the service only after procd's respawn
+		// delay has elapsed, so stopping the service cannot take the
+		// updater down with it.
+		if err := cmd.Start(); err != nil {
+			journal.Error("agent", "self-update: launching the detached installer failed", "err", err, "log", selfUpdateLogPath)
+			return
+		}
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		journal.Info("agent", "detached installer handed off, exiting so it can replace this process", "log", selfUpdateLogPath)
+		os.Exit(selfUpdateExitCode)
+	}
 	// Run, not Start -- deliberately blocks here, but only on the
 	// *wrapper* (systemd-run confirming the transient unit actually
-	// started, a sub-second round trip through PID1's D-Bus API, or a
-	// plain child's own near-instant fork+exec on the non-systemd
-	// fallback), never on install.sh's own full download/replace/
-	// restart. Exiting via Start()+immediate os.Exit(0) raced this
-	// confirmation: `systemd-run --scope` needs a moment to register
-	// the new scope and migrate into it, and this process's own exit
-	// (tearing down its cgroup, per selfUpdateCommand's own doc
-	// comment) could kill systemd-run before that finished -- observed
-	// in practice as install.sh never producing a single line of
-	// output, on every attempt. Waiting for confirmation first removes
-	// that race instead of shrinking it.
+	// started, a sub-second round trip through PID1's D-Bus API), never
+	// on install.sh's own full download/replace/restart. Exiting via
+	// Start()+immediate os.Exit(0) raced this confirmation:
+	// `systemd-run --scope` needs a moment to register the new scope
+	// and migrate into it, and this process's own exit (tearing down
+	// its cgroup, per selfUpdateCommand's own doc comment) could kill
+	// systemd-run before that finished -- observed in practice as
+	// install.sh never producing a single line of output, on every
+	// attempt. Waiting for confirmation first removes that race
+	// instead of shrinking it.
 	if err := cmd.Run(); err != nil {
 		journal.Error("agent", "self-update: launching the installer failed", "err", err, "log", selfUpdateLogPath)
 		return
@@ -542,48 +643,61 @@ func (a *agent) reinstall(extraFlags ...string) {
 	os.Exit(selfUpdateExitCode)
 }
 
-// selfUpdateCommand wraps installCmd in `systemd-run --unit=...` when
-// available, instead of just running it as a plain child process.
-// This matters specifically because this process is (usually) itself
-// a systemd service: os/exec never moves a child into a new cgroup, so
-// a plain child stays in *this* unit's cgroup, and systemd's default
-// KillMode=control-group kills every process in that cgroup -- not
-// just the main one -- the moment the unit is stopped/restarted, which
-// is exactly what this function's own exit (via Restart=always)
-// triggers immediately afterward. The result without this wrapper:
-// the installer gets killed mid-download/replace before it ever
-// upgrades the binary, and the service just restarts on the same old
-// version it started with -- silently, since nothing here observes
-// the installer's fate after Start().
-//
-// A real transient *unit* (`--unit=name`), not a `--scope`: a scope
-// becomes a direct child of the invoking process and needs a moment to
-// register itself and migrate into it over D-Bus, which raced this
-// process's own exit in practice -- if this process's cgroup got torn
-// down before that handshake finished, systemd-run itself was killed
-// before it ever got to exec install.sh, with zero output anywhere to
-// explain why. `--unit=` instead asks PID1 to create and start an
-// independent unit directly; by default systemd-run blocks only until
-// that start is *confirmed* (a fast round trip, not install.sh's full
-// runtime -- see selfUpdate's use of Run() instead of Start()), and
-// once confirmed the unit has no remaining relationship to this
-// process or its cgroup at all, so there's no window left to race.
-//
-// `--user` is added when this process isn't running as root, mirroring
-// install.sh's own root-vs-per-user service split. Falls back to a
-// plain child on non-Linux (macOS/launchd doesn't tear down orphaned
-// children this way) or if systemd-run isn't on PATH.
-func selfUpdateCommand(installCmd string) *exec.Cmd {
-	return selfUpdateCommandFor(runtime.GOOS, os.Geteuid(), os.Getpid(), exec.LookPath, installCmd)
+const (
+	// procd respawn is configured by install.sh as
+	// `respawn 3600 5 5`, i.e. five seconds after the agent's deliberate
+	// exit. Waiting past that window lets the old binary come back, then
+	// stops it, so the installer's cp cannot hit ETXTBSY.
+	procdRespawnWindowSeconds = 6
+	procdSettleSeconds        = 1
+	procdInitScript           = "/etc/init.d/radar-node"
+)
+
+type selfUpdateLaunch struct {
+	cmd *exec.Cmd
+	// detached means the child must be Start()ed and this process must
+	// exit immediately; it is already isolated from the service's
+	// process group and from procd's stop.
+	detached bool
+}
+
+// selfUpdateCommand makes the installer survive the service being
+// stopped underneath it. On systemd this means a transient unit; on
+// procd (OpenWrt) it means a detached session that waits out procd's
+// respawn delay and then stops the service itself. A plain child on
+// macOS is already safe because launchd does not tear down orphaned
+// children the same way.
+func selfUpdateCommand(installCmd string) selfUpdateLaunch {
+	return selfUpdateCommandFor(runtime.GOOS, os.Geteuid(), os.Getpid(), exec.LookPath, procdManaged(), installCmd)
+}
+
+// procdManaged reports whether this node is running under OpenWrt's
+// procd with our own init script. /sbin/procd by itself is not enough:
+// the init script is what the update wrapper stops and install.sh
+// rewrites.
+func procdManaged() bool {
+	if _, err := os.Stat("/sbin/procd"); err != nil {
+		return false
+	}
+	info, err := os.Stat(procdInitScript)
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
 // selfUpdateCommandFor is selfUpdateCommand's decision logic, factored
-// out for testability -- goos/euid/pid/lookPath are the only real-
-// world inputs it needs, so a test can exercise every branch (root vs
-// user, systemd-run present vs absent, Linux vs not) without depending
-// on the actual host it runs on.
-func selfUpdateCommandFor(goos string, euid int, pid int, lookPath func(string) (string, error), installCmd string) *exec.Cmd {
+// out for testability -- goos/euid/pid/lookPath/procd are the only
+// real-world inputs it needs, so a test can exercise every branch
+// without depending on the actual host it runs on.
+func selfUpdateCommandFor(goos string, euid int, pid int, lookPath func(string) (string, error), procd bool, installCmd string) selfUpdateLaunch {
 	if goos == "linux" {
+		if procd {
+			script := fmt.Sprintf(
+				"sleep %d\n%s stop >/dev/null 2>&1 || true\nsleep %d\n%s",
+				procdRespawnWindowSeconds, procdInitScript, procdSettleSeconds, installCmd,
+			)
+			cmd := exec.Command("sh", "-c", script)
+			cmd.SysProcAttr = detachedSysProcAttr()
+			return selfUpdateLaunch{cmd: cmd, detached: true}
+		}
 		if path, err := lookPath("systemd-run"); err == nil {
 			unitName := fmt.Sprintf("radar-node-selfupdate-%d", pid)
 			runArgs := []string{"--unit=" + unitName, "--quiet", "--collect"}
@@ -591,10 +705,10 @@ func selfUpdateCommandFor(goos string, euid int, pid int, lookPath func(string) 
 				runArgs = append(runArgs, "--user")
 			}
 			runArgs = append(runArgs, "sh", "-c", installCmd)
-			return exec.Command(path, runArgs...)
+			return selfUpdateLaunch{cmd: exec.Command(path, runArgs...)}
 		}
 	}
-	return exec.Command("sh", "-c", installCmd)
+	return selfUpdateLaunch{cmd: exec.Command("sh", "-c", installCmd)}
 }
 
 // handleDeleteCommand runs when this node has been deleted from radar
@@ -647,6 +761,7 @@ func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			a.maintain(ctx)
 			if s, _ := a.status.Load().(string); s != wire.NodeStatusActive {
 				continue
 			}
@@ -660,48 +775,85 @@ func (a *agent) runDueProbes(ctx context.Context) {
 	due := a.cache.dueProbes(now)
 	triggers := a.cache.drainPendingTriggers()
 	if len(due) == 0 && len(triggers) == 0 {
-		if _, _, _, err := a.drainSpool(ctx); err != nil {
-			journal.Error("agent", "spool replay failed", "err", err)
+		if _, _, _, err := a.drainDelivery(ctx); err != nil {
+			journal.Error("agent", "delivery replay failed", "err", err)
 		}
 		return
 	}
 
 	// Claim immediately, before executing anything -- so a fast
 	// subsequent tick can't re-select the same probe while this run is
-	// still in flight. With a spool enabled the result is durable even
-	// if reporting fails; without one, a failed post still loses this
+	// still in flight. With local storage the result is durable even if
+	// reporting fails; without it, a failed post still loses this
 	// occurrence (an interval probe is due again next interval), which
 	// is the original accepted failure mode. Triggers don't touch
-	// lastRunAt at all -- they're independent of due-ness bookkeeping,
-	// see applyTriggeredEvents.
+	// lastRunAt at all -- they're independent of due-ness bookkeeping.
 	for _, pr := range due {
 		a.cache.markRun(pr.ID, now)
 	}
 
 	results := a.executeProbes(ctx, due)
 	results = append(results, a.executeTriggers(ctx, triggers)...)
+
+	if len(due) > 0 && a.store != nil {
+		ids := make([]string, len(due))
+		for i, pr := range due {
+			ids[i] = pr.ID
+		}
+		if err := a.store.MarkProbesRun(ctx, ids, now); err != nil {
+			journal.Error("agent", "persist probe run times failed", "err", err)
+		}
+	}
 	if len(results) == 0 {
+		a.finishTriggers(ctx, triggers, true)
 		return
 	}
-	a.reportResults(ctx, due, triggers, results)
+	durable := a.reportResults(ctx, due, triggers, results)
+	a.finishTriggers(ctx, triggers, durable)
 }
 
-// reportResults posts one tick's results, going through the durable
-// spool when one is configured. A spool is written before the network
-// attempt, so an API outage or process exit between execution and
-// delivery cannot lose the batch; replay is deduplicated server-side.
-func (a *agent) reportResults(ctx context.Context, due []wire.ProbeSnapshot, triggers []pendingTrigger, results []wire.Result) {
+// reportResults makes one tick's results durable, then drains pending
+// deliveries. It returns whether the results are safely stored (or were
+// posted directly), which decides whether their triggers may be retired.
+func (a *agent) reportResults(ctx context.Context, due []wire.ProbeSnapshot, triggers []pendingTrigger, results []wire.Result) bool {
 	sentAt := time.Now().UTC().Format(time.RFC3339Nano)
+	if a.store != nil {
+		summary, err := a.store.RecordResults(ctx, results)
+		if err != nil {
+			journal.Error("agent", "store results failed; falling back", "err", err)
+			return a.reportFallback(ctx, due, triggers, results, sentAt)
+		}
+		delivered, accepted, rejected, err := a.drainStore(ctx)
+		if err != nil {
+			journal.Error("agent", "deliver results failed (left in local store)", "err", err,
+				"probes_run", len(due), "triggered", len(triggers), "results", len(results),
+				"inserted", summary.Inserted, "duplicates", summary.Duplicates, "delivered", delivered)
+			return true
+		}
+		journal.Info("agent", "tick complete",
+			"probes_run", len(due), "triggered", len(triggers), "results", len(results),
+			"inserted", summary.Inserted, "duplicates", summary.Duplicates,
+			"delivered", delivered, "accepted", accepted, "rejected", rejected)
+		return true
+	}
+	return a.reportFallback(ctx, due, triggers, results, sentAt)
+}
+
+// reportFallback is the spool/direct path, also used when the local
+// database write fails. A spool is written before the network attempt,
+// so an API outage or process exit cannot lose the batch; replay is
+// deduplicated server-side.
+func (a *agent) reportFallback(ctx context.Context, due []wire.ProbeSnapshot, triggers []pendingTrigger, results []wire.Result, sentAt string) bool {
 	if a.spool == nil {
 		resp, err := a.postResults(ctx, results, sentAt)
 		if err != nil {
 			journal.Error("agent", "post results failed", "err", err)
-			return
+			return false
 		}
 		journal.Info("agent", "tick complete",
 			"probes_run", len(due), "triggered", len(triggers), "results", len(results),
 			"accepted", resp.Accepted, "rejected", resp.Rejected)
-		return
+		return true
 	}
 	if _, err := a.spool.enqueue(results, sentAt); err != nil {
 		// A broken spool must not stop a working network path: try the
@@ -710,27 +862,28 @@ func (a *agent) reportResults(ctx context.Context, due []wire.ProbeSnapshot, tri
 		resp, postErr := a.postResults(ctx, results, sentAt)
 		if postErr != nil {
 			journal.Error("agent", "post results failed", "err", postErr)
-			return
+			return false
 		}
 		journal.Info("agent", "tick complete",
 			"probes_run", len(due), "triggered", len(triggers), "results", len(results),
 			"accepted", resp.Accepted, "rejected", resp.Rejected)
-		return
+		return true
 	}
 	delivered, accepted, rejected, err := a.drainSpool(ctx)
 	if err != nil {
 		journal.Error("agent", "deliver results failed (left in spool)", "err", err,
 			"probes_run", len(due), "triggered", len(triggers), "results", len(results), "delivered", delivered)
-		return
+		return true
 	}
 	if delivered == 0 {
 		journal.Warn("agent", "results queued in spool; delivery deferred",
 			"probes_run", len(due), "triggered", len(triggers), "results", len(results))
-		return
+		return true
 	}
 	journal.Info("agent", "tick complete",
 		"probes_run", len(due), "triggered", len(triggers), "results", len(results),
 		"delivered", delivered, "accepted", accepted, "rejected", rejected)
+	return true
 }
 
 // checkJob is one (probe, seq) check due to run this tick, before
@@ -747,18 +900,22 @@ type checkJob struct {
 // executeTriggers runs each drained pendingTrigger's probe immediately,
 // under the server-issued RunID it carries (not a freshly minted one --
 // see wire.Event's own comment on RunID) so every node acting on the
-// same trigger reports back correlated under that one id. A trigger
-// for a probe this node no longer has cached (removed between firing
-// and this tick draining it) is silently skipped -- nothing to run.
+// same trigger reports back correlated under that one id. Triggers
+// carry their own snapshot, so one fired just before a probe was
+// removed still has a runnable definition.
 func (a *agent) executeTriggers(ctx context.Context, triggers []pendingTrigger) []wire.Result {
 	if len(triggers) == 0 {
 		return nil
 	}
 	var jobs []checkJob
 	for _, t := range triggers {
-		pr, ok := a.cache.get(t.ProbeID)
-		if !ok {
-			continue
+		pr := t.Probe
+		if pr.ID == "" {
+			var ok bool
+			pr, ok = a.cache.get(t.ProbeID)
+			if !ok {
+				continue
+			}
 		}
 		count := pr.ProbeCount
 		if count < 1 {

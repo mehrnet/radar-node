@@ -42,6 +42,10 @@ LOW_POWER=0
 CONCURRENCY=""
 POOL_CONCURRENCY=""
 POOL_MAX_JOBS=""
+DB_PATH=""
+DB_MAX_BYTES=""
+DB_RETENTION=""
+DB_SYNC=""
 SPOOL_DIR=""
 SPOOL_MAX_BYTES=""
 DOMAIN_STRATEGY=""
@@ -74,14 +78,20 @@ Options:
   --uninstall        stop and fully remove radar-node from this machine (no
                       other flag is needed -- this ignores --node_id/--api_key)
   --low-power        resource profile for small/routers: --concurrency 8,
-                     --pool-concurrency 4, --pool-max-jobs 128, and a result
-                     spool under /var/lib/radar-node/spool (root) unless set
+                     --pool-concurrency 4, --pool-max-jobs 128, and a local
+                     SQLite journal under the node's state directory
   --concurrency=N    max probes running at once
   --pool-concurrency=N  cap a pooled module's own test_concurrency
   --pool-max-jobs=N  cap a pooled module's own max_jobs_per_instance
-  --spool-dir=PATH   persist results here before posting and replay after
-                     API outages (default: disabled unless --low-power)
-  --spool-max-bytes=N  cap the result spool (default 16 MiB)
+  --db-path=PATH     SQLite journal for durable results and retained
+                     history (default: state dir; supersedes the spool)
+  --db-max-bytes=N   cap the database by pruning delivered history
+                     (default 32 MiB; pending results are never pruned)
+  --db-retention=DUR how long to keep delivered raw results (default 720h)
+  --db-sync=MODE     normal | full (default normal; full fsyncs each commit)
+  --spool-dir=PATH   legacy JSON result spool; ignored when --db-path is set
+                     (default: disabled; kept for existing installs)
+  --spool-max-bytes=N  cap the legacy result spool (default 16 MiB)
   --domain-strategy=S  force outbound DNS resolution: as_is | use_ipv4 |
                      use_ip | use_ipv6 (use_ipv4 is useful on cellular)
   -h, --help         show this help
@@ -124,6 +134,10 @@ for arg in "$@"; do
     --concurrency=*) CONCURRENCY="${arg#*=}" ;;
     --pool-concurrency=*) POOL_CONCURRENCY="${arg#*=}" ;;
     --pool-max-jobs=*) POOL_MAX_JOBS="${arg#*=}" ;;
+    --db-path=*) DB_PATH="${arg#*=}" ;;
+    --db-max-bytes=*) DB_MAX_BYTES="${arg#*=}" ;;
+    --db-retention=*) DB_RETENTION="${arg#*=}" ;;
+    --db-sync=*) DB_SYNC="${arg#*=}" ;;
     --spool-dir=*) SPOOL_DIR="${arg#*=}" ;;
     --spool-max-bytes=*) SPOOL_MAX_BYTES="${arg#*=}" ;;
     --domain-strategy=*) DOMAIN_STRATEGY="${arg#*=}" ;;
@@ -239,6 +253,15 @@ if [ "$UNINSTALL" = "1" ]; then
     rm -f "$plist"
   fi
 
+  # Remove the default state directory (SQLite journal + any legacy
+  # spool). A custom --db-path outside these directories is left alone
+  # rather than deleting an arbitrary path.
+  rm -rf /var/lib/radar-node
+  if [ "$IS_ROOT" != "1" ]; then
+    rm -rf "${HOME}/.local/state/radar-node"
+  fi
+  rm -f /etc/radar-node/radar.db /etc/radar-node/radar.db-wal /etc/radar-node/radar.db-shm
+
   rm -f "${INSTALL_BIN_DIR}/${BIN_NAME}"
   rm -rf "$MODULES_DIR" "$TOOLS_DIR"
   log "removed ${INSTALL_BIN_DIR}/${BIN_NAME}, ${MODULES_DIR}, and ${TOOLS_DIR}"
@@ -279,6 +302,10 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_concurrency="$(sed -n 's/.*--concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_pool_concurrency="$(sed -n 's/.*--pool-concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_pool_max_jobs="$(sed -n 's/.*--pool-max-jobs \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_db_path="$(sed -n 's/.*--db-path "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_db_max_bytes="$(sed -n 's/.*--db-max-bytes \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_db_retention="$(sed -n 's/.*--db-retention "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_db_sync="$(sed -n 's/.*--db-sync "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_spool_dir="$(sed -n 's/.*--spool-dir "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_spool_max_bytes="$(sed -n 's/.*--spool-max-bytes \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_domain_strategy="$(sed -n 's/.*--domain-strategy "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
@@ -286,6 +313,10 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_api_key="$(awk '/<string>--api-key<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
     existing_api_url="$(awk '/<string>--api-url<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
     existing_proxy="$(awk '/<string>--api-proxy<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_db_path="$(awk '/<string>--db-path<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_db_max_bytes="$(awk '/<string>--db-max-bytes<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_db_retention="$(awk '/<string>--db-retention<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_db_sync="$(awk '/<string>--db-sync<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
   fi
 
   if [ -z "$NODE_ID" ] && [ -z "$API_KEY" ] && [ -n "$existing_api_key" ]; then
@@ -298,9 +329,18 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
   if [ -z "$CONCURRENCY" ] && [ -n "$existing_concurrency" ]; then CONCURRENCY="$existing_concurrency"; fi
   if [ -z "$POOL_CONCURRENCY" ] && [ -n "$existing_pool_concurrency" ]; then POOL_CONCURRENCY="$existing_pool_concurrency"; fi
   if [ -z "$POOL_MAX_JOBS" ] && [ -n "$existing_pool_max_jobs" ]; then POOL_MAX_JOBS="$existing_pool_max_jobs"; fi
+  if [ -z "$DB_PATH" ] && [ -n "$existing_db_path" ]; then DB_PATH="$existing_db_path"; fi
+  if [ -z "$DB_MAX_BYTES" ] && [ -n "$existing_db_max_bytes" ]; then DB_MAX_BYTES="$existing_db_max_bytes"; fi
+  if [ -z "$DB_RETENTION" ] && [ -n "$existing_db_retention" ]; then DB_RETENTION="$existing_db_retention"; fi
+  if [ -z "$DB_SYNC" ] && [ -n "$existing_db_sync" ]; then DB_SYNC="$existing_db_sync"; fi
   if [ -z "$SPOOL_DIR" ] && [ -n "$existing_spool_dir" ]; then SPOOL_DIR="$existing_spool_dir"; fi
   if [ -z "$SPOOL_MAX_BYTES" ] && [ -n "$existing_spool_max_bytes" ]; then SPOOL_MAX_BYTES="$existing_spool_max_bytes"; fi
   if [ -z "$DOMAIN_STRATEGY" ] && [ -n "$existing_domain_strategy" ]; then DOMAIN_STRATEGY="$existing_domain_strategy"; fi
+  if [ -n "$DB_PATH" ] && [ -n "$existing_spool_dir" ]; then
+    warn "using the SQLite journal; legacy spool files in ${existing_spool_dir} are not imported automatically"
+    SPOOL_DIR=""
+    SPOOL_MAX_BYTES=""
+  fi
 fi
 
 [ -n "$NODE_ID" ] || { usage; err "--node_id is required (no existing installation found at ${existing_unit:-<none>} to reuse it from)"; }
@@ -821,12 +861,40 @@ if [ "$LOW_POWER" = "1" ]; then
   [ -n "$CONCURRENCY" ] || CONCURRENCY=8
   [ -n "$POOL_CONCURRENCY" ] || POOL_CONCURRENCY=4
   [ -n "$POOL_MAX_JOBS" ] || POOL_MAX_JOBS=128
-  if [ -z "$SPOOL_DIR" ]; then
-    if [ "$IS_ROOT" = "1" ]; then
-      SPOOL_DIR="/var/lib/radar-node/spool"
+fi
+
+# New installs get the SQLite journal by default. An existing spool
+# install is left on the spool until it is explicitly moved; the two
+# storage paths are never enabled together.
+if [ -z "$DB_PATH" ] && [ -z "$SPOOL_DIR" ]; then
+  if [ "$IS_ROOT" = "1" ]; then
+    if [ "$OS" = "linux" ] && [ "$OPENWRT" = "1" ]; then
+      db_state_dir="/var/lib/radar-node"
+      var_fs="$(df -P /var/lib 2>/dev/null | awk 'NR==2 {print $1}')"
+      case "$var_fs" in tmpfs|rootfs) db_state_dir="/etc/radar-node" ;; esac
+      DB_PATH="${db_state_dir}/radar.db"
     else
-      SPOOL_DIR="${HOME}/.local/state/radar-node/spool"
+      DB_PATH="/var/lib/radar-node/radar.db"
     fi
+  else
+    DB_PATH="${HOME}/.local/state/radar-node/radar.db"
+  fi
+fi
+if [ -n "$DB_PATH" ] && [ -n "$SPOOL_DIR" ]; then
+  warn "--db-path supersedes --spool-dir; ignoring the spool"
+  SPOOL_DIR=""
+  SPOOL_MAX_BYTES=""
+fi
+if [ -n "$DB_PATH" ]; then
+  [ -n "$DB_MAX_BYTES" ] || DB_MAX_BYTES=33554432
+  [ -n "$DB_RETENTION" ] || DB_RETENTION=720h
+  [ -n "$DB_SYNC" ] || DB_SYNC=normal
+  case "$DB_MAX_BYTES" in ''|*[!0-9]*) err "--db-max-bytes must be a non-negative integer" ;; esac
+  case "$DB_SYNC" in normal|full) ;; *) err "--db-sync must be normal or full" ;; esac
+  db_dir="$(dirname "$DB_PATH")"
+  if [ "$db_dir" != "." ]; then
+    mkdir -p "$db_dir" || err "could not create database directory ${db_dir}"
+    chmod 700 "$db_dir" 2>/dev/null || true
   fi
 fi
 
@@ -843,6 +911,12 @@ if [ -n "$POOL_CONCURRENCY" ]; then
 fi
 if [ -n "$POOL_MAX_JOBS" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --pool-max-jobs ${POOL_MAX_JOBS}"
+fi
+if [ -n "$DB_PATH" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --db-path \"${DB_PATH}\""
+  [ -n "$DB_MAX_BYTES" ] && EXTRA_ARGS="${EXTRA_ARGS} --db-max-bytes ${DB_MAX_BYTES}"
+  [ -n "$DB_RETENTION" ] && EXTRA_ARGS="${EXTRA_ARGS} --db-retention \"${DB_RETENTION}\""
+  [ -n "$DB_SYNC" ] && EXTRA_ARGS="${EXTRA_ARGS} --db-sync \"${DB_SYNC}\""
 fi
 if [ -n "$SPOOL_DIR" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --spool-dir \"${SPOOL_DIR}\""
@@ -941,6 +1015,18 @@ start_launchd() {
     <string>${PROXY}</string>
 "
   fi
+  db_args=""
+  if [ -n "$DB_PATH" ]; then
+    db_args="    <string>--db-path</string>
+    <string>${DB_PATH}</string>
+    <string>--db-max-bytes</string>
+    <string>${DB_MAX_BYTES}</string>
+    <string>--db-retention</string>
+    <string>${DB_RETENTION}</string>
+    <string>--db-sync</string>
+    <string>${DB_SYNC}</string>
+"
+  fi
 
   cat > "$plist_file" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -960,7 +1046,7 @@ start_launchd() {
     <string>${MODULES_DIR}</string>
     <string>--tools-dir</string>
     <string>${TOOLS_DIR}</string>
-${proxy_args}  </array>
+${db_args}${proxy_args}  </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>/tmp/radar-node.log</string>

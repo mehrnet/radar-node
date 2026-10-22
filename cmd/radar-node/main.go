@@ -24,6 +24,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/poolconfig"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
+	"github.com/mehrnet/radar-node/internal/store"
 )
 
 // version is set at build time via:
@@ -56,6 +57,8 @@ func main() {
 		err = runRemoveModule(os.Args[2:])
 	case "logs":
 		err = runLogs(os.Args[2:])
+	case "store":
+		err = runStore(os.Args[2:])
 	case "jobprobe":
 		// Not for humans: the pooled module scripts' single-process
 		// replacement for their per-job python3/curl/awk chain (see
@@ -102,6 +105,10 @@ Usage:
   radar-node jobprobe [flags]   (module-script helper, not for direct use)
   radar-node poolconfig --jobs <path> --out <path>
                                 (pooled module config builder, not for direct use)
+  radar-node store stats --db <path>
+  radar-node store maintain --db <path> [--retention 720h] [--max-bytes n]
+  radar-node store rebuild --db <path>
+  radar-node store replay --db <path> [--after N] [--limit N]
 
 probe flags:
   --type string       tcp | udp | dns | icmp | http | system | <module name> (default "tcp")
@@ -132,6 +139,14 @@ agent flags:
   --spool-dir path        persist results to disk before posting and replay
                           them after an API outage (default: disabled)
   --spool-max-bytes n     cap the result spool (default 16 MiB)
+  --db-path path          SQLite journal for durable results and retained
+                          history; supersedes --spool-dir (default: disabled)
+  --db-max-bytes n        cap the database by pruning delivered history
+                          (default 32 MiB; pending results are never pruned)
+  --db-retention duration how long to keep delivered result history
+                          (default "720h")
+  --db-sync mode          normal | full (default "normal"; full fsyncs each
+                          commit for power-loss durability)
   --destination-interval duration  min spacing between checks against the
                           same real destination, node-wide (default "10s")
   --destination-max-wait duration  longest a check will wait for a busy
@@ -265,6 +280,10 @@ func runAgent(args []string) error {
 		domainStrategy      string
 		spoolDir            string
 		spoolMaxBytes       int64
+		dbPath              string
+		dbMaxBytes          int64
+		dbRetention         time.Duration
+		dbSync              string
 		destinationInterval time.Duration
 		destinationMaxWait  time.Duration
 		modulesDir          string
@@ -282,6 +301,10 @@ func runAgent(args []string) error {
 	fs.StringVar(&domainStrategy, "domain-strategy", "", "")
 	fs.StringVar(&spoolDir, "spool-dir", "", "")
 	fs.Int64Var(&spoolMaxBytes, "spool-max-bytes", 0, "")
+	fs.StringVar(&dbPath, "db-path", "", "")
+	fs.Int64Var(&dbMaxBytes, "db-max-bytes", store.DefaultMaxBytes, "")
+	fs.DurationVar(&dbRetention, "db-retention", store.DefaultRetention, "")
+	fs.StringVar(&dbSync, "db-sync", "normal", "")
 	fs.DurationVar(&destinationInterval, "destination-interval", 10*time.Second, "")
 	fs.DurationVar(&destinationMaxWait, "destination-max-wait", 30*time.Second, "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
@@ -311,6 +334,10 @@ func runAgent(args []string) error {
 		DomainStrategy:      domainStrategy,
 		SpoolDir:            spoolDir,
 		SpoolMaxBytes:       spoolMaxBytes,
+		DBPath:              dbPath,
+		DBMaxBytes:          dbMaxBytes,
+		DBRetention:         dbRetention,
+		DBSync:              dbSync,
 		DestinationInterval: destinationInterval,
 		DestinationMaxWait:  destinationMaxWait,
 		ModulesDir:          modulesDir,

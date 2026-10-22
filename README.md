@@ -42,13 +42,17 @@ for a user-scoped one (see `--help` below).
 On an ARMv7 OpenWrt router, install `curl` and CA certificates first
 (`opkg update && opkg install curl ca-bundle`), then add `--low-power` to
 cap the node for the device (8 concurrent checks, 4 pooled xray jobs, at
-most 128 jobs per xray instance) and enable the result spool under
-`/var/lib/radar-node/spool`. On a cellular vantage, `--domain-strategy=use_ipv4`
-also forces xray's outbound resolution to IPv4. Keep auto-update off for
-this node in the radar UI during the migration; re-run the installer (or
-push it from the controller) for updates. `linux/arm` is ARMv7. Service
-output goes to logd (`logread -e radar-node`); the `radar-node logs`
-journald helper is not available on OpenWrt.
+most 128 jobs per xray instance) and enable the SQLite journal under
+`/var/lib/radar-node/radar.db` (or `/etc/radar-node/radar.db` when `/var`
+is tmpfs). On a cellular vantage, `--domain-strategy=use_ipv4` also
+forces xray's outbound resolution to IPv4. Auto-update is on by default
+in the radar UI and is supported under procd: the agent launches the
+updater in its own session, waits out procd's respawn delay, stops the
+service itself, then replaces the binary. Verify the first update on a
+new node; re-running the installer manually is always the fallback.
+`linux/arm` is ARMv7. Service output goes to logd
+(`logread -e radar-node`); the `radar-node logs` journald helper is not
+available on OpenWrt.
 
 Behind a proxy? Add `--proxy=<url>` (`http://`, `https://`, `socks5://`, or
 `socks5h://`) -- it's used both for the installer's own downloads and for
@@ -121,6 +125,7 @@ radar-node init [-C path]
 radar-node fetch-module <url> [flags]
 radar-node install-module <name> [flags]
 radar-node remove-module <name> [flags]
+radar-node store stats|maintain|rebuild|replay --db <path> [flags]
 radar-node version
 ```
 
@@ -160,8 +165,12 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--pool-concurrency` | cap a pooled module's own `test_concurrency` (0 = the module's value) |
 | `--pool-max-jobs` | cap a pooled module's own `max_jobs_per_instance` (0 = the module's value) |
 | `--domain-strategy` | force outbound DNS resolution onto one address family: `as_is`, `use_ipv4`, `use_ip`, `use_ipv6` (default: leave module configs unchanged) |
-| `--spool-dir` | persist each results batch to this directory before posting, and replay pending batches after an API outage (default: disabled) |
-| `--spool-max-bytes` | cap the result spool's total size (default `16 MiB`) |
+| `--db-path` | SQLite journal for durable results and retained history (default: disabled; supersedes `--spool-dir`) |
+| `--db-max-bytes` | cap the database by pruning delivered history (default `32 MiB`; pending results are never pruned) |
+| `--db-retention` | how long to keep delivered raw results (default `720h`) |
+| `--db-sync` | `normal` (default; survives process crashes) or `full` (fsyncs each commit for power-loss durability) |
+| `--spool-dir` | legacy JSON spool; persist each results batch here before posting and replay after an outage (default: disabled) |
+| `--spool-max-bytes` | cap the legacy result spool's total size (default `16 MiB`) |
 | `--destination-interval` | min spacing between any two checks against the same real destination, node-wide, regardless of which probe/group/subscription/account asked for either -- overrides a probe's own `interval_seconds` when its destination is shared and busy (default `10s`, `0` disables) |
 | `--destination-max-wait` | longest a single check will wait for its own destination to clear before giving up and failing that one check -- its own budget, separate from the check's own `timeout_ms`, so a heavily-shared destination (many probes resolving to one host) doesn't leave every check but the first permanently failing before it ever gets a real attempt (default `30s`) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
@@ -170,6 +179,64 @@ The agent has no server-computed dispatch: it syncs probe definitions
 incrementally into a local cache and decides for itself when something is
 due. See [Wire protocol](#wire-protocol--radar-api) below for the full
 mechanics.
+
+### Local storage, history, and replay
+
+`--db-path` enables a single-file SQLite journal. It replaces the JSON
+spool for new installs: results are committed locally before any network
+attempt, delivered from a durable outbox, and retried after a crash or an
+API outage. The file is bound to the node identity it was created with;
+opening it under a different origin is refused.
+
+- Results are stored once, as typed columns -- not duplicated as JSON in
+  an event log. Probe assignments, triggers, and trigger completions are
+  journaled alongside them, with small materialized tables for the
+  current assignment and pending triggers.
+- Replays are idempotent. Results are unique on `(origin, run_id,
+  probe_id, seq)`, and imported events on `(origin, origin_seq)`, so a
+  crash between POST and acknowledgement cannot double-count.
+- WAL mode, a small page cache, a bounded WAL, and `auto_vacuum` keep the
+  file friendly to flash. `--db-sync=normal` survives process crashes;
+  `--db-sync=full` also fsyncs each commit for power-loss durability (use
+  it for local-only deployments with no API copy).
+- Delivered/rejected raw results are pruned after `--db-retention`
+  (default 30 days) and the file is capped by `--db-max-bytes` (default
+  32 MiB). Pending results are never pruned. Before pruning, results are
+  folded into hourly per-probe rollups (checks, successes, failures,
+  latency sum/min/max), so long-term history survives after raw rows are
+  gone.
+- A 100k-result synthetic workload measured roughly 250-300 bytes per
+  retained raw result including indexes and WAL. Rollups are much
+  smaller; the default cap is sized for small routers, not a busy
+  server. Raise it on machines with more flash.
+- The pure-Go SQLite driver adds about 4 MiB to the ARMv7 binary
+  (roughly 13 MiB total, still statically linked and CGO-free). Very
+  small flash devices should account for both the binary and the
+  database.
+
+The journal contains probe parameters and results -- including proxy
+configuration and any credentials embedded in it -- so it is created
+`0600` in a `0700` directory. `store replay` prints those payloads
+verbatim; treat its output as sensitive.
+
+Inspect or replay a node's data offline:
+
+```sh
+radar-node store stats --db /var/lib/radar-node/radar.db
+radar-node store replay --db /var/lib/radar-node/radar.db --after 0 --limit 100
+radar-node store rebuild --db /var/lib/radar-node/radar.db
+radar-node store maintain --db /var/lib/radar-node/radar.db --retention 720h --max-bytes 33554432
+```
+
+`replay` prints one JSON event per line and the next cursor to stderr.
+`rebuild` recreates the probe/trigger projections from the journal.
+`maintain` is safe to run while the agent is stopped; the agent also runs
+it hourly on its own.
+
+The legacy `--spool-dir` path remains for existing installs. When both are
+configured, `--db-path` wins and the spool is ignored; the installer
+keeps an existing spool install on the spool until `--db-path` is passed
+explicitly, and does not import old spool files automatically.
 
 ### `init` -- scaffold editable module files
 

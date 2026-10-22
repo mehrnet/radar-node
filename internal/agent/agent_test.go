@@ -10,10 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/agent"
+	"github.com/mehrnet/radar-node/internal/store"
 	"github.com/mehrnet/radar-node/internal/wire"
 )
 
@@ -658,5 +660,165 @@ func TestRun_DestinationMaxWaitExceededMeansNoResultReported(t *testing.T) {
 	}
 	if !results[0].Ok {
 		t.Errorf("expected the one reported result to be a real success, got %+v", results[0])
+	}
+}
+
+func TestRun_RestoresAssignmentAndScheduleFromLocalStore(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "radar.db")
+	local, err := store.Open(dbPath, store.Options{Origin: "node_test"})
+	if err != nil {
+		t.Fatalf("open local store: %v", err)
+	}
+	now := time.Now()
+	snapshot := wire.ProbeSnapshot{
+		ID: "probe_restored", Target: "127.0.0.1:1", Prober: "tcp", ProbeCount: 1,
+		TimeoutMs: 1000, ScheduleType: "interval", IntervalSeconds: 3600,
+		StartsAt: now.Add(-time.Hour).UnixMilli(), Status: wire.ProbeStatusActive,
+	}
+	if err := local.SaveAssignment(context.Background(), "hash_restored", []wire.ProbeSnapshot{snapshot}); err != nil {
+		t.Fatalf("SaveAssignment: %v", err)
+	}
+	if err := local.MarkProbesRun(context.Background(), []string{snapshot.ID}, now); err != nil {
+		t.Fatalf("MarkProbesRun: %v", err)
+	}
+	if err := local.Close(); err != nil {
+		t.Fatalf("close local store: %v", err)
+	}
+
+	heartbeat := make(chan string, 4)
+	var posted atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/nodes/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+		var req wire.HeartbeatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		select {
+		case heartbeat <- req.ProbeHash:
+		default:
+		}
+		_ = json.NewEncoder(w).Encode(wire.HeartbeatResponse{
+			SpecVersion: 1, NodeStatus: wire.NodeStatusActive,
+			HeartbeatIntervalSecs: 3600, ServerTime: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+	})
+	mux.HandleFunc("/v1/nodes/results", func(w http.ResponseWriter, r *http.Request) {
+		posted.Add(1)
+		http.Error(w, "unexpected results", http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL: srv.URL, APIKey: "node_test:secret",
+			SchedulerTick: 20 * time.Millisecond, Concurrency: 2, DBPath: dbPath,
+		})
+	}()
+	select {
+	case hash := <-heartbeat:
+		if hash != "hash_restored" {
+			t.Fatalf("first heartbeat probe hash = %q, want hash_restored", hash)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the first heartbeat")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if posted.Load() != 0 {
+		t.Fatalf("agent posted %d result batches for a probe that was not due", posted.Load())
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent.Run did not exit after context cancellation")
+	}
+}
+
+func TestRun_PersistsResultsToLocalStore(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+
+	fake := newFakeAPI(ln.Addr().String())
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "radar.db")
+	local, err := store.Open(dbPath, store.Options{Origin: "node_test"})
+	if err != nil {
+		t.Fatalf("open local store: %v", err)
+	}
+	defer local.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.Run(ctx, agent.Config{
+			APIURL:        srv.URL,
+			APIKey:        "node_test:secret",
+			SchedulerTick: 20 * time.Millisecond,
+			Concurrency:   4,
+			DBPath:        dbPath,
+		})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stats, statsErr := local.Stats(context.Background())
+		if statsErr == nil && stats.Results == 2 && stats.PendingResults == 0 && stats.DeliveredResults == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for results to become durable: stats=%+v err=%v", stats, statsErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("agent.Run returned an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("agent.Run did not exit after context cancellation")
+	}
+
+	stats, err := local.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.Results != 2 || stats.PendingResults != 0 || stats.DeliveredResults != 2 {
+		t.Fatalf("store stats = %+v, want 2 results, 0 pending, 2 delivered", stats)
+	}
+	if stats.PendingTriggers != 0 {
+		t.Fatalf("pending triggers = %d, want 0 after the trigger completed", stats.PendingTriggers)
+	}
+
+	var replayedResults int
+	_, err = local.Replay(context.Background(), 0, 1000, func(event store.Event) error {
+		if event.Kind == "result" {
+			replayedResults++
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if replayedResults != 2 {
+		t.Fatalf("replayed results = %d, want 2", replayedResults)
 	}
 }
