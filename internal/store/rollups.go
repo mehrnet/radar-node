@@ -10,7 +10,7 @@ import (
 
 const (
 	rollupBucketMS = int64(60 * 60 * 1000)
-	rollupChunk    = 5000
+	rollupChunk    = 2000
 )
 
 type rollupKey struct {

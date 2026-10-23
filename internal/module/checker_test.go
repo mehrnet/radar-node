@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,28 @@ collect:
 	}
 	if res.Extra["status"] != "true" {
 		t.Fatalf("expected status=true in extra, got %v", res.Extra["status"])
+	}
+}
+
+func TestChecker_RunStdoutIsCapped(t *testing.T) {
+	m := loadOne(t, `
+name: noisy
+run:
+  command: ["sh", "-c", "yes x | head -c 2000000"]
+collect:
+  format: writeout_json
+`)
+	c := module.NewChecker(m)
+	res := c.Check(context.Background(), probe.Options{
+		Target:  "irrelevant",
+		Timeout: 5 * time.Second,
+		Seq:     1,
+	})
+	if res.Ok {
+		t.Fatal("expected runaway stdout to fail the check")
+	}
+	if !strings.Contains(res.Error, "stdout exceeded") {
+		t.Fatalf("expected a stdout limit error, got %q", res.Error)
 	}
 }
 

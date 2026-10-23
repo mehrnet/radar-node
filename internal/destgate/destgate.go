@@ -24,9 +24,17 @@ package destgate
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
+
+// The map otherwise grows with every destination the node has ever
+// seen -- an unbounded assignment (or subscription churn) on a 256 MB
+// host must not accumulate keys forever. Oldest-quarter eviction only
+// runs when a new key arrives at the cap, so a long-running large
+// node pays an O(n log n) sort roughly every 1024 new destinations.
+const maxDestinations = 4096
 
 var (
 	mu      sync.Mutex
@@ -34,6 +42,25 @@ var (
 	floor   time.Duration
 	maxWait time.Duration
 )
+
+func evictOldestLocked() {
+	type entry struct {
+		dest string
+		at   time.Time
+	}
+	entries := make([]entry, 0, len(last))
+	for dest, at := range last {
+		entries = append(entries, entry{dest: dest, at: at})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].at.Before(entries[j].at) })
+	remove := len(entries) / 4
+	if remove < 1 {
+		remove = 1
+	}
+	for _, e := range entries[:remove] {
+		delete(last, e.dest)
+	}
+}
 
 // Configure sets the minimum spacing between two granted Wait calls
 // for the same destination (floor), and the longest Wait will ever
@@ -100,6 +127,9 @@ func Wait(ctx context.Context, dest string) error {
 		now := time.Now()
 		prev, ok := last[dest]
 		if !ok || now.Sub(prev) >= floor {
+			if !ok && len(last) >= maxDestinations {
+				evictOldestLocked()
+			}
 			last[dest] = now
 			mu.Unlock()
 			return nil

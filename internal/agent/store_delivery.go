@@ -12,7 +12,9 @@ import (
 )
 
 const (
-	dbMaintenanceInitialDelay = 5 * time.Second
+	dbMaintenanceInitialDelay = 30 * time.Second
+	dbMaintenanceJitter       = 30 * time.Second
+	dbMaintenanceBudget       = 2 * time.Second
 	dbMaintenanceInterval     = time.Hour
 	dbMaintenanceRetry        = 5 * time.Minute
 	dbMaintenanceBudgetRetry  = 15 * time.Minute
@@ -186,7 +188,11 @@ func (a *agent) maintenanceLoop(ctx context.Context) {
 	if a.store == nil {
 		return
 	}
-	timer := time.NewTimer(dbMaintenanceInitialDelay)
+	// Delayed and spread out: startup already writes assignments,
+	// restores triggers, and begins delivery, and a fleet restarting
+	// together should not also start every vacuum at the same instant.
+	initial := dbMaintenanceInitialDelay + time.Duration(time.Now().UnixNano()%int64(dbMaintenanceJitter))
+	timer := time.NewTimer(initial)
 	defer timer.Stop()
 	for {
 		select {
@@ -194,14 +200,23 @@ func (a *agent) maintenanceLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		stats, err := a.store.Maintain(ctx, store.MaintainOptions{Retention: a.dbRetention, MaxBytes: a.dbMaxBytes})
+		stats, err := a.store.Maintain(ctx, store.MaintainOptions{
+			Retention: a.dbRetention,
+			MaxBytes:  a.dbMaxBytes,
+			Budget:    dbMaintenanceBudget,
+		})
 		next := dbMaintenanceInterval
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			journal.Error("agent", "local store maintenance failed", "err", err)
-			next = dbMaintenanceRetry
+			if errors.Is(err, context.DeadlineExceeded) {
+				journal.Warn("agent", "local store maintenance paused at its time budget; resuming later")
+				next = dbMaintenanceBudgetRetry
+			} else {
+				journal.Error("agent", "local store maintenance failed", "err", err)
+				next = dbMaintenanceRetry
+			}
 		} else {
 			if stats.DeletedRows > 0 || stats.DeletedRollups > 0 || stats.RolledUpResults > 0 || stats.VacuumedPages > 0 || stats.OverBudget {
 				journal.Info("agent", "local store maintenance",

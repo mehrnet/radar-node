@@ -240,25 +240,69 @@ func startEngine(ctx context.Context, step Step, ec execContext, readinessTimeou
 	return e, nil
 }
 
-func runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {
-	runCtx := ctx
-	if step.Timeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, step.Timeout)
-		defer cancel()
+// A module's run output is parsed into one small result, so anything
+// past these bounds is either a misbehaving engine or a hostile
+// target. Cancelling the command's context on overflow kills the
+// subprocess rather than leaving exec's copy goroutine waiting on a
+// process that can never write again.
+const (
+	maxStepStdoutBytes = 1 << 20
+	maxStepStderrBytes = 64 << 10
+)
+
+type limitedBuffer struct {
+	buf      bytes.Buffer
+	limit    int
+	exceeded bool
+	onExceed func()
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		b.exceeded = true
+		b.onExceed()
+		return 0, fmt.Errorf("output exceeded %d bytes", b.limit)
 	}
+	if len(p) > remaining {
+		_, _ = b.buf.Write(p[:remaining])
+		b.exceeded = true
+		b.onExceed()
+		return remaining, fmt.Errorf("output exceeded %d bytes", b.limit)
+	}
+	return b.buf.Write(p)
+}
+
+func runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if step.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, step.Timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
+
+	stdout := &limitedBuffer{limit: maxStepStdoutBytes, onExceed: cancel}
+	stderr := &limitedBuffer{limit: maxStepStderrBytes, onExceed: cancel}
 	argv := ec.resolve(step.Command)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if stderr.Len() > 0 {
-			return nil, fmt.Errorf("%w: %s", err, bytes.TrimSpace(stderr.Bytes()))
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	if stdout.exceeded {
+		return nil, fmt.Errorf("stdout exceeded %d bytes; subprocess killed", maxStepStdoutBytes)
+	}
+	if stderr.exceeded {
+		return nil, fmt.Errorf("stderr exceeded %d bytes; subprocess killed", maxStepStderrBytes)
+	}
+	if err != nil {
+		if stderr.buf.Len() > 0 {
+			return nil, fmt.Errorf("%w: %s", err, bytes.TrimSpace(stderr.buf.Bytes()))
 		}
 		return nil, err
 	}
-	return stdout.Bytes(), nil
+	return stdout.buf.Bytes(), nil
 }
 
 func writeParamsJSON(params map[string]any) (string, func(), error) {

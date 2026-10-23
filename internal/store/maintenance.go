@@ -18,6 +18,11 @@ const (
 type MaintainOptions struct {
 	Retention time.Duration
 	MaxBytes  int64
+	// Budget caps this run's wall time. Work is chunked, so hitting it
+	// leaves the store valid and the next run resumes; it exists so a
+	// large vacuum or rollup cannot monopolize the single SQLite
+	// connection and starve result delivery on a slow host.
+	Budget time.Duration
 }
 
 type MaintainStats struct {
@@ -37,6 +42,11 @@ type MaintainStats struct {
 // that leaves the database over its byte budget.
 func (s *Store) Maintain(ctx context.Context, opts MaintainOptions) (MaintainStats, error) {
 	var stats MaintainStats
+	if opts.Budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Budget)
+		defer cancel()
+	}
 	rolled, err := s.rollupResults(ctx)
 	if err != nil {
 		return stats, err
@@ -45,6 +55,9 @@ func (s *Store) Maintain(ctx context.Context, opts MaintainOptions) (MaintainSta
 	if opts.Retention > 0 {
 		cutoff := time.Now().Add(-opts.Retention).UnixMilli()
 		for {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
 			result, err := s.db.ExecContext(ctx, `
 				DELETE FROM journal WHERE seq IN (
 					SELECT j.seq FROM journal j
@@ -87,6 +100,9 @@ func (s *Store) Maintain(ctx context.Context, opts MaintainOptions) (MaintainSta
 
 	if opts.MaxBytes > 0 {
 		for chunk := 0; chunk < 100; chunk++ {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
 			live, err := s.liveBytes(ctx)
 			if err != nil {
 				return stats, err
@@ -184,6 +200,9 @@ func (s *Store) incrementalVacuum(ctx context.Context) (int64, error) {
 	}
 	initial := current
 	for i := 0; i < maxVacuumChunks && current > 0; i++ {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", vacuumChunkPages)); err != nil {
 			return 0, fmt.Errorf("store: incremental vacuum: %w", err)
 		}

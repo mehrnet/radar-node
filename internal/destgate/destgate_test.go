@@ -2,6 +2,7 @@ package destgate
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -25,6 +26,36 @@ func resetForTestWithMaxWait(t *testing.T, floorD, maxWaitD time.Duration) {
 	floor = floorD
 	maxWait = maxWaitD
 	mu.Unlock()
+}
+
+func TestWait_BoundsTheDestinationMap(t *testing.T) {
+	resetForTest(t, time.Nanosecond)
+	defer resetForTest(t, 0)
+
+	base := time.Unix(1_700_000_000, 0)
+	mu.Lock()
+	for i := 0; i < maxDestinations; i++ {
+		last[fmt.Sprintf("dest-%04d", i)] = base.Add(time.Duration(i) * time.Millisecond)
+	}
+	mu.Unlock()
+
+	if err := Wait(context.Background(), "new-dest:443"); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	mu.Lock()
+	size := len(last)
+	_, oldestStillPresent := last["dest-0000"]
+	_, newestStillPresent := last["dest-4095"]
+	mu.Unlock()
+	if size > maxDestinations {
+		t.Fatalf("expected at most %d destinations, got %d", maxDestinations, size)
+	}
+	if oldestStillPresent {
+		t.Fatal("expected the oldest destinations to be evicted")
+	}
+	if !newestStillPresent {
+		t.Fatal("expected newer destinations to survive eviction")
+	}
 }
 
 func TestWait_FirstCallForADestinationReturnsImmediately(t *testing.T) {

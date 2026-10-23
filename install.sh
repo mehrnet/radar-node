@@ -40,6 +40,8 @@ UNINSTALL=0
 # caller supplied them explicitly.
 LOW_POWER=0
 CONCURRENCY=""
+MAX_JOBS_PER_TICK=""
+MAX_JOBS_PER_PROBE=""
 POOL_CONCURRENCY=""
 POOL_MAX_JOBS=""
 DB_PATH=""
@@ -77,10 +79,14 @@ Options:
                      agent's radar-api traffic (http://, https://, socks5://, socks5h://)
   --uninstall        stop and fully remove radar-node from this machine (no
                       other flag is needed -- this ignores --node_id/--api_key)
-  --low-power        resource profile for small/routers: --concurrency 8,
-                     --pool-concurrency 4, --pool-max-jobs 128, and a local
-                     SQLite journal under the node's state directory
-  --concurrency=N    max probes running at once
+  --low-power        resource profile for small/routers: --concurrency 4,
+                     --pool-concurrency 2, --pool-max-jobs 64,
+                     --max-jobs-per-tick 128, and a local SQLite journal
+                     under the node's state directory
+  --concurrency=N    max probes running at once (default: auto from RAM/CPU)
+  --max-jobs-per-tick=N   cap probe jobs started per scheduler tick
+                     (default 512; low-power 128)
+  --max-jobs-per-probe=N  cap a probe's probe_count per run (default 32)
   --pool-concurrency=N  cap a pooled module's own test_concurrency
   --pool-max-jobs=N  cap a pooled module's own max_jobs_per_instance
   --db-path=PATH     SQLite journal for durable results and retained
@@ -132,6 +138,8 @@ for arg in "$@"; do
     --uninstall) UNINSTALL=1 ;;
     --low-power) LOW_POWER=1 ;;
     --concurrency=*) CONCURRENCY="${arg#*=}" ;;
+    --max-jobs-per-tick=*) MAX_JOBS_PER_TICK="${arg#*=}" ;;
+    --max-jobs-per-probe=*) MAX_JOBS_PER_PROBE="${arg#*=}" ;;
     --pool-concurrency=*) POOL_CONCURRENCY="${arg#*=}" ;;
     --pool-max-jobs=*) POOL_MAX_JOBS="${arg#*=}" ;;
     --db-path=*) DB_PATH="${arg#*=}" ;;
@@ -300,6 +308,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_api_url="$(sed -n 's/.*--api-url "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_proxy="$(sed -n 's/.*--api-proxy "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_concurrency="$(sed -n 's/.*--concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_max_jobs_per_tick="$(sed -n 's/.*--max-jobs-per-tick \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_max_jobs_per_probe="$(sed -n 's/.*--max-jobs-per-probe \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_pool_concurrency="$(sed -n 's/.*--pool-concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_pool_max_jobs="$(sed -n 's/.*--pool-max-jobs \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_db_path="$(sed -n 's/.*--db-path "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
@@ -327,6 +337,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
   [ "$API_URL" = "$API_URL_DEFAULT" ] && [ -n "$existing_api_url" ] && API_URL="$existing_api_url"
   [ -z "$PROXY" ] && [ -n "$existing_proxy" ] && PROXY="$existing_proxy"
   if [ -z "$CONCURRENCY" ] && [ -n "$existing_concurrency" ]; then CONCURRENCY="$existing_concurrency"; fi
+  if [ -z "$MAX_JOBS_PER_TICK" ] && [ -n "$existing_max_jobs_per_tick" ]; then MAX_JOBS_PER_TICK="$existing_max_jobs_per_tick"; fi
+  if [ -z "$MAX_JOBS_PER_PROBE" ] && [ -n "$existing_max_jobs_per_probe" ]; then MAX_JOBS_PER_PROBE="$existing_max_jobs_per_probe"; fi
   if [ -z "$POOL_CONCURRENCY" ] && [ -n "$existing_pool_concurrency" ]; then POOL_CONCURRENCY="$existing_pool_concurrency"; fi
   if [ -z "$POOL_MAX_JOBS" ] && [ -n "$existing_pool_max_jobs" ]; then POOL_MAX_JOBS="$existing_pool_max_jobs"; fi
   if [ -z "$DB_PATH" ] && [ -n "$existing_db_path" ]; then DB_PATH="$existing_db_path"; fi
@@ -862,9 +874,11 @@ for m in xray wireguard openvpn; do
 done
 
 if [ "$LOW_POWER" = "1" ]; then
-  [ -n "$CONCURRENCY" ] || CONCURRENCY=8
-  [ -n "$POOL_CONCURRENCY" ] || POOL_CONCURRENCY=4
-  [ -n "$POOL_MAX_JOBS" ] || POOL_MAX_JOBS=128
+  [ -n "$CONCURRENCY" ] || CONCURRENCY=4
+  [ -n "$MAX_JOBS_PER_TICK" ] || MAX_JOBS_PER_TICK=128
+  [ -n "$MAX_JOBS_PER_PROBE" ] || MAX_JOBS_PER_PROBE=16
+  [ -n "$POOL_CONCURRENCY" ] || POOL_CONCURRENCY=2
+  [ -n "$POOL_MAX_JOBS" ] || POOL_MAX_JOBS=64
 fi
 
 # New installs get the SQLite journal by default. An existing spool
@@ -915,6 +929,12 @@ if [ -n "$PROXY" ]; then
 fi
 if [ -n "$CONCURRENCY" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --concurrency ${CONCURRENCY}"
+fi
+if [ -n "$MAX_JOBS_PER_TICK" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --max-jobs-per-tick ${MAX_JOBS_PER_TICK}"
+fi
+if [ -n "$MAX_JOBS_PER_PROBE" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --max-jobs-per-probe ${MAX_JOBS_PER_PROBE}"
 fi
 if [ -n "$POOL_CONCURRENCY" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --pool-concurrency ${POOL_CONCURRENCY}"

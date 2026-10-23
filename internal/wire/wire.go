@@ -137,7 +137,31 @@ type HeartbeatRequest struct {
 	// compiled and triggers a full snapshot in response, the same "no
 	// separate bootstrap path needed" shape SinceSeq=0 used to give.
 	ProbeHash string `json:"probe_hash,omitempty"`
-	SentAt    string `json:"sent_at"`
+	// Health is an optional, cheap resource/connectivity sample. Older
+	// servers simply ignore it; newer servers use it to distinguish a
+	// reachable node under pressure from one that is actually offline.
+	Health *NodeHealth `json:"health,omitempty"`
+	SentAt string      `json:"sent_at"`
+}
+
+// NodeHealth is deliberately small and latest-only: one JSON object per
+// heartbeat, never a time series. Pressure is computed by the agent with
+// hysteresis; Path reports broad network/timeout failures across
+// multiple distinct targets, which are not evidence that a target is
+// down. All fields are optional on the wire so older agents remain valid.
+type NodeHealth struct {
+	RSSBytes            int64   `json:"rss_bytes,omitempty"`
+	MemUsedPct          float64 `json:"mem_used_pct,omitempty"`
+	Load1               float64 `json:"load1,omitempty"`
+	CPUCount            int     `json:"cpu_count,omitempty"`
+	CPUStealPct         float64 `json:"cpu_steal_pct,omitempty"`
+	Goroutines          int     `json:"goroutines,omitempty"`
+	HeartbeatRTTMs      float64 `json:"heartbeat_rtt_ms,omitempty"`
+	ConsecutiveFailures int     `json:"consecutive_failures,omitempty"`
+	DeferredJobs        int     `json:"deferred_jobs,omitempty"`
+	UptimeSeconds       float64 `json:"uptime_seconds,omitempty"`
+	Pressure            string  `json:"pressure,omitempty"`
+	Path                string  `json:"path,omitempty"`
 }
 
 // ModuleVersion is one loaded module's own version/manifest-url, as

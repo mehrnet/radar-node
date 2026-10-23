@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -308,5 +309,155 @@ func TestProbeCache_EndsAt_NotDueAfterEnd(t *testing.T) {
 	}})
 	if due := c.dueProbes(now); len(due) != 0 {
 		t.Fatalf("expected a probe past its ends_at to never be due, got %+v", due)
+	}
+}
+
+func dueProbe(id string, count int, now time.Time) wire.ProbeSnapshot {
+	return wire.ProbeSnapshot{
+		ID: id, Status: wire.ProbeStatusActive, ScheduleType: "interval", IntervalSeconds: 10,
+		StartsAt: now.Add(-time.Hour).UnixMilli(), ProbeCount: count,
+	}
+}
+
+func TestProbeCache_TakeDueProbes_BudgetAndPerProbeCap(t *testing.T) {
+	c := newProbeCache()
+	now := time.Unix(1_700_000_000, 0)
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{
+		dueProbe("a", 3, now), dueProbe("b", 2, now), dueProbe("c", 1, now),
+	})
+
+	// Per-probe cap 2 clamps a=2,b=2,c=1; budget 4 fits a+b, leaving
+	// c deferred but still due for the next tick.
+	selected, deferred := c.takeDueProbes(now, 4, 2)
+	if len(selected) != 2 || selected[0].ID != "a" || selected[1].ID != "b" {
+		t.Fatalf("expected a and b selected, got %+v", selected)
+	}
+	if selected[0].ProbeCount != 2 || selected[1].ProbeCount != 2 {
+		t.Fatalf("expected per-probe counts clamped to 2, got %+v", selected)
+	}
+	if deferred != 1 {
+		t.Fatalf("expected 1 deferred job, got %d", deferred)
+	}
+	if due := c.dueProbes(now); len(due) != 1 || due[0].ID != "c" {
+		t.Fatalf("expected only c to remain due, got %+v", due)
+	}
+
+	selected, deferred = c.takeDueProbes(now, 0, 2)
+	if len(selected) != 0 || deferred != 1 {
+		t.Fatalf("expected a zero budget to select nothing and defer c, got selected=%+v deferred=%d", selected, deferred)
+	}
+	if due := c.dueProbes(now); len(due) != 1 {
+		t.Fatalf("a deferred probe must stay due, got %+v", due)
+	}
+}
+
+func TestProbeCache_TakeDueProbes_OldestDueFirst(t *testing.T) {
+	c := newProbeCache()
+	now := time.Unix(1_700_000_000, 0)
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{
+		dueProbe("a", 1, now), dueProbe("b", 1, now), dueProbe("c", 1, now),
+	})
+	c.markRun("a", now.Add(-3*time.Minute))
+	c.markRun("b", now.Add(-2*time.Minute))
+	c.markRun("c", now.Add(-time.Minute))
+
+	for i, want := range []string{"a", "b", "c"} {
+		selected, deferred := c.takeDueProbes(now, 1, 1)
+		if len(selected) != 1 || selected[0].ID != want {
+			t.Fatalf("tick %d: expected %s (oldest due), got %+v", i, want, selected)
+		}
+		if deferred != 2-i {
+			t.Fatalf("tick %d: expected %d deferred, got %d", i, 2-i, deferred)
+		}
+	}
+}
+
+func TestProbeCache_StaggerUnstarted_SpreadsFirstRuns(t *testing.T) {
+	c := newProbeCache()
+	now := time.Unix(1_700_000_000, 0)
+	var probes []wire.ProbeSnapshot
+	for i := 0; i < 200; i++ {
+		probes = append(probes, dueProbe(fmt.Sprintf("p%03d", i), 1, now))
+	}
+	probes = append(probes, wire.ProbeSnapshot{
+		ID: "manual", Status: wire.ProbeStatusActive, ScheduleType: "manual",
+		StartsAt: now.Add(-time.Hour).UnixMilli(),
+	})
+	c.replaceAssignment("hash1", probes)
+	c.markRun("p000", now.Add(-time.Hour))
+
+	c.staggerUnstarted(now, 10*time.Second)
+	if due := c.dueProbes(now); len(due) >= 20 {
+		t.Fatalf("expected startup jitter to spread 200 fresh probes, %d were immediately due", len(due))
+	}
+	if c.probes["p000"].lastRunAt != now.Add(-time.Hour) {
+		t.Fatalf("an already-started probe must not be staggered, got lastRunAt %v", c.probes["p000"].lastRunAt)
+	}
+	due := c.dueProbes(now.Add(10 * time.Second))
+	if len(due) != 200 {
+		t.Fatalf("expected all 200 interval probes due after the jitter window, got %d", len(due))
+	}
+	for _, probe := range due {
+		if probe.ID == "manual" {
+			t.Fatal("manual probe must never become due via the scheduler")
+		}
+	}
+}
+
+func TestProbeCache_Synthetic10kAssignmentStaysBounded(t *testing.T) {
+	const (
+		total  = 10_000
+		budget = 512
+		ticks  = 20
+	)
+	c := newProbeCache()
+	now := time.Unix(1_700_000_000, 0)
+	probes := make([]wire.ProbeSnapshot, 0, total)
+	for i := 0; i < total; i++ {
+		probes = append(probes, dueProbe(fmt.Sprintf("p%05d", i), 1, now))
+	}
+	c.replaceAssignment("hash1", probes)
+
+	seen := make(map[string]struct{}, total)
+	for tick := 0; tick < ticks; tick++ {
+		at := now.Add(time.Duration(tick) * time.Second)
+		selected, deferred := c.takeDueProbes(at, budget, 32)
+		if len(selected) > budget {
+			t.Fatalf("tick %d selected %d jobs, over the %d budget", tick, len(selected), budget)
+		}
+		if tick == 0 && deferred != total-budget {
+			t.Fatalf("first tick: expected %d deferred jobs, got %d", total-budget, deferred)
+		}
+		for _, pr := range selected {
+			seen[pr.ID] = struct{}{}
+		}
+	}
+	if len(seen) != total {
+		t.Fatalf("expected forward progress across ticks to run all %d probes, saw %d", total, len(seen))
+	}
+}
+
+func TestProbeCache_TriggerQueueIsCapped(t *testing.T) {
+	c := newProbeCache()
+	now := time.Now()
+	snapshot := wire.ProbeSnapshot{
+		ID: "probe_1", Status: wire.ProbeStatusActive, ScheduleType: "manual",
+		StartsAt: now.Add(-time.Minute).UnixMilli(),
+	}
+	c.replaceAssignment("hash1", []wire.ProbeSnapshot{snapshot})
+	for i := 0; i < maxPendingTriggers+50; i++ {
+		c.applyTriggeredEvent(wire.Event{
+			EventType: "triggered", RunID: fmt.Sprintf("run_%d", i), Probe: snapshot,
+		})
+	}
+	if got := c.pendingTriggerCount(); got != maxPendingTriggers {
+		t.Fatalf("expected trigger queue capped at %d, got %d", maxPendingTriggers, got)
+	}
+	first := c.drainPendingTriggersLimited(10)
+	if len(first) != 10 {
+		t.Fatalf("expected a limited drain of 10, got %d", len(first))
+	}
+	if got := c.pendingTriggerCount(); got != maxPendingTriggers-10 {
+		t.Fatalf("expected %d triggers left queued, got %d", maxPendingTriggers-10, got)
 	}
 }

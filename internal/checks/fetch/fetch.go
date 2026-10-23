@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,10 +30,14 @@ import (
 
 // opts.Target is user-supplied (an account's own choice of URL, same
 // trust level as a subscription URL) -- an unbounded read is a
-// resource-exhaustion bug, not just a missing nice-to-have. 10MB
-// comfortably covers any real API response; anything beyond that is
-// far more likely a misconfigured or hostile URL than a legitimate one.
-const maxBodyBytes = 10 * 1024 * 1024
+// resource-exhaustion bug, not just a missing nice-to-have. The 2 MiB
+// default covers normal API responses without letting a handful of
+// concurrent checks pin a 256 MB node's memory; a probe whose API
+// genuinely returns more can raise it up to hardMaxBodyBytes.
+const (
+	defaultMaxBodyBytes = 2 * 1024 * 1024
+	hardMaxBodyBytes    = 10 * 1024 * 1024
+)
 
 // Same reasoning as maxFields (see parse.go) -- an unbounded custom
 // header map is a config-bloat/DoS lever, not a real use case.
@@ -52,7 +57,7 @@ func (Checker) Type() string { return "fetch" }
 // first byte that says whether the server is responding promptly.
 // Every call builds a fresh transport (see below), so this is always a
 // cold-path figure: DNS, connect and TLS included.
-func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string) ([]byte, int, float64, error) {
+func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string, maxBody int) ([]byte, int, float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -90,12 +95,12 @@ func do(ctx context.Context, target string, timeout time.Duration, method string
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBody)+1))
 	if err != nil {
 		return nil, resp.StatusCode, ttfbMs, err
 	}
-	if len(respBody) > maxBodyBytes {
-		respBody = respBody[:maxBodyBytes]
+	if len(respBody) > maxBody {
+		respBody = respBody[:maxBody]
 	}
 	return respBody, resp.StatusCode, ttfbMs, nil
 }
@@ -126,13 +131,25 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	body := opts.Param("body", "")
 
+	maxBody := defaultMaxBodyBytes
+	if raw := strings.TrimSpace(opts.Param("max_body_bytes", "")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			return probe.Invalid(c.Type(), opts.Target, opts.Seq, "max_body_bytes must be a positive integer")
+		}
+		if n > hardMaxBodyBytes {
+			n = hardMaxBodyBytes
+		}
+		maxBody = n
+	}
+
 	fieldsRaw, _ := opts.Params["fields"].(map[string]any)
 	if len(fieldsRaw) > maxFields {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("fields: at most %d allowed, got %d", maxFields, len(fieldsRaw)))
 	}
 
 	start := time.Now()
-	respBody, statusCode, ttfbMs, err := do(ctx, opts.Target, opts.Timeout, method, headers, body)
+	respBody, statusCode, ttfbMs, err := do(ctx, opts.Target, opts.Timeout, method, headers, body, maxBody)
 	elapsed := time.Since(start)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)

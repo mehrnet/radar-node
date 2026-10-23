@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,7 +65,22 @@ type Config struct {
 	// not network traffic -- a tick with nothing due does no I/O at
 	// all.
 	SchedulerTick time.Duration
-	Concurrency   int
+	// Concurrency is the check-execution parallelism. Zero auto-tunes
+	// from available RAM (roughly 4-64); an explicit nonzero value always
+	// wins.
+	Concurrency int
+	// Resource bounds for huge/public assignments. Zero uses defaults
+	// (512 jobs per tick, 32 per probe, 16 triggers); per-probe is capped
+	// to per-tick in Run. StartupJitter zero disables staggering; the CLI
+	// sets a real default so tests and embedding callers aren't delayed.
+	MaxJobsPerTick     int
+	MaxJobsPerProbe    int
+	MaxTriggersPerTick int
+	StartupJitter      time.Duration
+	// MemoryLimitBytes is a soft Go-runtime memory limit. Zero derives
+	// 65% of available memory (32 MiB floor); an explicit GOMEMLIMIT
+	// environment value is left alone.
+	MemoryLimitBytes int64
 	// PoolConcurrency and PoolMaxJobs lower a pooled module's own
 	// test_concurrency / max_jobs_per_instance for resource-constrained
 	// nodes. Zero keeps the module's value.
@@ -140,6 +156,17 @@ type agent struct {
 	// Local database bounds; used by the maintenance loop.
 	dbRetention time.Duration
 	dbMaxBytes  int64
+	// Lightweight, latest-only health telemetry and rolling path-health
+	// counters. The heartbeat goroutine owns sampling; the scheduler
+	// records check outcomes and deferred-job counts.
+	health       *healthSampler
+	path         *pathHealth
+	deferredJobs atomic.Int64
+	// Scheduler resource bounds, fixed at startup.
+	maxJobsPerTick     int
+	maxJobsPerProbe    int
+	maxTriggersPerTick int
+	startupJitter      time.Duration
 	// ready flips after the first heartbeat that confirms this node's
 	// current status. Restored probes must not run until then,
 	// otherwise a node suspended while offline could race its first
@@ -166,8 +193,46 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.SchedulerTick <= 0 {
 		return fmt.Errorf("--scheduler-tick must be positive")
 	}
-	if cfg.Concurrency <= 0 {
+	if cfg.Concurrency < 0 {
+		return fmt.Errorf("--concurrency must not be negative")
+	}
+	availableMemory := availableMemoryBytes()
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = autoConcurrency(availableMemory)
+	}
+	if cfg.Concurrency < 1 {
 		return fmt.Errorf("--concurrency must be positive")
+	}
+	if cfg.MaxJobsPerTick < 0 || cfg.MaxJobsPerProbe < 0 || cfg.MaxTriggersPerTick < 0 {
+		return fmt.Errorf("scheduler job limits must not be negative")
+	}
+	if cfg.StartupJitter < 0 {
+		return fmt.Errorf("--startup-jitter must not be negative")
+	}
+	if cfg.MemoryLimitBytes < 0 {
+		return fmt.Errorf("--mem-limit must not be negative")
+	}
+	maxJobsPerTick := cfg.MaxJobsPerTick
+	if maxJobsPerTick == 0 {
+		maxJobsPerTick = 512
+	}
+	maxJobsPerProbe := cfg.MaxJobsPerProbe
+	if maxJobsPerProbe == 0 {
+		maxJobsPerProbe = 32
+	}
+	if maxJobsPerProbe > maxJobsPerTick {
+		maxJobsPerProbe = maxJobsPerTick
+	}
+	maxTriggersPerTick := cfg.MaxTriggersPerTick
+	if maxTriggersPerTick == 0 {
+		maxTriggersPerTick = 16
+	}
+	startupJitter := cfg.StartupJitter
+	if cfg.MemoryLimitBytes == 0 && os.Getenv("GOMEMLIMIT") == "" {
+		cfg.MemoryLimitBytes = autoMemoryLimit(availableMemory)
+	}
+	if cfg.MemoryLimitBytes > 0 {
+		debug.SetMemoryLimit(cfg.MemoryLimitBytes)
 	}
 	if cfg.PoolConcurrency < 0 {
 		return fmt.Errorf("--pool-concurrency must not be negative")
@@ -249,21 +314,31 @@ func Run(ctx context.Context, cfg Config) error {
 		dbMaxBytes = store.DefaultMaxBytes
 	}
 	a := &agent{
-		client:      client,
-		nodeID:      nodeID,
-		apiKey:      cfg.APIKey,
-		apiURL:      cfg.APIURL,
-		proxyURL:    cfg.ProxyURL,
-		version:     version,
-		reg:         reg,
-		cache:       newProbeCache(),
-		clock:       &clockSync{},
-		concurrency: cfg.Concurrency,
-		spool:       spool,
-		store:       localStore,
-		dbRetention: dbRetention,
-		dbMaxBytes:  dbMaxBytes,
+		client:             client,
+		nodeID:             nodeID,
+		apiKey:             cfg.APIKey,
+		apiURL:             cfg.APIURL,
+		proxyURL:           cfg.ProxyURL,
+		version:            version,
+		reg:                reg,
+		cache:              newProbeCache(),
+		clock:              &clockSync{},
+		concurrency:        cfg.Concurrency,
+		spool:              spool,
+		store:              localStore,
+		dbRetention:        dbRetention,
+		dbMaxBytes:         dbMaxBytes,
+		health:             newHealthSampler(),
+		path:               newPathHealth(),
+		maxJobsPerTick:     maxJobsPerTick,
+		maxJobsPerProbe:    maxJobsPerProbe,
+		maxTriggersPerTick: maxTriggersPerTick,
+		startupJitter:      startupJitter,
 	}
+	journal.Info("agent", "scheduler resource limits",
+		"concurrency", cfg.Concurrency, "max_jobs_per_tick", maxJobsPerTick,
+		"max_jobs_per_probe", maxJobsPerProbe, "max_triggers_per_tick", maxTriggersPerTick,
+		"startup_jitter", startupJitter, "mem_limit_bytes", cfg.MemoryLimitBytes)
 	a.status.Store(wire.NodeStatusActive)
 
 	if a.store != nil {
@@ -282,6 +357,7 @@ func Run(ctx context.Context, cfg Config) error {
 				"rollups", stats.Rollups, "db_bytes", stats.DBBytes)
 		}
 	}
+	a.cache.staggerUnstarted(a.clock.now(), a.startupJitter)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -325,6 +401,14 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 		hbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		sentAt := time.Now()
+		var health *wire.NodeHealth
+		if a.health != nil {
+			pathState := "ok"
+			if a.path != nil {
+				pathState = a.path.state(sentAt)
+			}
+			health = a.health.snapshot(sentAt, pathState, int(a.deferredJobs.Load()))
+		}
 		resp, err := a.client.Heartbeat(hbCtx, wire.HeartbeatRequest{
 			NodeID:       a.nodeID,
 			AgentVersion: a.version,
@@ -333,8 +417,12 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			Probers:      proberHashes,
 			Modules:      a.reg.ModuleVersions(),
 			ProbeHash:    a.cache.lastKnownHash(),
+			Health:       health,
 			SentAt:       sentAt.UTC().Format(time.RFC3339Nano),
 		})
+		if a.health != nil {
+			a.health.noteHeartbeat(time.Since(sentAt), err == nil)
+		}
 		return resp, sentAt, time.Now(), err
 	}
 
@@ -390,6 +478,7 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 			} else {
 				a.cache.replaceAssignmentKeepingHash(resp.Probes)
 			}
+			a.cache.staggerUnstarted(a.clock.now(), a.startupJitter)
 			journal.Info("agent", "synced probe assignment", "probes", len(resp.Probes), "persisted", persisted)
 		}
 		if len(resp.Events) > 0 {
@@ -844,8 +933,37 @@ func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {
 
 func (a *agent) runDueProbes(ctx context.Context) {
 	now := a.clock.now()
-	due := a.cache.dueProbes(now)
-	triggers := a.cache.drainPendingTriggers()
+	maxJobs := a.maxJobsPerTick
+	if maxJobs < 1 {
+		maxJobs = 1 << 30
+	}
+	perProbe := a.maxJobsPerProbe
+	if perProbe < 1 {
+		perProbe = 1
+	}
+	triggerSlots := a.maxTriggersPerTick
+	if triggerSlots < 1 {
+		triggerSlots = 16
+	}
+	// Triggers are priority work, but reserve at most the whole tick
+	// budget: a trigger with a large probe_count is clamped, and
+	// scheduled probes get whatever budget remains. A trigger flood is
+	// bounded by maxTriggersPerTick and the durable queue cap.
+	if triggerSlots*perProbe > maxJobs {
+		triggerSlots = maxJobs / perProbe
+		if triggerSlots < 1 {
+			triggerSlots = 1
+		}
+	}
+	triggers := a.cache.drainPendingTriggersLimited(triggerSlots)
+	triggerBudget := len(triggers) * perProbe
+	if triggerBudget > maxJobs {
+		triggerBudget = maxJobs
+	}
+	probeBudget := maxJobs - triggerBudget
+	due, deferred := a.cache.takeDueProbes(now, probeBudget, a.maxJobsPerProbe)
+	a.deferredJobs.Store(int64(deferred + a.cache.pendingTriggerCount()))
+
 	if len(due) == 0 && len(triggers) == 0 {
 		if _, _, _, err := a.drainDelivery(ctx); err != nil {
 			journal.Error("agent", "delivery replay failed", "err", err)
@@ -853,19 +971,19 @@ func (a *agent) runDueProbes(ctx context.Context) {
 		return
 	}
 
-	// Claim immediately, before executing anything -- so a fast
-	// subsequent tick can't re-select the same probe while this run is
-	// still in flight. With local storage the result is durable even if
-	// reporting fails; without it, a failed post still loses this
-	// occurrence (an interval probe is due again next interval), which
-	// is the original accepted failure mode. Triggers don't touch
-	// lastRunAt at all -- they're independent of due-ness bookkeeping.
-	for _, pr := range due {
-		a.cache.markRun(pr.ID, now)
-	}
-
+	// takeDueProbes marks only the selected probes, before this tick
+	// executes them, so a fast subsequent tick cannot re-select them
+	// while the run is in flight. Deferred probes stay due rather than
+	// being marked run and silently skipped. Triggers don't touch
+	// lastRunAt at all -- they're independent of due bookkeeping.
 	results := a.executeProbes(ctx, due)
 	results = append(results, a.executeTriggers(ctx, triggers)...)
+	if a.path != nil {
+		recordedAt := time.Now()
+		for _, result := range results {
+			a.path.record(result.Target, result.Error, result.ErrorCode, recordedAt)
+		}
+	}
 
 	if len(due) > 0 && a.store != nil {
 		ids := make([]string, len(due))
@@ -992,15 +1110,22 @@ func (a *agent) executeTriggers(ctx context.Context, triggers []pendingTrigger) 
 				continue
 			}
 		}
-		count := pr.ProbeCount
-		if count < 1 {
-			count = 1
-		}
+		count := a.probeJobCount(pr.ProbeCount)
 		for seq := 1; seq <= count; seq++ {
 			jobs = append(jobs, checkJob{pr: pr, runID: t.RunID, seq: seq})
 		}
 	}
 	return a.runChecks(ctx, jobs)
+}
+
+func (a *agent) probeJobCount(raw int) int {
+	if raw < 1 {
+		return 1
+	}
+	if a.maxJobsPerProbe > 0 && raw > a.maxJobsPerProbe {
+		return a.maxJobsPerProbe
+	}
+	return raw
 }
 
 // executeProbes runs every check of every due probe, bounded by a
@@ -1011,10 +1136,7 @@ func (a *agent) executeProbes(ctx context.Context, due []wire.ProbeSnapshot) []w
 	var jobs []checkJob
 	for _, pr := range due {
 		runID := newRunID()
-		count := pr.ProbeCount
-		if count < 1 {
-			count = 1
-		}
+		count := a.probeJobCount(pr.ProbeCount)
 		for seq := 1; seq <= count; seq++ {
 			jobs = append(jobs, checkJob{pr: pr, runID: runID, seq: seq})
 		}

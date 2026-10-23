@@ -41,8 +41,9 @@ for a user-scoped one (see `--help` below).
 
 On an ARMv7 OpenWrt router, install `curl` and CA certificates first
 (`opkg update && opkg install curl ca-bundle`), then add `--low-power` to
-cap the node for the device (8 concurrent checks, 4 pooled xray jobs, at
-most 128 jobs per xray instance) and enable the SQLite journal under
+cap the node for the device (4 concurrent checks, at most 128 jobs per
+scheduler tick and 16 per probe, 2 pooled xray jobs, at most 64 jobs per
+xray instance) and enable the SQLite journal under
 `/var/lib/radar-node/radar.db` (or `/etc/radar-node/radar.db` when `/var`
 is tmpfs). On a cellular vantage, `--domain-strategy=use_ipv4` also
 forces xray's outbound resolution to IPv4. Auto-update is on by default
@@ -161,7 +162,12 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--api-key` | `"node_id:secret"` bearer token (required) |
 | `--api-proxy` | proxy for the agent's own `radar-api` traffic (`http://`, `https://`, `socks5://`, `socks5h://`) |
 | `--scheduler-tick` | how often to check cached probes for due-ness (default `2s`) |
-| `--concurrency` | max probes running at once (default `64`) |
+| `--concurrency` | max probes running at once (default `0`: auto-tune 4-64 from available RAM) |
+| `--max-jobs-per-tick` | cap probe jobs started per scheduler tick (default `512`; deferred probes stay due) |
+| `--max-jobs-per-probe` | cap one probe's own `probe_count` per run (default `32`) |
+| `--max-triggers-per-tick` | cap triggered runs per scheduler tick, and the durable pending-trigger queue at 256 (default `16`) |
+| `--startup-jitter` | spread newly assigned probes' first runs over this window (default `5s`) |
+| `--mem-limit` | soft Go memory limit in bytes (default `0`: derive from cgroup/RAM; honors `GOMEMLIMIT`) |
 | `--pool-concurrency` | cap a pooled module's own `test_concurrency` (0 = the module's value) |
 | `--pool-max-jobs` | cap a pooled module's own `max_jobs_per_instance` (0 = the module's value) |
 | `--domain-strategy` | force outbound DNS resolution onto one address family: `as_is`, `use_ipv4`, `use_ip`, `use_ipv6` (default: leave module configs unchanged) |
@@ -179,6 +185,17 @@ The agent has no server-computed dispatch: it syncs probe definitions
 incrementally into a local cache and decides for itself when something is
 due. See [Wire protocol](#wire-protocol--radar-api) below for the full
 mechanics.
+
+Scheduling is bounded for small hosts. Each tick selects a fairness-ordered
+(oldest-due-first) subset of due probes within the job budget; anything left
+out remains due for the next tick instead of being marked run and skipped.
+New assignments are jittered, triggers are capped per tick, and a fixed worker
+pool keeps goroutine count from scaling with assignment size. Concurrency and
+the soft memory limit auto-tune from cgroup v2 limits or `/proc/meminfo` when
+not set explicitly; the flags above override them. Fast probes still run on
+their interval until the budget is reached; under a very large assignment the
+deferred-job count and interval stretch are visible in heartbeat health and
+the node UI rather than silently dropping work.
 
 ### Local storage, history, and replay
 
@@ -393,6 +410,10 @@ yourself which parts of its response you actually care about.
   }
 }
 ```
+
+Responses are read up to 2 MiB by default; set `max_body_bytes` on the probe
+to raise that (capped at 10 MiB) when an API genuinely returns more. Larger
+responses are truncated, and `bytes` reports how much was read.
 
 Every entry under `fields` is either a single `{"parser", "expr"}` step or
 an array of them for a multi-step chain, applied in order against the raw

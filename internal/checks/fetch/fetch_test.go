@@ -36,8 +36,8 @@ func TestCheck_ReturnsBody(t *testing.T) {
 }
 
 func TestCheck_CapsBodySize(t *testing.T) {
-	// 11MB of content, well over fetch's own 10MB cap.
-	big := strings.Repeat("x", 11*1024*1024)
+	// 3MB of content, over the 2MB default.
+	big := strings.Repeat("x", 3*1024*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(big))
 	}))
@@ -47,8 +47,29 @@ func TestCheck_CapsBodySize(t *testing.T) {
 	if !res.Ok {
 		t.Fatalf("expected ok, got error %q", res.Error)
 	}
-	if res.Extra["bytes"] != 10*1024*1024 {
-		t.Fatalf("expected body capped at 10MB, got %v bytes", res.Extra["bytes"])
+	if res.Extra["bytes"] != 2*1024*1024 {
+		t.Fatalf("expected body capped at 2MB by default, got %v bytes", res.Extra["bytes"])
+	}
+}
+
+func TestCheck_MaxBodyBytesOverride(t *testing.T) {
+	big := strings.Repeat("x", 3*1024*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(big))
+	}))
+	defer srv.Close()
+
+	res := check(t, srv.URL, map[string]any{"max_body_bytes": "3145728"})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	if res.Extra["bytes"] != 3*1024*1024 {
+		t.Fatalf("expected the override to allow 3MB, got %v bytes", res.Extra["bytes"])
+	}
+
+	res = check(t, srv.URL, map[string]any{"max_body_bytes": "nope"})
+	if res.Ok || !strings.Contains(res.Error, "max_body_bytes") {
+		t.Fatalf("expected an invalid max_body_bytes error, got ok=%v error=%q", res.Ok, res.Error)
 	}
 }
 

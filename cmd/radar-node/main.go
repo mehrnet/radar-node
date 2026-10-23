@@ -128,7 +128,16 @@ agent flags:
   --api-proxy string      proxy for the agent's own radar-api traffic
                           (http://, https://, socks5://, socks5h://)
   --scheduler-tick duration    how often to check cached probes for due-ness (default "2s")
-  --concurrency int       max probes running at once (default 64)
+  --concurrency int       max probes running at once; 0 (default) derives
+                          4-64 from available RAM
+  --max-jobs-per-tick int cap probe jobs started per scheduler tick
+                          (0 = 512; deferred probes stay due)
+  --max-jobs-per-probe int cap a probe's own probe_count per run (0 = 32)
+  --max-triggers-per-tick int  cap triggered runs per tick (0 = 16)
+  --startup-jitter duration    spread first runs of newly assigned probes
+                          (default "5s")
+  --mem-limit n           soft Go memory limit in bytes; 0 derives it from
+                          available cgroup/RAM (honors GOMEMLIMIT)
   --pool-concurrency int  cap a pooled module's own test_concurrency
                           (0 = the module's value)
   --pool-max-jobs int     cap a pooled module's max_jobs_per_instance
@@ -275,6 +284,11 @@ func runAgent(args []string) error {
 		apiProxy            string
 		schedulerTick       time.Duration
 		concurrency         int
+		maxJobsPerTick      int
+		maxJobsPerProbe     int
+		maxTriggersPerTick  int
+		startupJitter       time.Duration
+		memLimit            int64
 		poolConcurrency     int
 		poolMaxJobs         int
 		domainStrategy      string
@@ -295,7 +309,12 @@ func runAgent(args []string) error {
 	fs.StringVar(&apiKey, "api-key", "", "")
 	fs.StringVar(&apiProxy, "api-proxy", "", "")
 	fs.DurationVar(&schedulerTick, "scheduler-tick", 2*time.Second, "")
-	fs.IntVar(&concurrency, "concurrency", 64, "")
+	fs.IntVar(&concurrency, "concurrency", 0, "")
+	fs.IntVar(&maxJobsPerTick, "max-jobs-per-tick", 0, "")
+	fs.IntVar(&maxJobsPerProbe, "max-jobs-per-probe", 0, "")
+	fs.IntVar(&maxTriggersPerTick, "max-triggers-per-tick", 0, "")
+	fs.DurationVar(&startupJitter, "startup-jitter", 5*time.Second, "")
+	fs.Int64Var(&memLimit, "mem-limit", 0, "")
 	fs.IntVar(&poolConcurrency, "pool-concurrency", 0, "")
 	fs.IntVar(&poolMaxJobs, "pool-max-jobs", 0, "")
 	fs.StringVar(&domainStrategy, "domain-strategy", "", "")
@@ -329,6 +348,11 @@ func runAgent(args []string) error {
 		Version:             version,
 		SchedulerTick:       schedulerTick,
 		Concurrency:         concurrency,
+		MaxJobsPerTick:      maxJobsPerTick,
+		MaxJobsPerProbe:     maxJobsPerProbe,
+		MaxTriggersPerTick:  maxTriggersPerTick,
+		StartupJitter:       startupJitter,
+		MemoryLimitBytes:    memLimit,
 		PoolConcurrency:     poolConcurrency,
 		PoolMaxJobs:         poolMaxJobs,
 		DomainStrategy:      domainStrategy,
