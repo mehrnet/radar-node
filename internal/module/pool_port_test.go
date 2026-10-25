@@ -27,3 +27,21 @@ func TestAllocateUniquePortGivesUpWhenExhausted(t *testing.T) {
 		t.Fatal("expected an error when every allocation collides")
 	}
 }
+
+func TestAllocatePoolPortStaysInRangeAndSkipsUsed(t *testing.T) {
+	const base, span = 24000, 100
+	port, err := allocatePoolPort(map[int]bool{base: true}, base, span)
+	if err != nil {
+		t.Fatalf("allocatePoolPort: %v", err)
+	}
+	if port <= base || port >= base+span {
+		t.Fatalf("port = %d, want in (%d, %d)", port, base, base+span)
+	}
+}
+
+func TestAllocatePoolPortRangeExhausted(t *testing.T) {
+	_, err := allocatePoolPort(map[int]bool{24000: true}, 24000, 1)
+	if err == nil {
+		t.Fatal("expected an error when the only range port is already used")
+	}
+}

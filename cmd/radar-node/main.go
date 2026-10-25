@@ -145,6 +145,10 @@ agent flags:
                           (0 = the module's value)
   --pool-max-jobs int     cap a pooled module's max_jobs_per_instance
                           (0 = the module's value)
+  --pool-port-base int    first local port for pooled engine inbounds
+                          (0 = random ephemeral ports)
+  --pool-port-span int    number of ports in the reserved range
+                          (set together with --pool-port-base)
   --domain-strategy value  force outbound DNS resolution onto one address
                           family: as_is | use_ipv4 | use_ip | use_ipv6
                           (default: leave module configs unchanged)
@@ -308,6 +312,8 @@ func runAgent(args []string) error {
 		memLimit            int64
 		poolConcurrency     int
 		poolMaxJobs         int
+		poolPortBase        int
+		poolPortSpan        int
 		domainStrategy      string
 		sourceIP            string
 		bindInterface       string
@@ -336,6 +342,8 @@ func runAgent(args []string) error {
 	fs.Int64Var(&memLimit, "mem-limit", 0, "")
 	fs.IntVar(&poolConcurrency, "pool-concurrency", 0, "")
 	fs.IntVar(&poolMaxJobs, "pool-max-jobs", 0, "")
+	fs.IntVar(&poolPortBase, "pool-port-base", 0, "")
+	fs.IntVar(&poolPortSpan, "pool-port-span", 0, "")
 	fs.StringVar(&domainStrategy, "domain-strategy", "", "")
 	fs.StringVar(&sourceIP, "source-ip", "", "")
 	fs.StringVar(&bindInterface, "bind-interface", "", "")
@@ -376,6 +384,8 @@ func runAgent(args []string) error {
 		MemoryLimitBytes:    memLimit,
 		PoolConcurrency:     poolConcurrency,
 		PoolMaxJobs:         poolMaxJobs,
+		PoolPortBase:        poolPortBase,
+		PoolPortSpan:        poolPortSpan,
 		DomainStrategy:      domainStrategy,
 		SourceIP:            sourceIP,
 		BindInterface:       bindInterface,

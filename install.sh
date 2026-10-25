@@ -44,6 +44,8 @@ MAX_JOBS_PER_TICK=""
 MAX_JOBS_PER_PROBE=""
 POOL_CONCURRENCY=""
 POOL_MAX_JOBS=""
+POOL_PORT_BASE=""
+POOL_PORT_SPAN=""
 DB_PATH=""
 DB_MAX_BYTES=""
 DB_RETENTION=""
@@ -91,6 +93,9 @@ Options:
   --max-jobs-per-probe=N  cap a probe's probe_count per run (default 32)
   --pool-concurrency=N  cap a pooled module's own test_concurrency
   --pool-max-jobs=N  cap a pooled module's own max_jobs_per_instance
+  --pool-port-base=N  first local port for pooled engine inbounds
+  --pool-port-span=N  number of ports in the reserved range; use
+                      non-overlapping ranges for co-located agents
   --db-path=PATH     SQLite journal for durable results and retained
                      history (default: state dir; supersedes the spool)
   --db-max-bytes=N   cap the database by pruning delivered history
@@ -149,6 +154,8 @@ for arg in "$@"; do
     --max-jobs-per-probe=*) MAX_JOBS_PER_PROBE="${arg#*=}" ;;
     --pool-concurrency=*) POOL_CONCURRENCY="${arg#*=}" ;;
     --pool-max-jobs=*) POOL_MAX_JOBS="${arg#*=}" ;;
+    --pool-port-base=*) POOL_PORT_BASE="${arg#*=}" ;;
+    --pool-port-span=*) POOL_PORT_SPAN="${arg#*=}" ;;
     --db-path=*) DB_PATH="${arg#*=}" ;;
     --db-max-bytes=*) DB_MAX_BYTES="${arg#*=}" ;;
     --db-retention=*) DB_RETENTION="${arg#*=}" ;;
@@ -333,6 +340,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_max_jobs_per_probe="$(sed -n 's/.*--max-jobs-per-probe \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_pool_concurrency="$(sed -n 's/.*--pool-concurrency \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_pool_max_jobs="$(sed -n 's/.*--pool-max-jobs \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_pool_port_base="$(sed -n 's/.*--pool-port-base \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
+    existing_pool_port_span="$(sed -n 's/.*--pool-port-span \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_db_path="$(sed -n 's/.*--db-path "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_db_max_bytes="$(sed -n 's/.*--db-max-bytes \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_db_retention="$(sed -n 's/.*--db-retention "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
@@ -366,6 +375,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
   if [ -z "$MAX_JOBS_PER_PROBE" ] && [ -n "$existing_max_jobs_per_probe" ]; then MAX_JOBS_PER_PROBE="$existing_max_jobs_per_probe"; fi
   if [ -z "$POOL_CONCURRENCY" ] && [ -n "$existing_pool_concurrency" ]; then POOL_CONCURRENCY="$existing_pool_concurrency"; fi
   if [ -z "$POOL_MAX_JOBS" ] && [ -n "$existing_pool_max_jobs" ]; then POOL_MAX_JOBS="$existing_pool_max_jobs"; fi
+  if [ -z "$POOL_PORT_BASE" ] && [ -n "$existing_pool_port_base" ]; then POOL_PORT_BASE="$existing_pool_port_base"; fi
+  if [ -z "$POOL_PORT_SPAN" ] && [ -n "$existing_pool_port_span" ]; then POOL_PORT_SPAN="$existing_pool_port_span"; fi
   if [ -z "$DB_PATH" ] && [ -n "$existing_db_path" ]; then DB_PATH="$existing_db_path"; fi
   if [ -z "$DB_MAX_BYTES" ] && [ -n "$existing_db_max_bytes" ]; then DB_MAX_BYTES="$existing_db_max_bytes"; fi
   if [ -z "$DB_RETENTION" ] && [ -n "$existing_db_retention" ]; then DB_RETENTION="$existing_db_retention"; fi
@@ -968,6 +979,9 @@ if [ -n "$POOL_CONCURRENCY" ]; then
 fi
 if [ -n "$POOL_MAX_JOBS" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --pool-max-jobs ${POOL_MAX_JOBS}"
+fi
+if [ -n "$POOL_PORT_BASE" ] && [ -n "$POOL_PORT_SPAN" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --pool-port-base ${POOL_PORT_BASE} --pool-port-span ${POOL_PORT_SPAN}"
 fi
 if [ -n "$DB_PATH" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --db-path \"${DB_PATH}\""

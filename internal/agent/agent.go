@@ -87,6 +87,13 @@ type Config struct {
 	// nodes. Zero keeps the module's value.
 	PoolConcurrency int
 	PoolMaxJobs     int
+	// PoolPortBase/PortSpan reserve a local inbound port range for
+	// pooled engines. Zero leaves the allocator on random ephemeral
+	// ports, which can collide with outbound ephemeral ports or another
+	// agent on the same host. Ranges for co-located agents must not
+	// overlap and should sit below the OS ephemeral range.
+	PoolPortBase int
+	PoolPortSpan int
 	// DomainStrategy is the node-level address-family choice exported
 	// to module child processes as RADAR_DOMAIN_STRATEGY (e.g. UseIPv4
 	// on a cellular vantage with a broken IPv6 path). Empty leaves each
@@ -251,6 +258,15 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.PoolMaxJobs < 0 {
 		return fmt.Errorf("--pool-max-jobs must not be negative")
 	}
+	if cfg.PoolPortBase < 0 || cfg.PoolPortSpan < 0 {
+		return fmt.Errorf("--pool-port-base/--pool-port-span must not be negative")
+	}
+	if (cfg.PoolPortBase == 0) != (cfg.PoolPortSpan == 0) {
+		return fmt.Errorf("--pool-port-base and --pool-port-span must be set together")
+	}
+	if cfg.PoolPortBase > 0 && int64(cfg.PoolPortBase)+int64(cfg.PoolPortSpan) > 65536 {
+		return fmt.Errorf("--pool-port-base/--pool-port-span range exceeds port 65535")
+	}
 	if cfg.SpoolMaxBytes < 0 {
 		return fmt.Errorf("--spool-max-bytes must not be negative")
 	}
@@ -302,7 +318,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	limits := module.PoolLimits{TestConcurrency: cfg.PoolConcurrency, MaxJobsPerInstance: cfg.PoolMaxJobs}
+	limits := module.PoolLimits{
+		TestConcurrency:    cfg.PoolConcurrency,
+		MaxJobsPerInstance: cfg.PoolMaxJobs,
+		PortBase:           cfg.PoolPortBase,
+		PortSpan:           cfg.PoolPortSpan,
+	}
 	reg, err := registry.DefaultWithLimits(limits)
 	if err != nil {
 		return err

@@ -49,6 +49,10 @@ type Step struct {
 type PoolLimits struct {
 	TestConcurrency    int
 	MaxJobsPerInstance int
+	// PortBase/PortSpan reserve a local inbound port range for pooled
+	// instances. Zero keeps the allocator on random ephemeral ports.
+	PortBase int
+	PortSpan int
 }
 
 func (l PoolLimits) testConcurrency(moduleValue int) int {

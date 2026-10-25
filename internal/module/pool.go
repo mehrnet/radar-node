@@ -263,7 +263,7 @@ func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob,
 		port, ok := c.ports[p.key]
 		if !ok {
 			var err error
-			port, err = allocateUniquePort(usedPorts, portalloc.Alloc)
+			port, err = allocatePoolPort(usedPorts, c.limits.PortBase, c.limits.PortSpan)
 			if err != nil {
 				c.mu.Unlock()
 				for _, q := range chunk {
@@ -333,6 +333,32 @@ func allocateUniquePort(used map[int]bool, alloc func() (int, error)) (int, erro
 		}
 	}
 	return 0, errors.New("no unique port after 256 attempts")
+}
+
+// allocatePoolPort uses a node-specific range when one is configured.
+// That keeps pooled inbounds out of the OS ephemeral range (where
+// outbound connections could grab a port between the probe bind and
+// xray's own bind) and lets two agents on one host use disjoint ranges.
+func allocatePoolPort(used map[int]bool, base, span int) (int, error) {
+	if base > 0 && span > 0 {
+		return allocateUniquePortInRange(used, base, span)
+	}
+	return allocateUniquePort(used, portalloc.Alloc)
+}
+
+func allocateUniquePortInRange(used map[int]bool, base, span int) (int, error) {
+	for port := base; port < base+span; port++ {
+		if used[port] {
+			continue
+		}
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			continue
+		}
+		_ = ln.Close()
+		return port, nil
+	}
+	return 0, fmt.Errorf("no free port in range %d-%d", base, base+span-1)
 }
 
 // shouldBisect reports whether a build/start failure is plausibly
@@ -539,9 +565,16 @@ func (c *PoolChecker) buildAndStart(jobs []poolJob, key string) (*warmInstance, 
 	engineCtx, cancelEngine := context.WithCancel(context.Background())
 	// Readiness is checked against the first job's own port only: a
 	// pooled engine either comes up with every inbound it was
-	// configured for or it doesn't start at all -- same reasoning the
-	// cold path always used, with the same timeout scaling.
-	readinessTimeout := maxTimeout(jobs) / 2
+	// configured for or it doesn't start at all. A pool instance starts
+	// once for a whole batch and then stays warm, so give it a more
+	// generous startup budget than one job's own half-timeout: on a
+	// busy router, a 60-ish-job xray instance can take longer than 6s
+	// to open every inbound, and bisecting a slow start leaves a large
+	// tail of jobs with no engine at all.
+	readinessTimeout := maxTimeout(jobs)
+	if readinessTimeout < 20*time.Second {
+		readinessTimeout = 20 * time.Second
+	}
 	engine, err := startEngine(engineCtx, *c.m.Pool.Start, ec, readinessTimeout, jobs[0].port)
 	if err != nil {
 		cancelEngine()
