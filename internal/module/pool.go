@@ -624,10 +624,15 @@ func (c *PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob)
 		// job this was.
 		return probe.Result{Skip: true, Type: c.Type(), Target: opts.Target, Seq: opts.Seq}
 	}
-	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
 	sem <- struct{}{}
 	defer func() { <-sem }()
+	// Start the timeout only after this job owns a test slot. Creating
+	// it before the semaphore made a queued job's clock run while it was
+	// waiting for another job's tunnel test to finish; with a small
+	// pool-concurrency cap, most of a large batch could expire before
+	// ever making a request.
+	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
+	defer cancel()
 
 	paramsPath, cleanup, err := writeParamsJSON(opts.Params)
 	if err != nil {
