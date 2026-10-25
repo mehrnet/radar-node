@@ -152,6 +152,34 @@ collect:
 	}
 }
 
+func TestChecker_PassesBindingPlaceholders(t *testing.T) {
+	m := loadOne(t, `
+name: placeholder-probe
+run:
+  command: ["sh", "-c", "printf '12.5|%s|%s' '{{source_ip}}' '{{bind_interface}}'"]
+collect:
+  format: regex
+  pattern: '^(?P<latency_ms>[^|]*)\|(?P<source>[^|]*)\|(?P<iface>.*)$'
+`)
+	binding, err := netbind.Parse("127.0.0.2", "eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := module.NewChecker(m)
+	res := c.Check(context.Background(), probe.Options{
+		Target:  "irrelevant",
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Bind:    binding,
+	})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	if res.Extra["source"] != "127.0.0.2" || res.Extra["iface"] != "eth0" {
+		t.Fatalf("binding placeholders not resolved: %+v", res.Extra)
+	}
+}
+
 func TestChecker_NonZeroExitIsFailure(t *testing.T) {
 	m := loadOne(t, `
 name: always-fails

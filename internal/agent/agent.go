@@ -354,10 +354,6 @@ func Run(ctx context.Context, cfg Config) error {
 		"startup_jitter", startupJitter, "mem_limit_bytes", cfg.MemoryLimitBytes)
 	if !binding.IsZero() {
 		journal.Info("agent", "outbound binding configured", "binding", binding.String())
-		if binding.Interface != "" && runtime.GOOS != "linux" {
-			journal.Warn("agent", "xray interface binding is Linux-only; xray probes may use the default route",
-				"interface", binding.Interface)
-		}
 	}
 	a.status.Store(wire.NodeStatusActive)
 

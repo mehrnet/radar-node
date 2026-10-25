@@ -30,10 +30,12 @@ func stringifyParam(v any) string {
 var placeholderRe = regexp.MustCompile(`\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}`)
 
 var fixedPlaceholders = map[string]bool{
-	"target":      true,
-	"timeout_ms":  true,
-	"params_json": true,
-	"alloc_port":  true,
+	"target":         true,
+	"timeout_ms":     true,
+	"params_json":    true,
+	"alloc_port":     true,
+	"source_ip":      true,
+	"bind_interface": true,
 	// jobs_json/config_path are pool-only (see PoolSpec in module.go):
 	// jobs_json is the path to this instance's whole job batch, given
 	// to build_config; config_path is where build_config writes the
@@ -104,6 +106,13 @@ func (ec execContext) resolve(argv []string) []string {
 				return ec.ParamsJSONPath
 			case name == "alloc_port":
 				return strconv.Itoa(ec.AllocPort)
+			case name == "source_ip":
+				if ec.Bind.SourceIP.IsValid() {
+					return ec.Bind.SourceIP.String()
+				}
+				return ""
+			case name == "bind_interface":
+				return ec.Bind.Interface
 			case name == "jobs_json":
 				return ec.JobsJSONPath
 			case name == "config_path":

@@ -175,6 +175,31 @@ func TestBuildConfigAppliesBindingEverywhere(t *testing.T) {
 	}
 }
 
+func TestBuildConfigUsesInterfaceForLinkLocalSource(t *testing.T) {
+	jobs := decodeJobs(t, `[
+		{"index":0,"alloc_port":30501,"params":{"socks_port":10808,"config":{
+			"inbounds":[{"port":10808,"protocol":"socks"}],
+			"outbounds":[{"protocol":"vless","streamSettings":{"network":"tcp","security":"tls"}}]
+		}}}
+	]`)
+	binding, err := netbind.Parse("fe80::1", "eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := buildConfig(jobs, "", binding)
+	out := findOutbound(merged.Outbounds, "job-0-out-0")
+	if out == nil {
+		t.Fatalf("missing outbound: %+v", merged.Outbounds)
+	}
+	if _, ok := out["sendThrough"]; ok {
+		t.Fatalf("link-local sendThrough must be omitted: %+v", out)
+	}
+	sockopt := out["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
+	if sockopt["interface"] != "eth0" {
+		t.Fatalf("interface = %v, want eth0", sockopt["interface"])
+	}
+}
+
 func TestDomainStrategyFromEnv(t *testing.T) {
 	for _, tc := range []struct {
 		value string
@@ -243,6 +268,37 @@ func TestRunWritesCompactConfig(t *testing.T) {
 	}
 	if len(merged.Inbounds) != 1 || merged.Inbounds[0]["port"] != float64(30301) {
 		t.Fatalf("merged = %+v", merged)
+	}
+}
+
+func TestRunReadsBindingFromEnv(t *testing.T) {
+	t.Setenv(netbind.EnvSourceIP, "192.0.2.10")
+	t.Setenv(netbind.EnvBindInterface, "eth0")
+	dir := t.TempDir()
+	jobsPath := filepath.Join(dir, "jobs.json")
+	outPath := filepath.Join(dir, "config.json")
+	jobs := `[{"index":0,"alloc_port":30601,"params":{"socks_port":10808,"config":{"inbounds":[{"port":10808}],"outbounds":[{"protocol":"vless","streamSettings":{"network":"tcp","security":"tls"}}]}}}]`
+	if err := os.WriteFile(jobsPath, []byte(jobs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"--jobs", jobsPath, "--out", outPath}, os.Stdout); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var merged mergedConfig
+	if err := json.Unmarshal(raw, &merged); err != nil {
+		t.Fatal(err)
+	}
+	out := findOutbound(merged.Outbounds, "job-0-out-0")
+	if out == nil || out["sendThrough"] != "192.0.2.10" {
+		t.Fatalf("sendThrough not applied from env: %+v", merged.Outbounds)
+	}
+	sockopt := out["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
+	if sockopt["interface"] != "eth0" {
+		t.Fatalf("interface not applied from env: %+v", sockopt)
 	}
 }
 

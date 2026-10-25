@@ -214,9 +214,13 @@ the matching address family for DNS.
 Linux uses `SO_BINDTODEVICE` (root or `CAP_NET_RAW`), macOS uses
 `IP_BOUND_IF`/`IPV6_BOUND_IF`, and Windows uses
 `IP_UNICAST_IF`/`IPV6_UNICAST_IF`. Native checks, DNS resolution, and the
-generated xray pool config honor the binding. Module subprocesses receive
-`RADAR_SOURCE_IP` and `RADAR_BIND_INTERFACE` for opt-in support, and xray
-outbounds get `sendThrough`/`sockopt.interface` automatically. ICMP interface
+generated xray pool config honor the binding. Xray outbounds get
+`sendThrough`/`sockopt.interface` automatically; the shipped Xray implements
+device binding on Linux, macOS, and Windows. Module subprocesses receive
+`RADAR_SOURCE_IP`/`RADAR_BIND_INTERFACE` and may use
+`{{source_ip}}`/`{{bind_interface}}` in their command argv. Bind only
+direct-egress module commands; never bind a curl that targets a local
+SOCKS/tunnel endpoint, because that traffic must stay local. ICMP interface
 binding is supported on Linux/macOS (Windows ICMP is already limited), and
 engine modules other than xray (WireGuard/OpenVPN) still need a network
 namespace for guaranteed per-WAN egress.

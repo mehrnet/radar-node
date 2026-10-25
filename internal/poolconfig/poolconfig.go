@@ -149,13 +149,15 @@ func applyDomainStrategy(outbound map[string]any, strategy string) {
 }
 
 // applyBinding makes every generated engine outbound use the node's
-// selected path. sendThrough is the portable source-address option;
-// sockopt.interface is Xray's own device binding (Linux-centric).
+// selected path. sendThrough is the source-address option;
+// sockopt.interface is Xray's own device binding, implemented by the
+// shipped Xray on Linux, macOS, and Windows. A link-local source has
+// no usable zone in sendThrough, so it relies on the interface option.
 func applyBinding(outbound map[string]any, binding netbind.Binding) {
 	if binding.IsZero() {
 		return
 	}
-	if binding.SourceIP.IsValid() {
+	if binding.SourceIP.IsValid() && !binding.SourceIP.IsLinkLocalUnicast() {
 		outbound["sendThrough"] = binding.SourceIP.WithZone("").String()
 	}
 	if binding.Interface != "" {
