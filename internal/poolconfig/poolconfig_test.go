@@ -62,7 +62,7 @@ func TestBuildConfigRemapsInboundsAndTagsRoutes(t *testing.T) {
 	}
 }
 
-func TestBuildConfigSkipsXHTTPMuxAndFragmentsReality(t *testing.T) {
+func TestBuildConfigSkipsXHTTPAndRealityMux(t *testing.T) {
 	jobs := decodeJobs(t, `[
 		{"index":0,"alloc_port":30101,"params":{"socks_port":10808,"config":{
 			"inbounds":[{"port":10808,"protocol":"socks"}],
@@ -92,19 +92,11 @@ func TestBuildConfigSkipsXHTTPMuxAndFragmentsReality(t *testing.T) {
 	}
 	stream := reality["streamSettings"].(map[string]any)
 	sockopt := stream["sockopt"].(map[string]any)
-	if sockopt["dialerProxy"] != "job-1-frag" {
-		t.Fatalf("sockopt = %+v, want dialerProxy job-1-frag", sockopt)
-	}
 	if sockopt["mark"] != float64(1) {
 		t.Fatalf("existing sockopt fields were lost: %+v", sockopt)
 	}
-	frag := findOutbound(merged.Outbounds, "job-1-frag")
-	if frag == nil || frag["protocol"] != "freedom" {
-		t.Fatalf("missing reality fragment outbound: %+v", merged.Outbounds)
-	}
-	settings := frag["settings"].(map[string]any)["fragment"].(map[string]any)
-	if settings["packets"] != "tlshello" || settings["length"] != "10-100" || settings["interval"] != "10-20" {
-		t.Fatalf("fragment settings = %+v", settings)
+	if frag := findOutbound(merged.Outbounds, "job-1-frag"); frag != nil {
+		t.Fatalf("Reality must not get a fragment outbound: %+v", frag)
 	}
 }
 
@@ -121,7 +113,7 @@ func TestBuildConfigAppliesDomainStrategyEverywhere(t *testing.T) {
 	]`)
 
 	merged := buildConfig(jobs, "UseIPv4", netbind.Binding{})
-	for _, tag := range []string{"job-0-out-0", "job-1-out-0", "job-1-frag"} {
+	for _, tag := range []string{"job-0-out-0", "job-1-out-0"} {
 		out := findOutbound(merged.Outbounds, tag)
 		if out == nil {
 			t.Fatalf("missing outbound %s: %+v", tag, merged.Outbounds)
@@ -133,7 +125,7 @@ func TestBuildConfigAppliesDomainStrategyEverywhere(t *testing.T) {
 		}
 	}
 	realitySockopt := findOutbound(merged.Outbounds, "job-1-out-0")["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
-	if realitySockopt["dialerProxy"] != "job-1-frag" || realitySockopt["mark"] != float64(1) {
+	if realitySockopt["mark"] != float64(1) {
 		t.Fatalf("existing sockopt keys lost: %+v", realitySockopt)
 	}
 }
@@ -155,7 +147,7 @@ func TestBuildConfigAppliesBindingEverywhere(t *testing.T) {
 	}
 
 	merged := buildConfig(jobs, "", binding)
-	for _, tag := range []string{"job-0-out-0", "job-1-out-0", "job-1-frag"} {
+	for _, tag := range []string{"job-0-out-0", "job-1-out-0"} {
 		out := findOutbound(merged.Outbounds, tag)
 		if out == nil {
 			t.Fatalf("missing outbound %s: %+v", tag, merged.Outbounds)
@@ -170,7 +162,7 @@ func TestBuildConfigAppliesBindingEverywhere(t *testing.T) {
 		}
 	}
 	realitySockopt := findOutbound(merged.Outbounds, "job-1-out-0")["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
-	if realitySockopt["mark"] != float64(1) || realitySockopt["dialerProxy"] != "job-1-frag" {
+	if realitySockopt["mark"] != float64(1) {
 		t.Fatalf("existing sockopt keys lost: %+v", realitySockopt)
 	}
 }

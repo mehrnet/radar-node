@@ -13,15 +13,16 @@
 // pins each inbound to its own primary outbound so jobs sharing one
 // engine process can never cross-talk.
 //
-// Two transport-specific exceptions are preserved verbatim from the
-// script:
-//   - Mux.Cool is enabled on a job's primary outbound unless its
-//     transport is XHTTP (XHTTP has its own multiplexing and must not
-//     be combined with mux) or its security is REALITY (community-
-//     reported connection failures with that combination).
-//   - A REALITY outbound's TLS ClientHello is fragmented through a
-//     per-job freedom outbound + sockopt.dialerProxy, so a DPI
-//     middlebox cannot fingerprint the first packet.
+// Mux.Cool is enabled on a job's primary outbound unless its transport
+// is XHTTP (XHTTP has its own multiplexing and must not be combined
+// with mux) or its security is REALITY (community-reported connection
+// failures with that combination).
+//
+// REALITY outbounds are deliberately left unfragmented. An earlier
+// revision routed them through a freedom outbound + sockopt.dialerProxy
+// to split the TLS ClientHello, but that made every REALITY probe time
+// out in production. The same outbound without the fragment passes
+// through both the bound and unbound paths.
 //
 // A malformed job (no inbounds/outbounds, or an inbound missing the
 // declared socks_port) is simply left out of the merged config: its
@@ -129,8 +130,7 @@ func domainStrategyFromEnv() (string, error) {
 // applyDomainStrategy forces an outbound's server/target resolution
 // onto the node-level address family. On a cellular vantage with a
 // broken or partial IPv6 path, an AAAA answer must not make a healthy
-// proxy look dead. Existing sockopt keys (dialerProxy, etc.) are
-// preserved.
+// proxy look dead. Existing sockopt keys are preserved.
 func applyDomainStrategy(outbound map[string]any, strategy string) {
 	if strategy == "" {
 		return
@@ -209,30 +209,6 @@ func buildConfig(jobs []job, domainStrategy string, binding netbind.Binding) mer
 				isReality := security == "reality"
 				if network != "xhttp" && !isReality {
 					outbound["mux"] = map[string]any{"enabled": true, "concurrency": 8}
-				}
-				if isReality {
-					fragTag := fmt.Sprintf("job-%d-frag", j.Index)
-					sockopt, _ := stream["sockopt"].(map[string]any)
-					if sockopt == nil {
-						sockopt = map[string]any{}
-					}
-					sockopt["dialerProxy"] = fragTag
-					stream["sockopt"] = sockopt
-					outbound["streamSettings"] = stream
-					frag := map[string]any{
-						"tag":      fragTag,
-						"protocol": "freedom",
-						"settings": map[string]any{
-							"fragment": map[string]any{
-								"packets":  "tlshello",
-								"length":   "10-100",
-								"interval": "10-20",
-							},
-						},
-					}
-					applyDomainStrategy(frag, domainStrategy)
-					applyBinding(frag, binding)
-					merged.Outbounds = append(merged.Outbounds, frag)
 				}
 			}
 			merged.Outbounds = append(merged.Outbounds, outbound)
