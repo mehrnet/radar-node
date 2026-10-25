@@ -248,12 +248,22 @@ func mustParamsJSON(params map[string]any) string {
 func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob, live map[string]bool, results []probe.Result) {
 	c.mu.Lock()
 
+	// portalloc.Alloc only probes that a port is free at that instant;
+	// it can hand the same port to two jobs in this chunk (and another
+	// engine can already hold a pinned one). Duplicate inbounds make
+	// xray fail to bind the engine or silently serve only one job, so
+	// skip any port already pinned before allocating a new one.
+	usedPorts := make(map[int]bool, len(c.ports)+len(chunk))
+	for _, port := range c.ports {
+		usedPorts[port] = true
+	}
+
 	jobs := make([]poolJob, len(chunk))
 	for i, p := range chunk {
 		port, ok := c.ports[p.key]
 		if !ok {
 			var err error
-			port, err = portalloc.Alloc()
+			port, err = allocateUniquePort(usedPorts, portalloc.Alloc)
 			if err != nil {
 				c.mu.Unlock()
 				for _, q := range chunk {
@@ -261,6 +271,7 @@ func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob,
 				}
 				return
 			}
+			usedPorts[port] = true
 			c.ports[p.key] = port
 		}
 		jobs[i] = poolJob{idx: p.idx, opts: p.o, port: port}
@@ -308,6 +319,20 @@ func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob,
 
 	c.testJobs(ctx, jobs, results)
 	c.releaseSlot(slot)
+}
+
+func allocateUniquePort(used map[int]bool, alloc func() (int, error)) (int, error) {
+	const attempts = 256
+	for i := 0; i < attempts; i++ {
+		port, err := alloc()
+		if err != nil {
+			return 0, err
+		}
+		if !used[port] {
+			return port, nil
+		}
+	}
+	return 0, errors.New("no unique port after 256 attempts")
 }
 
 // shouldBisect reports whether a build/start failure is plausibly
