@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/module"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -120,6 +121,34 @@ collect:
 	}
 	if !strings.Contains(res.Error, "stdout exceeded") {
 		t.Fatalf("expected a stdout limit error, got %q", res.Error)
+	}
+}
+
+func TestChecker_PassesBindingEnvToSubprocess(t *testing.T) {
+	m := loadOne(t, `
+name: env-probe
+run:
+  command: ["sh", "-c", "printf '12.5|%s|%s' \"$RADAR_SOURCE_IP\" \"$RADAR_BIND_INTERFACE\""]
+collect:
+  format: regex
+  pattern: '^(?P<latency_ms>[^|]*)\|(?P<source>[^|]*)\|(?P<iface>.*)$'
+`)
+	binding, err := netbind.Parse("127.0.0.2", "eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := module.NewChecker(m)
+	res := c.Check(context.Background(), probe.Options{
+		Target:  "irrelevant",
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Bind:    binding,
+	})
+	if !res.Ok {
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	if res.Extra["source"] != "127.0.0.2" || res.Extra["iface"] != "eth0" {
+		t.Fatalf("binding env not propagated: %+v", res.Extra)
 	}
 }
 

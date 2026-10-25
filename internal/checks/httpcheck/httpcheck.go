@@ -11,8 +11,10 @@ import (
 	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -21,21 +23,44 @@ import (
 // from a connection a previous tick already established, instead of
 // paying a fresh TLS handshake every time.
 type Checker struct {
-	warm *http.Transport
+	mu      sync.Mutex
+	warm    *http.Transport
+	warmKey netbind.Binding
 }
 
 func New() *Checker {
-	return &Checker{warm: baseTransport(false)}
+	return &Checker{}
 }
 
 func (*Checker) Type() string { return "http" }
 
-func baseTransport(disableKeepAlives bool) *http.Transport {
-	return &http.Transport{
+func baseTransport(disableKeepAlives bool, binding netbind.Binding) *http.Transport {
+	transport := &http.Transport{
 		DisableKeepAlives:   disableKeepAlives,
 		MaxIdleConnsPerHost: 4,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
+	if !binding.IsZero() {
+		transport.DialContext = binding.DialContext
+	}
+	return transport
+}
+
+// warmTransport is lazy because the checker is constructed before
+// agent configuration is available. A node's binding is immutable, so
+// in practice this builds one transport for the process lifetime.
+func (c *Checker) warmTransport(binding netbind.Binding) *http.Transport {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.warm != nil && c.warmKey == binding {
+		return c.warm
+	}
+	if c.warm != nil {
+		c.warm.CloseIdleConnections()
+	}
+	c.warm = baseTransport(false, binding)
+	c.warmKey = binding
+	return c.warm
 }
 
 // roundTripResult carries one request's own timing breakdown --
@@ -73,11 +98,11 @@ func (c *Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 	method := opts.Param("method", "GET")
 
-	cold, err := c.roundTrip(ctx, baseTransport(true), method, url)
+	cold, err := c.roundTrip(ctx, baseTransport(true, opts.Bind), method, url)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
-	warm, err := c.roundTrip(ctx, c.warm, method, url)
+	warm, err := c.roundTrip(ctx, c.warmTransport(opts.Bind), method, url)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}

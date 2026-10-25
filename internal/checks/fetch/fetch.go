@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -57,7 +58,7 @@ func (Checker) Type() string { return "fetch" }
 // first byte that says whether the server is responding promptly.
 // Every call builds a fresh transport (see below), so this is always a
 // cold-path figure: DNS, connect and TLS included.
-func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string, maxBody int) ([]byte, int, float64, error) {
+func do(ctx context.Context, target string, timeout time.Duration, method string, headers map[string]string, body string, maxBody int, binding netbind.Binding) ([]byte, int, float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -88,7 +89,11 @@ func do(ctx context.Context, target string, timeout time.Duration, method string
 	// check's own schedule is whatever an account picked, not a tight
 	// monitoring interval, so there's no meaningful connection reuse
 	// to optimize for.
-	client := &http.Client{Transport: &http.Transport{TLSHandshakeTimeout: 10 * time.Second}}
+	transport := &http.Transport{TLSHandshakeTimeout: 10 * time.Second}
+	if !binding.IsZero() {
+		transport.DialContext = binding.DialContext
+	}
+	client := &http.Client{Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, 0, err
@@ -149,7 +154,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	}
 
 	start := time.Now()
-	respBody, statusCode, ttfbMs, err := do(ctx, opts.Target, opts.Timeout, method, headers, body, maxBody)
+	respBody, statusCode, ttfbMs, err := do(ctx, opts.Target, opts.Timeout, method, headers, body, maxBody, opts.Bind)
 	elapsed := time.Since(start)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)

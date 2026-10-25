@@ -4,10 +4,13 @@ import (
 	"context"
 	"net"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/checks/tcp"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -38,6 +41,52 @@ func TestCheck_Success(t *testing.T) {
 	}
 	if res.LatencyMs == nil {
 		t.Fatal("expected latency_ms to be set")
+	}
+}
+
+func TestCheck_BindsSourceIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("127.0.0.2 is not assigned by default on the Windows CI runner")
+	}
+	binding, err := netbind.Parse("127.0.0.2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	source := make(chan string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		source <- conn.RemoteAddr().(*net.TCPAddr).IP.String()
+		conn.Close()
+	}()
+
+	c := tcp.New()
+	res := c.Check(context.Background(), probe.Options{
+		Target:  ln.Addr().String(),
+		Timeout: time.Second,
+		Seq:     1,
+		Bind:    binding,
+	})
+	if !res.Ok {
+		if strings.Contains(res.Error, "cannot assign requested address") {
+			t.Skipf("loopback source binding unavailable: %s", res.Error)
+		}
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	select {
+	case got := <-source:
+		if got != "127.0.0.2" {
+			t.Fatalf("server saw source %s, want 127.0.0.2", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not observe a connection")
 	}
 }
 

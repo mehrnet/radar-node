@@ -3,12 +3,15 @@ package dns_test
 import (
 	"context"
 	"net"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	xdns "golang.org/x/net/dns/dnsmessage"
 
 	"github.com/mehrnet/radar-node/internal/checks/dns"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -95,6 +98,71 @@ func checkSRV(t *testing.T, server, target, service, proto string) probe.Result 
 		Seq:     1,
 		Params:  map[string]any{"server": server, "record": "srv", "service": service, "proto": proto},
 	})
+}
+
+func TestCheck_BindsSourceIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("127.0.0.2 is not assigned by default on the Windows CI runner")
+	}
+	binding, err := netbind.Parse("127.0.0.2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	source := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 512)
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		source <- addr.(*net.UDPAddr).IP.String()
+		var req xdns.Message
+		if err := req.Unpack(buf[:n]); err != nil || len(req.Questions) != 1 {
+			return
+		}
+		q := req.Questions[0]
+		resp := xdns.Message{
+			Header:    xdns.Header{ID: req.Header.ID, Response: true, Authoritative: true},
+			Questions: req.Questions,
+			Answers: []xdns.Resource{{
+				Header: xdns.ResourceHeader{Name: q.Name, Type: q.Type, Class: xdns.ClassINET, TTL: 60},
+				Body:   &xdns.AResource{A: [4]byte{203, 0, 113, 42}},
+			}},
+		}
+		packed, err := resp.Pack()
+		if err != nil {
+			return
+		}
+		_, _ = conn.WriteTo(packed, addr)
+	}()
+
+	c := dns.New()
+	res := c.Check(context.Background(), probe.Options{
+		Target:  "example.radar.test.",
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Params:  map[string]any{"server": conn.LocalAddr().String(), "record": "a"},
+		Bind:    binding,
+	})
+	if !res.Ok {
+		if strings.Contains(res.Error, "cannot assign requested address") {
+			t.Skipf("loopback source binding unavailable: %s", res.Error)
+		}
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	select {
+	case got := <-source:
+		if got != "127.0.0.2" {
+			t.Fatalf("DNS server saw source %s, want 127.0.0.2", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DNS server did not observe a query")
+	}
 }
 
 func TestCheck_ResolvesAgainstCustomServer(t *testing.T) {

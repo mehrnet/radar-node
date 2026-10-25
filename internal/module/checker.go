@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/action"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/portalloc"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
@@ -92,6 +93,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 		Params:         opts.Params,
 		ParamsJSONPath: paramsPath,
 		AllocPort:      port,
+		Bind:           opts.Bind,
 	}
 
 	if c.m.Prepare != nil {
@@ -199,6 +201,7 @@ type startedEngine struct {
 func startEngine(ctx context.Context, step Step, ec execContext, readinessTimeout time.Duration, port int) (*startedEngine, error) {
 	argv := ec.resolve(step.Command)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	applyBindingEnv(cmd, ec.Bind)
 	setParentDeathSignal(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
@@ -287,6 +290,7 @@ func runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {
 	stderr := &limitedBuffer{limit: maxStepStderrBytes, onExceed: cancel}
 	argv := ec.resolve(step.Command)
 	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
+	applyBindingEnv(cmd, ec.Bind)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := cmd.Run()
@@ -303,6 +307,13 @@ func runStep(ctx context.Context, step Step, ec execContext) ([]byte, error) {
 		return nil, err
 	}
 	return stdout.buf.Bytes(), nil
+}
+
+func applyBindingEnv(cmd *exec.Cmd, binding netbind.Binding) {
+	if binding.IsZero() {
+		return
+	}
+	cmd.Env = netbind.Env(os.Environ(), binding)
 }
 
 func writeParamsJSON(params map[string]any) (string, func(), error) {

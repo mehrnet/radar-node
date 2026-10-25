@@ -52,6 +52,8 @@ import (
 	"time"
 
 	"golang.org/x/net/proxy"
+
+	"github.com/mehrnet/radar-node/internal/netbind"
 )
 
 // Fractions of the job's full timeout_ms -- see the package comment.
@@ -138,9 +140,12 @@ func dialNetwork() string {
 
 // dialTCPDelay makes the best-effort raw dial and returns its
 // milliseconds, or nil for any failure -- never fails the run.
-func dialTCPDelay(ep endpoint, timeout time.Duration) *float64 {
+func dialTCPDelay(ep endpoint, timeout time.Duration, binding netbind.Binding) *float64 {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	dialer := binding.Dialer("tcp")
 	start := time.Now()
-	conn, err := net.DialTimeout(dialNetwork(), net.JoinHostPort(ep.Address, fmt.Sprint(ep.Port)), timeout)
+	conn, err := dialer.DialContext(ctx, binding.Network(dialNetwork()), net.JoinHostPort(ep.Address, fmt.Sprint(ep.Port)))
 	if err != nil {
 		return nil
 	}
@@ -246,6 +251,10 @@ func Run(args []string, stdout io.Writer) error {
 		timeout = 5 * time.Second
 	}
 	socksAddr := fmt.Sprintf("127.0.0.1:%d", *socksPort)
+	binding, err := netbind.FromEnv()
+	if err != nil {
+		return fmt.Errorf("jobprobe: %w", err)
+	}
 
 	start := time.Now()
 	overallDeadline := start.Add(durationFraction(timeout, totalFraction))
@@ -256,7 +265,7 @@ func Run(args []string, stdout io.Writer) error {
 	// measurement's own budget.
 	dialDone := make(chan *float64, 1)
 	if ep, ok := extractEndpoint(*paramsFile); ok {
-		go func() { dialDone <- dialTCPDelay(ep, durationFraction(timeout, dialFraction)) }()
+		go func() { dialDone <- dialTCPDelay(ep, durationFraction(timeout, dialFraction), binding) }()
 	} else {
 		dialDone <- nil
 	}

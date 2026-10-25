@@ -28,6 +28,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/destgate"
 	"github.com/mehrnet/radar-node/internal/journal"
 	"github.com/mehrnet/radar-node/internal/module"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 	"github.com/mehrnet/radar-node/internal/registry"
 	"github.com/mehrnet/radar-node/internal/store"
@@ -91,6 +92,10 @@ type Config struct {
 	// on a cellular vantage with a broken IPv6 path). Empty leaves each
 	// outbound's own setting unchanged.
 	DomainStrategy string
+	// SourceIP and BindInterface select this node's outbound path for
+	// every check. Both empty keeps the OS default route.
+	SourceIP      string
+	BindInterface string
 	// SpoolDir enables durable result delivery: every batch is written
 	// here before it is POSTed and replayed after an API failure. Empty
 	// keeps the old fire-and-forget behavior. SpoolMaxBytes bounds the
@@ -162,6 +167,8 @@ type agent struct {
 	health       *healthSampler
 	path         *pathHealth
 	deferredJobs atomic.Int64
+	bind         netbind.Binding
+	bindMonitor  *bindMonitor
 	// Scheduler resource bounds, fixed at startup.
 	maxJobsPerTick     int
 	maxJobsPerProbe    int
@@ -211,6 +218,10 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if cfg.MemoryLimitBytes < 0 {
 		return fmt.Errorf("--mem-limit must not be negative")
+	}
+	binding, bindErr := netbind.Parse(cfg.SourceIP, cfg.BindInterface)
+	if bindErr != nil {
+		return bindErr
 	}
 	maxJobsPerTick := cfg.MaxJobsPerTick
 	if maxJobsPerTick == 0 {
@@ -330,6 +341,8 @@ func Run(ctx context.Context, cfg Config) error {
 		dbMaxBytes:         dbMaxBytes,
 		health:             newHealthSampler(),
 		path:               newPathHealth(),
+		bind:               binding,
+		bindMonitor:        newBindMonitor(binding),
 		maxJobsPerTick:     maxJobsPerTick,
 		maxJobsPerProbe:    maxJobsPerProbe,
 		maxTriggersPerTick: maxTriggersPerTick,
@@ -339,6 +352,13 @@ func Run(ctx context.Context, cfg Config) error {
 		"concurrency", cfg.Concurrency, "max_jobs_per_tick", maxJobsPerTick,
 		"max_jobs_per_probe", maxJobsPerProbe, "max_triggers_per_tick", maxTriggersPerTick,
 		"startup_jitter", startupJitter, "mem_limit_bytes", cfg.MemoryLimitBytes)
+	if !binding.IsZero() {
+		journal.Info("agent", "outbound binding configured", "binding", binding.String())
+		if binding.Interface != "" && runtime.GOOS != "linux" {
+			journal.Warn("agent", "xray interface binding is Linux-only; xray probes may use the default route",
+				"interface", binding.Interface)
+		}
+	}
 	a.status.Store(wire.NodeStatusActive)
 
 	if a.store != nil {
@@ -408,6 +428,14 @@ func (a *agent) heartbeatLoop(ctx context.Context) {
 				pathState = a.path.state(sentAt)
 			}
 			health = a.health.snapshot(sentAt, pathState, int(a.deferredJobs.Load()))
+		}
+		if health != nil && !a.bind.IsZero() {
+			bindErr := a.bindError(hbCtx, sentAt)
+			if a.bind.SourceIP.IsValid() {
+				health.SourceIP = a.bind.SourceIP.String()
+			}
+			health.BindInterface = a.bind.Interface
+			health.BindError = bindErr
 		}
 		resp, err := a.client.Heartbeat(hbCtx, wire.HeartbeatRequest{
 			NodeID:       a.nodeID,
@@ -933,6 +961,15 @@ func (a *agent) schedulerLoop(ctx context.Context, tick time.Duration) {
 
 func (a *agent) runDueProbes(ctx context.Context) {
 	now := a.clock.now()
+	if !a.bind.IsZero() {
+		if errText := a.bindError(ctx, now); errText != "" {
+			a.noteBindingPause(now)
+			if _, _, _, err := a.drainDelivery(ctx); err != nil {
+				journal.Error("agent", "delivery replay failed", "err", err)
+			}
+			return
+		}
+	}
 	maxJobs := a.maxJobsPerTick
 	if maxJobs < 1 {
 		maxJobs = 1 << 30
@@ -1245,7 +1282,7 @@ func (a *agent) runChecks(ctx context.Context, jobs []checkJob) []wire.Result {
 // to answer this cycle. Logged locally so it's still visible for our
 // own operational debugging, just never sent on.
 func (a *agent) runCheck(ctx context.Context, sem chan struct{}, pr wire.ProbeSnapshot, runID string, seq int) (wire.Result, bool) {
-	opts := optionsFor(pr, seq)
+	opts := a.optionsFor(pr, seq)
 
 	checker, ok := a.reg.Get(pr.Prober)
 	var r probe.Result
@@ -1282,7 +1319,7 @@ func (a *agent) runCheckBatch(ctx context.Context, prober string, batchJobs []ch
 
 	opts := make([]probe.Options, len(batchJobs))
 	for i, j := range batchJobs {
-		opts[i] = optionsFor(j.pr, j.seq)
+		opts[i] = a.optionsFor(j.pr, j.seq)
 	}
 	checkResults := batchChecker.CheckBatch(ctx, opts)
 
@@ -1314,7 +1351,7 @@ func (a *agent) runCheckBatch(ctx context.Context, prober string, batchJobs []ch
 // with -- shared by runCheck and runCheckBatch so a batched and
 // unbatched check of the same prober can never see a different
 // timeout default.
-func optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
+func (a *agent) optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
 	timeout := time.Duration(pr.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -1325,6 +1362,7 @@ func optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
 		Seq:         seq,
 		Params:      pr.Params,
 		Destination: destinationFor(pr),
+		Bind:        a.bind,
 	}
 }
 

@@ -32,12 +32,24 @@ func New() Checker { return Checker{} }
 func (Checker) Type() string { return "icmp" }
 
 func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
-	dst, err := net.ResolveIPAddr("ip4", opts.Target)
+	if opts.Bind.SourceIP.IsValid() && !opts.Bind.SourceIP.Is4() {
+		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("ICMP check currently supports IPv4 source addresses only"))
+	}
+	dst, err := opts.Bind.ResolveIPAddr(ctx, "ip4", opts.Target)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
 
-	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
+	var conn net.PacketConn
+	if opts.Bind.Interface != "" {
+		conn, err = opts.Bind.ListenICMP(ctx, "udp4")
+	} else {
+		source := "0.0.0.0"
+		if opts.Bind.SourceIP.IsValid() {
+			source = opts.Bind.SourceIP.String()
+		}
+		conn, err = icmp.ListenPacket("udp4", source)
+	}
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq,
 			fmt.Errorf("open icmp socket (is net.ipv4.ping_group_range configured?): %w", err))

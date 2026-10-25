@@ -20,6 +20,7 @@ import (
 	"github.com/mehrnet/radar-node/internal/agent"
 	"github.com/mehrnet/radar-node/internal/jobprobe"
 	"github.com/mehrnet/radar-node/internal/moduleinstall"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/output"
 	"github.com/mehrnet/radar-node/internal/poolconfig"
 	"github.com/mehrnet/radar-node/internal/probe"
@@ -121,6 +122,8 @@ probe flags:
                           on top of the embedded defaults
   --tools-dir path        resolves __TOOLS_DIR__ in a loaded module's own
                           prepare/run/teardown command (see --modules-dir)
+  --source-ip ip           bind probe sockets to this local IPv4/IPv6 address
+  --bind-interface name    bind probe sockets to this egress interface
 
 agent flags:
   --api-url string      radar-api base URL (required)
@@ -145,6 +148,11 @@ agent flags:
   --domain-strategy value  force outbound DNS resolution onto one address
                           family: as_is | use_ipv4 | use_ip | use_ipv6
                           (default: leave module configs unchanged)
+  --source-ip ip           bind every probe to this local source address
+                          (IPv4 or IPv6, optional %zone)
+  --bind-interface name    bind every probe to this egress interface
+                          (Linux needs CAP_NET_RAW/root; may be combined
+                          with --source-ip)
   --spool-dir path        persist results to disk before posting and replay
                           them after an API outage (default: disabled)
   --spool-max-bytes n     cap the result spool (default 16 MiB)
@@ -215,13 +223,15 @@ Examples:
 
 func runProbe(args []string) error {
 	var (
-		checkType  string
-		count      int
-		timeout    time.Duration
-		format     string
-		params     stringMap
-		modulesDir string
-		toolsDir   string
+		checkType     string
+		count         int
+		timeout       time.Duration
+		format        string
+		params        stringMap
+		modulesDir    string
+		toolsDir      string
+		sourceIP      string
+		bindInterface string
 	)
 
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
@@ -232,6 +242,8 @@ func runProbe(args []string) error {
 	fs.Var(&params, "param", "")
 	fs.StringVar(&modulesDir, "modules-dir", "", "")
 	fs.StringVar(&toolsDir, "tools-dir", "", "")
+	fs.StringVar(&sourceIP, "source-ip", "", "")
+	fs.StringVar(&bindInterface, "bind-interface", "", "")
 	// Go's flag package stops parsing at the first non-flag token, so
 	// `probe <target> --type tcp` (target first, as documented in
 	// usage()) would otherwise leave --type unparsed. Every flag here
@@ -244,6 +256,10 @@ func runProbe(args []string) error {
 		return errors.New("expected exactly one target argument")
 	}
 	target := fs.Arg(0)
+	binding, err := netbind.Parse(sourceIP, bindInterface)
+	if err != nil {
+		return err
+	}
 
 	reg, err := registry.Default()
 	if err != nil {
@@ -267,6 +283,7 @@ func runProbe(args []string) error {
 			Timeout: timeout,
 			Seq:     i,
 			Params:  params.toParams(),
+			Bind:    binding,
 		})
 		if !result.Ok {
 			env.Ok = false
@@ -292,6 +309,8 @@ func runAgent(args []string) error {
 		poolConcurrency     int
 		poolMaxJobs         int
 		domainStrategy      string
+		sourceIP            string
+		bindInterface       string
 		spoolDir            string
 		spoolMaxBytes       int64
 		dbPath              string
@@ -318,6 +337,8 @@ func runAgent(args []string) error {
 	fs.IntVar(&poolConcurrency, "pool-concurrency", 0, "")
 	fs.IntVar(&poolMaxJobs, "pool-max-jobs", 0, "")
 	fs.StringVar(&domainStrategy, "domain-strategy", "", "")
+	fs.StringVar(&sourceIP, "source-ip", "", "")
+	fs.StringVar(&bindInterface, "bind-interface", "", "")
 	fs.StringVar(&spoolDir, "spool-dir", "", "")
 	fs.Int64Var(&spoolMaxBytes, "spool-max-bytes", 0, "")
 	fs.StringVar(&dbPath, "db-path", "", "")
@@ -356,6 +377,8 @@ func runAgent(args []string) error {
 		PoolConcurrency:     poolConcurrency,
 		PoolMaxJobs:         poolMaxJobs,
 		DomainStrategy:      domainStrategy,
+		SourceIP:            sourceIP,
+		BindInterface:       bindInterface,
 		SpoolDir:            spoolDir,
 		SpoolMaxBytes:       spoolMaxBytes,
 		DBPath:              dbPath,

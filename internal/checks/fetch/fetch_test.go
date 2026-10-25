@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/checks/fetch"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -49,6 +52,44 @@ func TestCheck_CapsBodySize(t *testing.T) {
 	}
 	if res.Extra["bytes"] != 2*1024*1024 {
 		t.Fatalf("expected body capped at 2MB by default, got %v bytes", res.Extra["bytes"])
+	}
+}
+
+func TestCheck_BindsSourceIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("127.0.0.2 is not assigned by default on the Windows CI runner")
+	}
+	binding, err := netbind.Parse("127.0.0.2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		source <- host
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	res := fetch.New().Check(context.Background(), probe.Options{
+		Target:  srv.URL,
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Bind:    binding,
+	})
+	if !res.Ok {
+		if strings.Contains(res.Error, "cannot assign requested address") {
+			t.Skipf("loopback source binding unavailable: %s", res.Error)
+		}
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	select {
+	case got := <-source:
+		if got != "127.0.0.2" {
+			t.Fatalf("server saw source %s, want 127.0.0.2", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not observe a request")
 	}
 }
 

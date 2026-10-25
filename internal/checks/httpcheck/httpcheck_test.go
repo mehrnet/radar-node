@@ -2,12 +2,16 @@ package httpcheck_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/checks/httpcheck"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -28,6 +32,47 @@ func TestCheck_Success(t *testing.T) {
 	}
 	if code, _ := res.Extra["http_code"].(int); code != http.StatusNoContent {
 		t.Fatalf("expected http_code 204, got %v", res.Extra["http_code"])
+	}
+}
+
+func TestCheck_BindsSourceIPWarmAndCold(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("127.0.0.2 is not assigned by default on the Windows CI runner")
+	}
+	binding, err := netbind.Parse("127.0.0.2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		sources <- host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := httpcheck.New()
+	res := c.Check(context.Background(), probe.Options{
+		Target:  srv.URL,
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Bind:    binding,
+	})
+	if !res.Ok {
+		if strings.Contains(res.Error, "cannot assign requested address") {
+			t.Skipf("loopback source binding unavailable: %s", res.Error)
+		}
+		t.Fatalf("expected ok, got error %q", res.Error)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-sources:
+			if got != "127.0.0.2" {
+				t.Fatalf("request %d came from %s, want 127.0.0.2", i, got)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("server did not observe request %d", i)
+		}
 	}
 }
 

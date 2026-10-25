@@ -17,13 +17,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"time"
 
 	"golang.org/x/net/proxy"
 
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -93,7 +93,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	if dual || protocol == "socks5" {
 		attemptCtx, cancel := context.WithTimeout(outerCtx, attemptTimeout)
-		latency, err := attemptSOCKS5(attemptCtx, opts.Target, username, password, testURL)
+		latency, err := attemptSOCKS5(attemptCtx, opts.Target, username, password, testURL, opts.Bind)
 		cancel()
 		if err == nil {
 			anyOk = true
@@ -107,7 +107,7 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 
 	if dual || protocol == "http" {
 		attemptCtx, cancel := context.WithTimeout(outerCtx, attemptTimeout)
-		latency, err := attemptHTTPProxy(attemptCtx, opts.Target, username, password, testURL, tlsToProxy)
+		latency, err := attemptHTTPProxy(attemptCtx, opts.Target, username, password, testURL, tlsToProxy, opts.Bind)
 		cancel()
 		if err == nil {
 			anyOk = true
@@ -136,12 +136,12 @@ func pickBest(cur *float64, v float64) *float64 {
 	return cur
 }
 
-func attemptSOCKS5(ctx context.Context, target, username, password, testURL string) (float64, error) {
+func attemptSOCKS5(ctx context.Context, target, username, password, testURL string, binding netbind.Binding) (float64, error) {
 	var auth *proxy.Auth
 	if username != "" || password != "" {
 		auth = &proxy.Auth{User: username, Password: password}
 	}
-	dialer, err := proxy.SOCKS5("tcp", target, auth, &net.Dialer{})
+	dialer, err := proxy.SOCKS5("tcp", target, auth, binding.Dialer("tcp"))
 	if err != nil {
 		return 0, err
 	}
@@ -157,7 +157,7 @@ func attemptSOCKS5(ctx context.Context, target, username, password, testURL stri
 	return timedGet(ctx, client, testURL)
 }
 
-func attemptHTTPProxy(ctx context.Context, target, username, password, testURL string, tlsToProxy bool) (float64, error) {
+func attemptHTTPProxy(ctx context.Context, target, username, password, testURL string, tlsToProxy bool, binding netbind.Binding) (float64, error) {
 	scheme := "http"
 	if tlsToProxy {
 		scheme = "https"
@@ -166,7 +166,11 @@ func attemptHTTPProxy(ctx context.Context, target, username, password, testURL s
 	if username != "" || password != "" {
 		proxyURL.User = url.UserPassword(username, password)
 	}
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+	if !binding.IsZero() {
+		transport.DialContext = binding.DialContext
+	}
+	client := &http.Client{Transport: transport}
 	return timedGet(ctx, client, testURL)
 }
 

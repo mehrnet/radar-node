@@ -72,10 +72,16 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	defer cancel()
 
 	resolver := net.DefaultResolver
+	if bound := opts.Bind.Resolver(); bound != nil {
+		resolver = bound
+	}
 	if server := opts.Param("server", ""); server != "" {
 		resolver = &net.Resolver{
 			PreferGo: true,
 			Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				if !opts.Bind.IsZero() {
+					return opts.Bind.DialContext(ctx, network, server)
+				}
 				d := net.Dialer{}
 				return d.DialContext(ctx, network, server)
 			},

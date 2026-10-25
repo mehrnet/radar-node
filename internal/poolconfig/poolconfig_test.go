@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mehrnet/radar-node/internal/netbind"
 )
 
 func decodeJobs(t *testing.T, raw string) []job {
@@ -39,7 +41,7 @@ func TestBuildConfigRemapsInboundsAndTagsRoutes(t *testing.T) {
 		}}}
 	]`)
 
-	merged := buildConfig(jobs, "")
+	merged := buildConfig(jobs, "", netbind.Binding{})
 	if len(merged.Inbounds) != 2 {
 		t.Fatalf("inbounds = %d, want 2", len(merged.Inbounds))
 	}
@@ -72,7 +74,7 @@ func TestBuildConfigSkipsXHTTPMuxAndFragmentsReality(t *testing.T) {
 		}}}
 	]`)
 
-	merged := buildConfig(jobs, "")
+	merged := buildConfig(jobs, "", netbind.Binding{})
 	xhttp := findOutbound(merged.Outbounds, "job-0-out-0")
 	if xhttp == nil {
 		t.Fatalf("missing xhttp outbound: %+v", merged.Outbounds)
@@ -118,7 +120,7 @@ func TestBuildConfigAppliesDomainStrategyEverywhere(t *testing.T) {
 		}}}
 	]`)
 
-	merged := buildConfig(jobs, "UseIPv4")
+	merged := buildConfig(jobs, "UseIPv4", netbind.Binding{})
 	for _, tag := range []string{"job-0-out-0", "job-1-out-0", "job-1-frag"} {
 		out := findOutbound(merged.Outbounds, tag)
 		if out == nil {
@@ -132,6 +134,43 @@ func TestBuildConfigAppliesDomainStrategyEverywhere(t *testing.T) {
 	}
 	realitySockopt := findOutbound(merged.Outbounds, "job-1-out-0")["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
 	if realitySockopt["dialerProxy"] != "job-1-frag" || realitySockopt["mark"] != float64(1) {
+		t.Fatalf("existing sockopt keys lost: %+v", realitySockopt)
+	}
+}
+
+func TestBuildConfigAppliesBindingEverywhere(t *testing.T) {
+	jobs := decodeJobs(t, `[
+		{"index":0,"alloc_port":30401,"params":{"socks_port":10808,"config":{
+			"inbounds":[{"port":10808,"protocol":"socks"}],
+			"outbounds":[{"protocol":"vless","streamSettings":{"network":"xhttp","security":"tls"}}]
+		}}},
+		{"index":1,"alloc_port":30402,"params":{"socks_port":10808,"config":{
+			"inbounds":[{"port":10808,"protocol":"socks"}],
+			"outbounds":[{"protocol":"vless","streamSettings":{"network":"tcp","security":"reality","sockopt":{"mark":1}}}]
+		}}}
+	]`)
+	binding, err := netbind.Parse("192.0.2.10", "eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged := buildConfig(jobs, "", binding)
+	for _, tag := range []string{"job-0-out-0", "job-1-out-0", "job-1-frag"} {
+		out := findOutbound(merged.Outbounds, tag)
+		if out == nil {
+			t.Fatalf("missing outbound %s: %+v", tag, merged.Outbounds)
+		}
+		if out["sendThrough"] != "192.0.2.10" {
+			t.Fatalf("%s sendThrough = %v, want 192.0.2.10", tag, out["sendThrough"])
+		}
+		stream, _ := out["streamSettings"].(map[string]any)
+		sockopt, _ := stream["sockopt"].(map[string]any)
+		if sockopt["interface"] != "eth0" {
+			t.Fatalf("%s sockopt.interface = %v, want eth0", tag, sockopt["interface"])
+		}
+	}
+	realitySockopt := findOutbound(merged.Outbounds, "job-1-out-0")["streamSettings"].(map[string]any)["sockopt"].(map[string]any)
+	if realitySockopt["mark"] != float64(1) || realitySockopt["dialerProxy"] != "job-1-frag" {
 		t.Fatalf("existing sockopt keys lost: %+v", realitySockopt)
 	}
 }
@@ -174,7 +213,7 @@ func TestBuildConfigSkipsMalformedJobs(t *testing.T) {
 		{"index":3,"alloc_port":30204,"params":{"socks_port":10808,"config":{"inbounds":[{"port":10808}],"outbounds":[{"protocol":"vless"}]}}}
 	]`)
 
-	merged := buildConfig(jobs, "")
+	merged := buildConfig(jobs, "", netbind.Binding{})
 	if len(merged.Inbounds) != 1 || merged.Inbounds[0]["tag"] != "job-3-in" {
 		t.Fatalf("only the well-formed job should survive: %+v", merged.Inbounds)
 	}

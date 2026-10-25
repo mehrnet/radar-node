@@ -162,6 +162,9 @@ type NodeHealth struct {
 	UptimeSeconds       float64 `json:"uptime_seconds,omitempty"`
 	Pressure            string  `json:"pressure,omitempty"`
 	Path                string  `json:"path,omitempty"`
+	SourceIP            string  `json:"source_ip,omitempty"`
+	BindInterface       string  `json:"bind_interface,omitempty"`
+	BindError           string  `json:"bind_error,omitempty"`
 }
 
 // ModuleVersion is one loaded module's own version/manifest-url, as

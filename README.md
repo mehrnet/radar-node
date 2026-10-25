@@ -149,6 +149,8 @@ radar-node probe http://ip-api.com/json/8.8.8.8 --type fetch
 | `--format` | `json` \| `csv` \| `table` (default `json`) |
 | `--param k=v` | module-specific parameter, repeatable (`tcp`: `tls`,`sni`,`insecure` -- `dns`: `record` (`a`\|`aaaa`\|`ns`\|`mx`\|`txt`\|`cname`\|`ptr`\|`srv`, default `a`), `server`, and (`srv` only) `service`,`proto` -- `http`: `method` -- `fetch`: `method`,`body` this way; `headers`/`fields` need real JSON object values a flat `k=v` flag can't carry, see "Generic fetch and field extraction" under [Modules](#modules) for those, set via a real probe's `params` instead) |
 | `--modules-dir` | load/override modules from `*.yaml`/`*.yml` here, on top of the embedded defaults |
+| `--source-ip` | bind probe sockets to this local IPv4/IPv6 source address (optional `%zone`) |
+| `--bind-interface` | bind probe sockets to this egress interface |
 
 ### `agent` -- long-lived worker
 
@@ -171,6 +173,8 @@ radar-node agent --api-url https://radar-api.mehrnet.com --api-key node_01J...:s
 | `--pool-concurrency` | cap a pooled module's own `test_concurrency` (0 = the module's value) |
 | `--pool-max-jobs` | cap a pooled module's own `max_jobs_per_instance` (0 = the module's value) |
 | `--domain-strategy` | force outbound DNS resolution onto one address family: `as_is`, `use_ipv4`, `use_ip`, `use_ipv6` (default: leave module configs unchanged) |
+| `--source-ip` | bind every probe to this local source address (IPv4/IPv6, optional `%zone`) |
+| `--bind-interface` | bind every probe to this egress interface (may be combined with `--source-ip`) |
 | `--db-path` | SQLite journal for durable results and retained history (default: disabled; supersedes `--spool-dir`) |
 | `--db-max-bytes` | cap the database by pruning delivered history (default `32 MiB`; pending results are never pruned) |
 | `--db-retention` | how long to keep delivered raw results (default `720h`) |
@@ -196,6 +200,35 @@ not set explicitly; the flags above override them. Fast probes still run on
 their interval until the budget is reached; under a very large assignment the
 deferred-job count and interval stretch are visible in heartbeat health and
 the node UI rather than silently dropping work.
+
+### Outbound binding
+
+`--source-ip` and/or `--bind-interface` select the path every check uses.
+The setting is per node: run one agent per WAN, each with its own node ID,
+`--db-path`, and service. Interface binding is the real multi-WAN selector;
+source-IP-only depends on the host's own routing/policy rules and is meant
+for hosts with several addresses. When both are set, the interface constrains
+egress and the source address selects the local IP; a source IP also forces
+the matching address family for DNS.
+
+Linux uses `SO_BINDTODEVICE` (root or `CAP_NET_RAW`), macOS uses
+`IP_BOUND_IF`/`IPV6_BOUND_IF`, and Windows uses
+`IP_UNICAST_IF`/`IPV6_UNICAST_IF`. Native checks, DNS resolution, and the
+generated xray pool config honor the binding. Module subprocesses receive
+`RADAR_SOURCE_IP` and `RADAR_BIND_INTERFACE` for opt-in support, and xray
+outbounds get `sendThrough`/`sockopt.interface` automatically. ICMP interface
+binding is supported on Linux/macOS (Windows ICMP is already limited), and
+engine modules other than xray (WireGuard/OpenVPN) still need a network
+namespace for guaranteed per-WAN egress.
+
+The agent self-tests the binding every 30s. If the interface disappears, the
+source address is gone, or the process lacks permission, it keeps
+heartbeating, pauses probe execution, and reports `bind_error`; radar-api
+marks the node degraded (`bind_unavailable`) so its probes become unknown
+rather than false target failures. Execution resumes automatically when the
+binding works again. `install.sh` forwards and preserves both flags on
+updates; running multiple agents on one host remains a manual service/SQLite
+setup (one state DB per node).
 
 ### Local storage, history, and replay
 

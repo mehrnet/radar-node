@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+
+	"github.com/mehrnet/radar-node/internal/netbind"
 )
 
 // stringifyParam renders a Params value for {{param.<name>}}
@@ -78,6 +80,7 @@ type execContext struct {
 	// for a pool's build_config/start/stop steps.
 	JobsJSONPath string
 	ConfigPath   string
+	Bind         netbind.Binding
 }
 
 // resolve substitutes every {{...}} in argv against ec. Any

@@ -51,6 +51,8 @@ DB_SYNC=""
 SPOOL_DIR=""
 SPOOL_MAX_BYTES=""
 DOMAIN_STRATEGY=""
+SOURCE_IP=""
+BIND_INTERFACE=""
 
 # Optional bundled engine modules (see install/modules/ and
 # https://github.com/mehrnet/static-builds) -- off unless explicitly
@@ -100,6 +102,11 @@ Options:
   --spool-max-bytes=N  cap the legacy result spool (default 16 MiB)
   --domain-strategy=S  force outbound DNS resolution: as_is | use_ipv4 |
                      use_ip | use_ipv6 (use_ipv4 is useful on cellular)
+  --source-ip=IP     bind every probe to this local IPv4/IPv6 source
+                     address (an IPv6 zone may be appended as %iface)
+  --bind-interface=NAME  bind every probe to this egress interface
+                     (Linux needs root/CAP_NET_RAW; may be combined with
+                     --source-ip)
   -h, --help         show this help
 
 Optional bundled engine modules (each fetches a statically-built binary
@@ -149,6 +156,8 @@ for arg in "$@"; do
     --spool-dir=*) SPOOL_DIR="${arg#*=}" ;;
     --spool-max-bytes=*) SPOOL_MAX_BYTES="${arg#*=}" ;;
     --domain-strategy=*) DOMAIN_STRATEGY="${arg#*=}" ;;
+    --source-ip=*) SOURCE_IP="${arg#*=}" ;;
+    --bind-interface=*) BIND_INTERFACE="${arg#*=}" ;;
     --install-module=*)
       m="${arg#*=}"
       case "$m" in xray|wireguard|openvpn) ;; *) err "unknown module: $m (supported: xray, wireguard, openvpn)" ;; esac
@@ -168,6 +177,18 @@ case "$DOMAIN_STRATEGY" in
   ""|as_is|asis|use_ipv4|useipv4|use_ip|useip|use_ipv6|useipv6) ;;
   *) err "--domain-strategy must be one of as_is, use_ipv4, use_ip, use_ipv6" ;;
 esac
+
+if [ -n "$SOURCE_IP" ]; then
+  case "$SOURCE_IP" in
+    *[!0-9A-Fa-f:./%_-]*) err "--source-ip contains unsupported characters" ;;
+  esac
+fi
+if [ -n "$BIND_INTERFACE" ]; then
+  case "$BIND_INTERFACE" in
+    *'"'*|*'`'*|*'$'*|*'\'*|*[[:cntrl:]]*)
+      err "--bind-interface contains unsupported characters" ;;
+  esac
+fi
 
 # $1 = space-separated list (INSTALL_MODULES or REMOVE_MODULES), $2 =
 # module name -- both lists start with a leading space (built via
@@ -319,6 +340,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_spool_dir="$(sed -n 's/.*--spool-dir "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
     existing_spool_max_bytes="$(sed -n 's/.*--spool-max-bytes \([0-9][0-9]*\).*/\1/p' "$existing_unit" | head -n1)"
     existing_domain_strategy="$(sed -n 's/.*--domain-strategy "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_source_ip="$(sed -n 's/.*--source-ip "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
+    existing_bind_interface="$(sed -n 's/.*--bind-interface "\([^"]*\)".*/\1/p' "$existing_unit" | head -n1)"
   else
     existing_api_key="$(awk '/<string>--api-key<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
     existing_api_url="$(awk '/<string>--api-url<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
@@ -327,6 +350,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
     existing_db_max_bytes="$(awk '/<string>--db-max-bytes<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
     existing_db_retention="$(awk '/<string>--db-retention<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
     existing_db_sync="$(awk '/<string>--db-sync<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_source_ip="$(awk '/<string>--source-ip<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
+    existing_bind_interface="$(awk '/<string>--bind-interface<\/string>/{getline; gsub(/<\/?string>/,""); print; exit}' "$existing_unit")"
   fi
 
   if [ -z "$NODE_ID" ] && [ -z "$API_KEY" ] && [ -n "$existing_api_key" ]; then
@@ -348,6 +373,8 @@ if [ -n "$existing_unit" ] && [ -f "$existing_unit" ]; then
   if [ -z "$SPOOL_DIR" ] && [ -n "$existing_spool_dir" ]; then SPOOL_DIR="$existing_spool_dir"; fi
   if [ -z "$SPOOL_MAX_BYTES" ] && [ -n "$existing_spool_max_bytes" ]; then SPOOL_MAX_BYTES="$existing_spool_max_bytes"; fi
   if [ -z "$DOMAIN_STRATEGY" ] && [ -n "$existing_domain_strategy" ]; then DOMAIN_STRATEGY="$existing_domain_strategy"; fi
+  if [ -z "$SOURCE_IP" ] && [ -n "$existing_source_ip" ]; then SOURCE_IP="$existing_source_ip"; fi
+  if [ -z "$BIND_INTERFACE" ] && [ -n "$existing_bind_interface" ]; then BIND_INTERFACE="$existing_bind_interface"; fi
   if [ -n "$DB_PATH" ] && [ -n "$existing_spool_dir" ]; then
     warn "using the SQLite journal; legacy spool files in ${existing_spool_dir} are not imported automatically"
     SPOOL_DIR=""
@@ -956,6 +983,12 @@ if [ -n "$SPOOL_MAX_BYTES" ]; then
 fi
 if [ -n "$DOMAIN_STRATEGY" ]; then
   EXTRA_ARGS="${EXTRA_ARGS} --domain-strategy \"${DOMAIN_STRATEGY}\""
+fi
+if [ -n "$SOURCE_IP" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --source-ip \"${SOURCE_IP}\""
+fi
+if [ -n "$BIND_INTERFACE" ]; then
+  EXTRA_ARGS="${EXTRA_ARGS} --bind-interface \"${BIND_INTERFACE}\""
 fi
 
 start_procd() {

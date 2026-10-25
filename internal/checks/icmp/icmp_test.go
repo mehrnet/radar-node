@@ -2,11 +2,13 @@ package icmp_test
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/checks/icmp"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
 
@@ -31,6 +33,29 @@ func TestCheck_Loopback(t *testing.T) {
 	}
 	if res.LatencyMs == nil {
 		t.Fatal("expected latency_ms to be set")
+	}
+}
+
+func TestCheck_BindsSourceIP(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("127.0.0.2 is not assigned by default on the Windows CI runner")
+	}
+	binding, err := netbind.Parse("127.0.0.2", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := icmp.New()
+	res := c.Check(context.Background(), probe.Options{
+		Target:  "127.0.0.1",
+		Timeout: 2 * time.Second,
+		Seq:     1,
+		Bind:    binding,
+	})
+	if !res.Ok {
+		if isPermissionErr(res.Error) || strings.Contains(res.Error, "cannot assign requested address") {
+			t.Skipf("source-bound ICMP not permitted in this environment: %s", res.Error)
+		}
+		t.Fatalf("expected ok, got error %q", res.Error)
 	}
 }
 

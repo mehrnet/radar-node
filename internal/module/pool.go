@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mehrnet/radar-node/internal/destgate"
+	"github.com/mehrnet/radar-node/internal/netbind"
 	"github.com/mehrnet/radar-node/internal/portalloc"
 	"github.com/mehrnet/radar-node/internal/probe"
 )
@@ -217,7 +218,7 @@ type pendingJob struct {
 // carries -- is covered by it.
 func jobKey(o probe.Options) string {
 	paramsJSON, _ := json.Marshal(o.Params)
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", o.Target, o.Timeout.Milliseconds(), paramsJSON)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s\x00%s", o.Target, o.Timeout.Milliseconds(), paramsJSON, o.Bind.String())))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -226,7 +227,7 @@ func jobKey(o probe.Options) string {
 func hashJobs(jobs []poolJob) string {
 	h := sha256.New()
 	for _, j := range jobs {
-		fmt.Fprintf(h, "%s\x00%d\x00%d\x00%s\n", j.opts.Target, j.opts.Timeout.Milliseconds(), j.port, mustParamsJSON(j.opts.Params))
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00%s\x00%s\n", j.opts.Target, j.opts.Timeout.Milliseconds(), j.port, j.opts.Bind.String(), mustParamsJSON(j.opts.Params))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -481,7 +482,11 @@ func (c *PoolChecker) buildAndStart(jobs []poolJob, key string) (*warmInstance, 
 		cleanupJobs()
 		return nil, fmt.Errorf("reserve config_path: %w", err)
 	}
-	ec := execContext{JobsJSONPath: jobsPath, ConfigPath: configPath}
+	var binding netbind.Binding
+	if len(jobs) > 0 {
+		binding = jobs[0].opts.Bind
+	}
+	ec := execContext{JobsJSONPath: jobsPath, ConfigPath: configPath, Bind: binding}
 
 	runBuild := func() error {
 		buildCtx, cancelBuild := context.WithTimeout(context.Background(), 30*time.Second)
@@ -636,6 +641,7 @@ func (c *PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob)
 		Params:         opts.Params,
 		ParamsJSONPath: paramsPath,
 		AllocPort:      j.port,
+		Bind:           opts.Bind,
 	}
 	return c.m.runAndCollect(jobCtx, *c.m.Run, ec, opts)
 }

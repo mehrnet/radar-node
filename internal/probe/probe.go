@@ -5,6 +5,8 @@ package probe
 import (
 	"context"
 	"time"
+
+	"github.com/mehrnet/radar-node/internal/netbind"
 )
 
 // Options carries everything a Checker needs to run a single probe
@@ -39,6 +41,9 @@ type Options struct {
 	// checks only ever read scalar string values out of it via
 	// Param().
 	Params map[string]any
+	// Bind selects this check's source address and/or egress
+	// interface. Zero keeps the OS default route, exactly as before.
+	Bind netbind.Binding
 }
 
 // Param returns opts.Params[key] as a string, or def if unset or not

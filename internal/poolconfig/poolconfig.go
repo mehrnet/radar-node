@@ -37,6 +37,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/mehrnet/radar-node/internal/netbind"
 )
 
 // Run is the `radar-node poolconfig` entry point. Deliberately exits
@@ -67,7 +69,11 @@ func Run(args []string, _ io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("poolconfig: %w", err)
 	}
-	encoded, err := json.Marshal(buildConfig(jobs, strategy))
+	binding, err := netbind.FromEnv()
+	if err != nil {
+		return fmt.Errorf("poolconfig: %w", err)
+	}
+	encoded, err := json.Marshal(buildConfig(jobs, strategy, binding))
 	if err != nil {
 		return fmt.Errorf("poolconfig: encode config: %w", err)
 	}
@@ -142,7 +148,32 @@ func applyDomainStrategy(outbound map[string]any, strategy string) {
 	outbound["streamSettings"] = stream
 }
 
-func buildConfig(jobs []job, domainStrategy string) mergedConfig {
+// applyBinding makes every generated engine outbound use the node's
+// selected path. sendThrough is the portable source-address option;
+// sockopt.interface is Xray's own device binding (Linux-centric).
+func applyBinding(outbound map[string]any, binding netbind.Binding) {
+	if binding.IsZero() {
+		return
+	}
+	if binding.SourceIP.IsValid() {
+		outbound["sendThrough"] = binding.SourceIP.WithZone("").String()
+	}
+	if binding.Interface != "" {
+		stream, _ := outbound["streamSettings"].(map[string]any)
+		if stream == nil {
+			stream = map[string]any{}
+		}
+		sockopt, _ := stream["sockopt"].(map[string]any)
+		if sockopt == nil {
+			sockopt = map[string]any{}
+		}
+		sockopt["interface"] = binding.Interface
+		stream["sockopt"] = sockopt
+		outbound["streamSettings"] = stream
+	}
+}
+
+func buildConfig(jobs []job, domainStrategy string, binding netbind.Binding) mergedConfig {
 	merged := mergedConfig{
 		Inbounds:  []map[string]any{},
 		Outbounds: []map[string]any{},
@@ -167,6 +198,7 @@ func buildConfig(jobs []job, domainStrategy string) mergedConfig {
 			tag := fmt.Sprintf("job-%d-out-%d", j.Index, i)
 			outbound["tag"] = tag
 			applyDomainStrategy(outbound, domainStrategy)
+			applyBinding(outbound, binding)
 			if primaryTag == "" {
 				primaryTag = tag
 				stream, _ := outbound["streamSettings"].(map[string]any)
@@ -197,6 +229,7 @@ func buildConfig(jobs []job, domainStrategy string) mergedConfig {
 						},
 					}
 					applyDomainStrategy(frag, domainStrategy)
+					applyBinding(frag, binding)
 					merged.Outbounds = append(merged.Outbounds, frag)
 				}
 			}

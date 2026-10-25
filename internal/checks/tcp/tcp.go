@@ -30,9 +30,9 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
-	dialer := net.Dialer{}
+	dialer := opts.Bind.Dialer("tcp")
 	start := time.Now()
-	conn, err := dialer.DialContext(ctx, "tcp", opts.Target)
+	conn, err := dialer.DialContext(ctx, opts.Bind.Network("tcp"), opts.Target)
 	connectElapsed := time.Since(start)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
