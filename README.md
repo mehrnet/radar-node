@@ -230,6 +230,13 @@ binding works again. `install.sh` forwards and preserves both flags on
 updates; running multiple agents on one host remains a manual service/SQLite
 setup (one state DB per node).
 
+Loopback destinations (`127.0.0.0/8`, `::1`, `localhost`) bypass interface
+binding so a local dnsmasq/proxy stays reachable. On OpenWrt, where
+`/etc/resolv.conf` usually points at local dnsmasq, hostname lookups
+therefore follow the resolver's own route rather than the bound WAN; the
+actual probe connection still uses the selected interface. Use IP targets or
+an explicit DNS-check `server` when DNS path selection itself matters.
+
 ### Local storage, history, and replay
 
 `--db-path` enables a single-file SQLite journal. It replaces the JSON

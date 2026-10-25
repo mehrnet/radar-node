@@ -179,6 +179,27 @@ func TestDialerBindsLoopbackSource(t *testing.T) {
 	}
 }
 
+func TestMissingInterfaceStillReachesLoopback(t *testing.T) {
+	// A local resolver/proxy is not egress; binding a WAN interface to
+	// 127.0.0.1 must not make it unreachable.
+	binding, err := Parse("", "radar-definitely-missing0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := binding.DialContext(ctx, "tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("loopback dial should bypass interface binding: %v", err)
+	}
+	client.Close()
+}
+
 func TestInterfaceBindingLoopback(t *testing.T) {
 	var iface string
 	switch runtime.GOOS {

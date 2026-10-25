@@ -126,9 +126,15 @@ func (b Binding) dialer(network string) *net.Dialer {
 	return dialer
 }
 
-// DialContext is suitable for net/http transports and other code that
-// wants the binding without constructing its own dialer.
+// DialContext is suitable for net/http transports, native checks, and
+// resolver callbacks. Loopback destinations never leave the host, so
+// interface binding is skipped for them; otherwise a WAN interface
+// would make a local dnsmasq/proxy unreachable. A source-IP-only
+// binding is preserved, which is what allows loopback source tests.
 func (b Binding) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if b.Interface != "" && isLoopbackAddress(address) {
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
 	return b.Dialer(network).DialContext(ctx, b.Network(network), address)
 }
 
@@ -145,6 +151,9 @@ func (b Binding) resolver() *net.Resolver {
 	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if b.Interface != "" && isLoopbackAddress(address) {
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}
 			return b.dialer(network).DialContext(ctx, b.Network(network), address)
 		},
 	}
@@ -204,7 +213,7 @@ func (b Binding) SelfTest(ctx context.Context) error {
 }
 
 func (b Binding) control(network, address string, raw syscall.RawConn) error {
-	if b.Interface == "" {
+	if b.Interface == "" || isLoopbackAddress(address) {
 		return nil
 	}
 	var sockErr error
@@ -217,6 +226,22 @@ func (b Binding) control(network, address string, raw syscall.RawConn) error {
 		return fmt.Errorf("bind interface %q: %w", b.Interface, sockErr)
 	}
 	return nil
+}
+
+func isLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		host = address
+	}
+	host = strings.Trim(host, "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if zone := strings.LastIndexByte(host, '%'); zone >= 0 {
+		host = host[:zone]
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.Unmap().IsLoopback()
 }
 
 var interfaceIndexes sync.Map

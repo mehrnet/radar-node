@@ -29,9 +29,8 @@ func (c Checker) Check(ctx context.Context, opts probe.Options) probe.Result {
 	ctx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
-	dialer := opts.Bind.Dialer("udp")
 	start := time.Now()
-	conn, err := dialer.DialContext(ctx, opts.Bind.Network("udp"), opts.Target)
+	conn, err := opts.Bind.DialContext(ctx, "udp", opts.Target)
 	if err != nil {
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, err)
 	}
