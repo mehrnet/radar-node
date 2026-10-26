@@ -394,6 +394,166 @@ pool:
 	}
 }
 
+// transientRetryFixture is poolFixture with a run step whose failure
+// count is controlled by a file: each invocation decrements it and
+// exits with jobprobe's all-targets-timeout error until it reaches
+// zero. attemptsPath counts every run, so a test can tell one attempt
+// from a retry.
+func transientRetryFixture(t *testing.T) (module.Module, string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	attemptsPath := filepath.Join(dir, "attempts")
+	failuresPath := filepath.Join(dir, "failures-left")
+
+	buildConfigScript := filepath.Join(dir, "build-config.py")
+	mustWrite(t, buildConfigScript, `
+import shutil, sys
+shutil.copy(sys.argv[1], sys.argv[2])
+`)
+	startScript := filepath.Join(dir, "start.py")
+	mustWrite(t, startScript, `
+import sys, json, socket, threading, time
+with open(sys.argv[1]) as f:
+    jobs = json.load(f)
+def serve(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("127.0.0.1", port))
+    s.listen(5)
+    while True:
+        conn, _ = s.accept()
+        conn.close()
+for j in jobs:
+    threading.Thread(target=serve, args=(j["alloc_port"],), daemon=True).start()
+while True:
+    time.sleep(1)
+`)
+	runScript := filepath.Join(dir, "run.py")
+	mustWrite(t, runScript, `
+import os, socket, sys
+attempts_path = "`+attemptsPath+`"
+try:
+    attempts = int(open(attempts_path).read())
+except FileNotFoundError:
+    attempts = 0
+with open(attempts_path, "w") as f:
+    f.write(str(attempts + 1))
+failures_path = "`+failuresPath+`"
+try:
+    failures = int(open(failures_path).read())
+except FileNotFoundError:
+    failures = 0
+if failures > 0:
+    with open(failures_path, "w") as f:
+        f.write(str(failures - 1))
+    sys.stderr.write("radar-node: jobprobe: all targets failed (https://www.gstatic.com/generate_204: context deadline exceeded)\n")
+    sys.exit(1)
+s = socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=2)
+s.close()
+print('{"latency_ms": 1}')
+`)
+
+	m := loadOne(t, `
+name: transient-retry-mod
+run:
+  command: ["python3", "`+runScript+`", "{{target}}", "{{alloc_port}}"]
+collect:
+  format: writeout_json
+pool:
+  max_jobs_per_instance: 10
+  test_concurrency: 2
+  build_config:
+    command: ["python3", "`+buildConfigScript+`", "{{jobs_json}}", "{{config_path}}"]
+  start:
+    command: ["python3", "`+startScript+`", "{{config_path}}"]
+`)
+	return m, attemptsPath, failuresPath
+}
+
+func writeAttemptCount(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestPoolChecker_RetriesOneTransientTimeoutAfterPriorSuccess(t *testing.T) {
+	m, attemptsPath, failuresPath := transientRetryFixture(t)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+	opts := []probe.Options{jobOpts("a", 1)}
+	opts[0].ProbeID = "probe-a"
+
+	if err := os.WriteFile(failuresPath, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := checker.CheckBatch(context.Background(), opts)[0]; !r.Ok {
+		t.Fatalf("first healthy run should succeed, got %+v", r)
+	}
+
+	// Next cycle: same probe, rotated config (different target = new
+	// job key). The first attempt times out, the confirmation attempt
+	// succeeds. A transient blip must not be reported as down, and a
+	// routine config rotation must not discard the healthy history.
+	rotated := []probe.Options{jobOpts("b", 1)}
+	rotated[0].ProbeID = "probe-a"
+	if err := os.WriteFile(failuresPath, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := checker.CheckBatch(context.Background(), rotated)[0]; !r.Ok {
+		t.Fatalf("confirmation attempt should recover the transient timeout, got %+v", r)
+	}
+	if got := writeAttemptCount(t, attemptsPath); got != 3 {
+		t.Fatalf("run step invoked %d times, want 3 (one initial success, one timeout, one retry)", got)
+	}
+}
+
+func TestPoolChecker_DoesNotRetryAfterAPreviousFailure(t *testing.T) {
+	m, attemptsPath, failuresPath := transientRetryFixture(t)
+	checker := module.NewChecker(m).(probe.BatchChecker)
+	opts := []probe.Options{jobOpts("a", 1)}
+	opts[0].ProbeID = "probe-a"
+
+	if err := os.WriteFile(failuresPath, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := checker.CheckBatch(context.Background(), opts)[0]; !r.Ok {
+		t.Fatalf("first healthy run should succeed, got %+v", r)
+	}
+
+	// First failing cycle: prior outcome was healthy, so it gets one
+	// retry (both attempts fail).
+	if err := os.WriteFile(failuresPath, []byte("2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := checker.CheckBatch(context.Background(), opts)[0]; r.Ok {
+		t.Fatal("persistent failure should still fail after its confirmation attempt")
+	}
+	if got := writeAttemptCount(t, attemptsPath); got != 3 {
+		t.Fatalf("run step invoked %d times, want 3 (success + failure + one retry)", got)
+	}
+
+	// Second failing cycle: the last outcome is now a failure, so a
+	// chronically dead config must not keep paying for retries.
+	if err := os.WriteFile(failuresPath, []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := checker.CheckBatch(context.Background(), opts)[0]; r.Ok {
+		t.Fatal("expected the dead config to keep failing")
+	}
+	if got := writeAttemptCount(t, attemptsPath); got != 4 {
+		t.Fatalf("run step invoked %d times, want 4 (no retry after a prior failure)", got)
+	}
+}
+
 func TestPoolChecker_CheckBatch_TestsEveryJobAgainstItsOwnPort(t *testing.T) {
 	m, _ := poolFixture(t, 10, 2)
 	checker := module.NewChecker(m).(probe.BatchChecker)

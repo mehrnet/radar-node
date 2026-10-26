@@ -14,6 +14,13 @@ import (
 type Options struct {
 	Target  string
 	Timeout time.Duration
+	// ProbeID identifies the probe this check belongs to when the
+	// caller knows it (the agent always does). Used only for local
+	// adaptive state -- currently the pooled checker's "was this job
+	// healthy last time?" retry gate -- so that state survives a
+	// benign config rotation instead of growing one entry per config
+	// hash. Never forwarded to a module or the server.
+	ProbeID string
 	// Destination is the real network endpoint this check will
 	// actually connect to, for internal/destgate's own rate-limiting
 	// purposes -- usually just Target (already exactly right for a

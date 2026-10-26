@@ -70,6 +70,13 @@ type PoolChecker struct {
 	// portalloc.Alloc is stateless, so releasing a port is just
 	// deleting its entry here.
 	ports map[string]int
+	// lastOk remembers the last completed outcome per probe id so a
+	// timeout can be retried once only when the job was working before.
+	// Without that gate, retrying a chronically dead subscription
+	// config would double its timeout cost every cycle for no benefit.
+	// ProbeId rather than the config hash keeps this bounded across
+	// Reality's routine camouflage-field rotation.
+	lastOk sync.Map
 }
 
 type warmInstance struct {
@@ -274,7 +281,7 @@ func (c *PoolChecker) runSlot(ctx context.Context, slot int, chunk []pendingJob,
 			usedPorts[port] = true
 			c.ports[p.key] = port
 		}
-		jobs[i] = poolJob{idx: p.idx, opts: p.o, port: port}
+		jobs[i] = poolJob{idx: p.idx, key: p.key, opts: p.o, port: port}
 	}
 	for k := range c.ports {
 		if !live[k] {
@@ -419,7 +426,7 @@ func (c *PoolChecker) runBisected(ctx context.Context, chunk []pendingJob, resul
 			}
 			c.ports[p.key] = port
 		}
-		jobs[i] = poolJob{idx: p.idx, opts: p.o, port: port}
+		jobs[i] = poolJob{idx: p.idx, key: p.key, opts: p.o, port: port}
 	}
 	c.mu.Unlock()
 	c.runEphemeral(ctx, jobs, results)
@@ -615,6 +622,7 @@ func (c *PoolChecker) Close() {
 // per-job Run step needs to test it.
 type poolJob struct {
 	idx  int // index into this instance's own batch/out slices (runInstance's params), not CheckBatch's full opts
+	key  string
 	opts probe.Options
 	port int
 }
@@ -672,6 +680,12 @@ func (c *PoolChecker) testJobs(ctx context.Context, jobs []poolJob, out []probe.
 // its own to actually run in.
 func (c *PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob) probe.Result {
 	opts := j.opts
+	retryKey := opts.ProbeID
+	if retryKey == "" {
+		// Single-CLI/unit-test callers don't have a probe id; the
+		// content hash is still a useful fallback there.
+		retryKey = j.key
+	}
 
 	if err := destgate.Wait(ctx, opts.Destination); err != nil {
 		// Skip, not Fail -- never actually ran, so nothing to report at
@@ -690,10 +704,10 @@ func (c *PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob)
 	// pool-concurrency cap, most of a large batch could expire before
 	// ever making a request.
 	jobCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
-	defer cancel()
 
 	paramsPath, cleanup, err := writeParamsJSON(opts.Params)
 	if err != nil {
+		cancel()
 		return probe.Fail(c.Type(), opts.Target, opts.Seq, fmt.Errorf("write params_json: %w", err))
 	}
 	defer cleanup()
@@ -706,7 +720,54 @@ func (c *PoolChecker) testJob(ctx context.Context, sem chan struct{}, j poolJob)
 		AllocPort:      j.port,
 		Bind:           opts.Bind,
 	}
-	return c.m.runAndCollect(jobCtx, *c.m.Run, ec, opts)
+	result := c.m.runAndCollect(jobCtx, *c.m.Run, ec, opts)
+	cancel()
+
+	// A healthy proxy occasionally loses a single xray handshake to a
+	// provider path blip and answers every target with a deadline
+	// error, then works fine on its next cycle. Confirm that kind of
+	// failure once before reporting it as down. Deliberately gated on
+	// the job's own last outcome, so the chronically dead subscription
+	// configs that already fail every cycle never pay a second full
+	// timeout -- and a genuine outage still fails after this one
+	// confirmation attempt.
+	if c.shouldRetryTransient(retryKey, result) {
+		select {
+		case <-time.After(transientRetryBackoff):
+		case <-ctx.Done():
+			c.lastOk.Store(retryKey, result.Ok)
+			return result
+		}
+		retryCtx, cancelRetry := context.WithTimeout(ctx, opts.Timeout)
+		result = c.m.runAndCollect(retryCtx, *c.m.Run, ec, opts)
+		cancelRetry()
+	}
+	c.lastOk.Store(retryKey, result.Ok)
+	return result
+}
+
+// transientRetryBackoff is the pause between a previously-healthy
+// xray job's timeout and its one confirmation attempt: long enough for
+// a brief provider path reset to clear, short enough to stay well
+// inside a tick.
+const transientRetryBackoff = time.Second
+
+// shouldRetryTransient reports whether result is a jobprobe timeout
+// (not a config rejection, pool build failure, or HTTP answer) and the
+// same job succeeded the last time it ran. jobprobe is xray's own
+// helper, so the error-prefix check keeps this policy scoped to the
+// prober that has the flaky-upstream shape without hard-coding the
+// module name.
+func (c *PoolChecker) shouldRetryTransient(key string, result probe.Result) bool {
+	if key == "" || result.Ok || result.Skip || result.ErrorCode != "" {
+		return false
+	}
+	prior, ok := c.lastOk.Load(key)
+	if !ok || prior != true {
+		return false
+	}
+	return strings.Contains(result.Error, "jobprobe:") &&
+		(strings.Contains(result.Error, "context deadline exceeded") || strings.Contains(result.Error, "i/o timeout"))
 }
 
 // failJobs fails every job in jobs identically -- used when an

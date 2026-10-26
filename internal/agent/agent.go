@@ -1376,6 +1376,7 @@ func (a *agent) optionsFor(pr wire.ProbeSnapshot, seq int) probe.Options {
 	return probe.Options{
 		Target:      pr.Target,
 		Timeout:     timeout,
+		ProbeID:     pr.ID,
 		Seq:         seq,
 		Params:      pr.Params,
 		Destination: destinationFor(pr),
